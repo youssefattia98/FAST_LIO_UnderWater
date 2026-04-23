@@ -1,16 +1,15 @@
 /**:
     ros__parameters:
-        max_iteration: 3
-        filter_size_surf: 0.5
-        filter_size_map: 0.5
-        cube_side_length: 1000.0
-        runtime_pos_log_enable: false
+        max_iteration: 8
+        filter_size_surf: 0.3
+        filter_size_map: 0.3
+        cube_side_length: 5.0
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/points_raw"
-            imu_topic:  "/imu/data"
-            time_sync_en: false
+            lid_topic:  "/sonar_point_cloud"
+            imu_topic:  "/auv/imu/data_raw"
+            time_sync_en: true
             time_offset_lidar_to_imu: 0.0
 
         preprocess:
@@ -24,10 +23,10 @@
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_est_en:  false
-            extrinsic_T: [ 0.04165, 0.02326, -0.0284 ]
-            extrinsic_R: [ 1., 0., 0.,
-                        0., 1., 0.,
-                        0., 0., 1.]
+            extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
+            extrinsic_R: [ 0.965925826, 0.0, 0.258819045,
+                            0.0,         1.0, 0.0,
+                            -0.258819045, 0.0, 0.965925826 ]
 
         publish:
             path_en:  false
