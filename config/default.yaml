@@ -10,10 +10,9 @@
             lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
-            time_sync_en: true
-            time_offset_lidar_to_imu: 0.0
-            imu_only_odom_en: true
-            imu_only_timeout: 0.25
+            imu_rate_hz: 25.0
+            lidar_timeout: 0.25
+            gravity_m_s2: 9.8100004196167
 
         preprocess:
             blind: 0.2
@@ -25,7 +24,6 @@
             b_gyr_cov: 0.0001
             fov_degree:    90.0
             det_range:     15.0
-            extrinsic_est_en:  false
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
             extrinsic_R: [ 0.965925826, 0.0, 0.258819045,
                             0.0,         1.0, 0.0,

@@ -71,14 +71,12 @@
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
-bool   pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
-bool   imu_only_odom_en = false;
+bool   pcd_save_en = false, path_en = true;
 /**************************/
 
 float res_last[100000] = {0.0};
 float DET_RANGE = 300.0f;
 const float MOV_THRESHOLD = 1.5f;
-double time_diff_lidar_to_imu = 0.0;
 
 mutex mtx_buffer;
 condition_variable sig_buffer;
@@ -91,7 +89,8 @@ double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
-double last_processed_time = -1.0, imu_only_timeout = 0.25;
+double last_processed_time = -1.0, lidar_timeout = 0.25, imu_rate_hz = 100.0;
+double gravity_m_s2 = G_m_s2;
 int    effct_feat_num = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -288,22 +287,11 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     sig_buffer.notify_all();
 }
 
-double timediff_lidar_wrt_imu = 0.0;
-bool   timediff_set_flg = false;
-
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
     publish_count ++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
-    
-
-    msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
-    if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
-    {
-        msg->header.stamp = \
-        rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
-    }
 
     double timestamp = get_time_sec(msg->header.stamp);
 
@@ -311,7 +299,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
     if (timestamp < last_timestamp_imu)
     {
-        std::cerr << "lidar loop back, clear buffer" << std::endl;
+        std::cerr << "imu loop back, clear buffer" << std::endl;
         imu_buffer.clear();
     }
 
@@ -324,6 +312,16 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
+double expected_imu_period()
+{
+    return 1.0 / (imu_rate_hz > 1.0 ? imu_rate_hz : 1.0);
+}
+
+double expected_imu_timeout()
+{
+    return 2.5 * expected_imu_period();
+}
+
 bool sync_packages(MeasureGroup &meas)
 {
     while (!lidar_pushed && !lidar_buffer.empty() && last_processed_time > 0.0 &&
@@ -389,21 +387,28 @@ bool sync_packages(MeasureGroup &meas)
 
 bool sync_imu_only_packages(MeasureGroup &meas)
 {
-    if (!imu_only_odom_en || !lidar_buffer.empty() || lidar_pushed || imu_buffer.size() < 2) {
+    if (!lidar_buffer.empty() || lidar_pushed || imu_buffer.empty()) {
         return false;
     }
 
     const double latest_imu_time = get_time_sec(imu_buffer.back()->header.stamp);
-    if (last_timestamp_lidar > 0.0 && latest_imu_time - last_timestamp_lidar < imu_only_timeout) {
+    if (last_timestamp_lidar > 0.0 && latest_imu_time - last_timestamp_lidar < lidar_timeout) {
         return false;
     }
     if (last_processed_time > 0.0 && latest_imu_time <= last_processed_time + 1e-6) {
         return false;
     }
+    const double first_imu_time = get_time_sec(imu_buffer.front()->header.stamp);
+    if (last_processed_time > 0.0 && first_imu_time - last_processed_time > expected_imu_timeout())
+    {
+        std::cerr << "imu timeout: next imu is " << first_imu_time - last_processed_time
+                  << " s after the last processed state; expected about "
+                  << expected_imu_period() << " s from imu_rate_hz" << std::endl;
+    }
 
     meas.imu.clear();
     meas.lidar.reset(new PointCloudXYZI());
-    meas.lidar_beg_time = last_processed_time > 0.0 ? last_processed_time : get_time_sec(imu_buffer.front()->header.stamp);
+    meas.lidar_beg_time = last_processed_time > 0.0 ? last_processed_time : first_imu_time;
     meas.lidar_end_time = latest_imu_time;
     lidar_end_time = meas.lidar_end_time;
 
@@ -764,8 +769,6 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     {
         const PointType &laser_p  = laserCloudOri->points[i];
         V3D point_this_be(laser_p.x, laser_p.y, laser_p.z);
-        M3D point_be_crossmat;
-        point_be_crossmat << SKEW_SYM_MATRX(point_this_be);
         V3D point_this = s.offset_R_L_I * point_this_be + s.offset_T_L_I;
         M3D point_crossmat;
         point_crossmat<<SKEW_SYM_MATRX(point_this);
@@ -777,15 +780,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** calculate the Measuremnt Jacobian matrix H ***/
         V3D C(s.rot.conjugate() *norm_vec);
         V3D A(point_crossmat * C);
-        if (extrinsic_est_en)
-        {
-            V3D B(point_be_crossmat * s.offset_R_L_I.conjugate() * C); //s.rot.conjugate()*norm_vec);
-            ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
-        }
-        else
-        {
-            ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-        }
+        ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
 
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
@@ -809,10 +804,9 @@ public:
         this->declare_parameter<string>("common.lid_topic", "/points_raw");
         this->declare_parameter<string>("common.imu_topic", "/imu/data");
         this->declare_parameter<string>("common.world_frame", "world");
-        this->declare_parameter<bool>("common.time_sync_en", false);
-        this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
-        this->declare_parameter<bool>("common.imu_only_odom_en", false);
-        this->declare_parameter<double>("common.imu_only_timeout", 0.25);
+        this->declare_parameter<double>("common.imu_rate_hz", 100.0);
+        this->declare_parameter<double>("common.lidar_timeout", 0.25);
+        this->declare_parameter<double>("common.gravity_m_s2", G_m_s2);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -829,7 +823,6 @@ public:
         this->declare_parameter<int>("preprocess.scan_rate", 10);
         this->declare_parameter<int>("point_filter_num", 2);
         this->declare_parameter<bool>("feature_extract_enable", false);
-        this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
@@ -846,10 +839,9 @@ public:
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/points_raw");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/imu/data");
         this->get_parameter_or<string>("common.world_frame", world_frame, "world");
-        this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
-        this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
-        this->get_parameter_or<bool>("common.imu_only_odom_en", imu_only_odom_en, false);
-        this->get_parameter_or<double>("common.imu_only_timeout", imu_only_timeout, 0.25);
+        this->get_parameter_or<double>("common.imu_rate_hz", imu_rate_hz, 100.0);
+        this->get_parameter_or<double>("common.lidar_timeout", lidar_timeout, 0.25);
+        this->get_parameter_or<double>("common.gravity_m_s2", gravity_m_s2, G_m_s2);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
@@ -866,11 +858,20 @@ public:
         this->get_parameter_or<int>("preprocess.scan_rate", p_pre->SCAN_RATE, 10);
         this->get_parameter_or<int>("point_filter_num", p_pre->point_filter_num, 2);
         this->get_parameter_or<bool>("feature_extract_enable", p_pre->feature_enabled, false);
-        this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
+        if (imu_rate_hz <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(), "common.imu_rate_hz must be positive. Falling back to 100 Hz.");
+            imu_rate_hz = 100.0;
+        }
+        if (gravity_m_s2 <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(), "common.gravity_m_s2 must be positive. Falling back to %.2f m/s^2.", G_m_s2);
+            gravity_m_s2 = G_m_s2;
+        }
 
         path.header.stamp = this->get_clock()->now();
         path.header.frame_id ="camera_init";
@@ -895,6 +896,7 @@ public:
         Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
         Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
+        p_imu->set_gravity(gravity_m_s2);
         p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
@@ -925,8 +927,9 @@ public:
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
 
         //------------------------------------------------------------------------------------------------------
-        auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
-        timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
+        auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double>(expected_imu_period()));
+        timer_ = rclcpp::create_timer(this, this->get_clock(), period, std::bind(&LaserMappingNode::timer_callback, this));
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 

@@ -46,6 +46,7 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  void set_gravity(const double gravity_m_s2);
   bool IsInitialized() const;
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
@@ -75,6 +76,7 @@ class ImuProcess
   V3D mean_gyr;
   V3D angvel_last;
   V3D acc_s_last;
+  double gravity_m_s2_;
   double start_timestamp_;
   double last_lidar_end_time_;
   int    init_iter_num = 1;
@@ -83,7 +85,7 @@ class ImuProcess
 };
 
 ImuProcess::ImuProcess()
-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), last_lidar_end_time_(-1.0)
+    : b_first_frame_(true), imu_need_init_(true), gravity_m_s2_(G_m_s2), start_timestamp_(-1), last_lidar_end_time_(-1.0)
 {
   init_iter_num = 1;
   Q = process_noise_cov();
@@ -155,6 +157,11 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 
+void ImuProcess::set_gravity(const double gravity_m_s2)
+{
+  gravity_m_s2_ = gravity_m_s2;
+}
+
 bool ImuProcess::IsInitialized() const
 {
   return !imu_need_init_;
@@ -197,7 +204,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
-  init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
+  init_state.grav = S2(- mean_acc / mean_acc.norm() * gravity_m_s2_);
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
   init_state.bg  = mean_gyr;
@@ -264,7 +271,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
-    acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
+    acc_avr     = acc_avr * gravity_m_s2_ / mean_acc.norm(); // - state_inout.ba;
 
     if(head_stamp < last_lidar_end_time_)
     {
@@ -363,7 +370,7 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     state_ikfom imu_state = kf_state.get_x();
     if (init_iter_num > MAX_INI_COUNT)
     {
-      cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
+      cov_acc *= pow(gravity_m_s2_ / mean_acc.norm(), 2);
       imu_need_init_ = false;
 
       cov_acc = cov_acc_scale;
