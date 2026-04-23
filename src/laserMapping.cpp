@@ -72,6 +72,7 @@ double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_ti
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+bool   imu_only_odom_en = false;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -90,6 +91,7 @@ double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+double last_processed_time = -1.0, imu_only_timeout = 0.25;
 int    effct_feat_num = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -324,6 +326,15 @@ double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
+    while (!lidar_pushed && !lidar_buffer.empty() && last_processed_time > 0.0 &&
+           time_buffer.front() < last_processed_time - 1e-4)
+    {
+        std::cerr << "drop stale lidar scan at " << time_buffer.front()
+                  << " because EKF is already propagated to " << last_processed_time << std::endl;
+        lidar_buffer.pop_front();
+        time_buffer.pop_front();
+    }
+
     if (lidar_buffer.empty() || imu_buffer.empty()) {
         return false;
     }
@@ -374,6 +385,42 @@ bool sync_packages(MeasureGroup &meas)
     time_buffer.pop_front();
     lidar_pushed = false;
     return true;
+}
+
+bool sync_imu_only_packages(MeasureGroup &meas)
+{
+    if (!imu_only_odom_en || !lidar_buffer.empty() || lidar_pushed || imu_buffer.size() < 2) {
+        return false;
+    }
+
+    const double latest_imu_time = get_time_sec(imu_buffer.back()->header.stamp);
+    if (last_timestamp_lidar > 0.0 && latest_imu_time - last_timestamp_lidar < imu_only_timeout) {
+        return false;
+    }
+    if (last_processed_time > 0.0 && latest_imu_time <= last_processed_time + 1e-6) {
+        return false;
+    }
+
+    meas.imu.clear();
+    meas.lidar.reset(new PointCloudXYZI());
+    meas.lidar_beg_time = last_processed_time > 0.0 ? last_processed_time : get_time_sec(imu_buffer.front()->header.stamp);
+    meas.lidar_end_time = latest_imu_time;
+    lidar_end_time = meas.lidar_end_time;
+
+    while (!imu_buffer.empty())
+    {
+        const double imu_time = get_time_sec(imu_buffer.front()->header.stamp);
+        if (last_processed_time > 0.0 && imu_time <= last_processed_time + 1e-6)
+        {
+            imu_buffer.pop_front();
+            continue;
+        }
+        if (imu_time > latest_imu_time) break;
+        meas.imu.push_back(imu_buffer.front());
+        imu_buffer.pop_front();
+    }
+
+    return !meas.imu.empty();
 }
 
 int process_increments = 0;
@@ -567,13 +614,23 @@ void set_posestamp(T & out)
     
 }
 
+void update_state_outputs()
+{
+    state_point = kf.get_x();
+    euler_cur = SO3ToEuler(state_point.rot);
+    pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+    geoQuat.x = state_point.rot.coeffs()[0];
+    geoQuat.y = state_point.rot.coeffs()[1];
+    geoQuat.z = state_point.rot.coeffs()[2];
+    geoQuat.w = state_point.rot.coeffs()[3];
+}
+
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
     odomAftMapped.header.frame_id = "camera_init";
     odomAftMapped.child_frame_id = "body";
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
-    pubOdomAftMapped->publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
     {
@@ -585,6 +642,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 4] = P(k, 1);
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
+    pubOdomAftMapped->publish(odomAftMapped);
 
     geometry_msgs::msg::TransformStamped trans;
     trans.header.frame_id = "camera_init";
@@ -753,6 +811,8 @@ public:
         this->declare_parameter<string>("common.world_frame", "world");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+        this->declare_parameter<bool>("common.imu_only_odom_en", false);
+        this->declare_parameter<double>("common.imu_only_timeout", 0.25);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -788,6 +848,8 @@ public:
         this->get_parameter_or<string>("common.world_frame", world_frame, "world");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+        this->get_parameter_or<bool>("common.imu_only_odom_en", imu_only_odom_en, false);
+        this->get_parameter_or<double>("common.imu_only_timeout", imu_only_timeout, 0.25);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
@@ -878,7 +940,15 @@ public:
 private:
     void timer_callback()
     {
-        if(sync_packages(Measures))
+        bool imu_only_measure = false;
+        bool has_measurement = sync_packages(Measures);
+        if (!has_measurement)
+        {
+            imu_only_measure = sync_imu_only_packages(Measures);
+            has_measurement = imu_only_measure;
+        }
+
+        if(has_measurement)
         {
             if (flg_first_scan)
             {
@@ -898,12 +968,24 @@ private:
             t0 = omp_get_wtime();
 
             p_imu->Process(Measures, kf, feats_undistort);
-            state_point = kf.get_x();
-            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            last_processed_time = Measures.lidar_end_time;
+            update_state_outputs();
+
+            if (!p_imu->IsInitialized())
+            {
+                return;
+            }
+
+            if (imu_only_measure)
+            {
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                return;
+            }
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
 
@@ -931,6 +1013,7 @@ private:
                     }
                     ikdtree.Build(feats_down_world->points);
                 }
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
             int featsFromMapNum = ikdtree.validnum();
@@ -941,7 +1024,8 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN(this->get_logger(), "Too few points, publish IMU-only odometry for this scan.\n");
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
             
@@ -967,13 +1051,7 @@ private:
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
-            state_point = kf.get_x();
-            euler_cur = SO3ToEuler(state_point.rot);
-            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
-            geoQuat.x = state_point.rot.coeffs()[0];
-            geoQuat.y = state_point.rot.coeffs()[1];
-            geoQuat.z = state_point.rot.coeffs()[2];
-            geoQuat.w = state_point.rot.coeffs()[3];
+            update_state_outputs();
 
             double t_update_end = omp_get_wtime();
 

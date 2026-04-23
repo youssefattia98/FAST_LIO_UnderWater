@@ -46,6 +46,7 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  bool IsInitialized() const;
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
@@ -82,7 +83,7 @@ class ImuProcess
 };
 
 ImuProcess::ImuProcess()
-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1)
+    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), last_lidar_end_time_(-1.0)
 {
   init_iter_num = 1;
   Q = process_noise_cov();
@@ -108,6 +109,7 @@ void ImuProcess::Reset()
   angvel_last       = Zero3d;
   imu_need_init_    = true;
   start_timestamp_  = -1;
+  last_lidar_end_time_ = -1.0;
   init_iter_num     = 1;
   v_imu_.clear();
   IMUpose.clear();
@@ -151,6 +153,11 @@ void ImuProcess::set_gyr_bias_cov(const V3D &b_g)
 void ImuProcess::set_acc_bias_cov(const V3D &b_a)
 {
   cov_bias_acc = b_a;
+}
+
+bool ImuProcess::IsInitialized() const
+{
+  return !imu_need_init_;
 }
 
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
