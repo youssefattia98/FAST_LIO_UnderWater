@@ -9,6 +9,7 @@
         common:
             lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
+            world_frame: "World"
             time_sync_en: true
             time_offset_lidar_to_imu: 0.0
 

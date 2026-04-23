@@ -57,6 +57,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "preprocess.h"
@@ -82,7 +83,7 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string map_file_path, lid_topic, imu_topic, world_frame;
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -749,6 +750,7 @@ public:
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/points_raw");
         this->declare_parameter<string>("common.imu_topic", "/imu/data");
+        this->declare_parameter<string>("common.world_frame", "world");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
         this->declare_parameter<double>("filter_size_corner", 0.5);
@@ -783,6 +785,7 @@ public:
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/points_raw");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/imu/data");
+        this->get_parameter_or<string>("common.world_frame", world_frame, "world");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
@@ -844,6 +847,20 @@ public:
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+
+        geometry_msgs::msg::TransformStamped world_to_camera_init;
+        world_to_camera_init.header.stamp = this->get_clock()->now();
+        world_to_camera_init.header.frame_id = world_frame;
+        world_to_camera_init.child_frame_id = "camera_init";
+        world_to_camera_init.transform.translation.x = 0.0;
+        world_to_camera_init.transform.translation.y = 0.0;
+        world_to_camera_init.transform.translation.z = 0.0;
+        world_to_camera_init.transform.rotation.x = 0.0;
+        world_to_camera_init.transform.rotation.y = 0.0;
+        world_to_camera_init.transform.rotation.z = 0.0;
+        world_to_camera_init.transform.rotation.w = 1.0;
+        static_tf_broadcaster_->sendTransform(world_to_camera_init);
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
@@ -996,6 +1013,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
