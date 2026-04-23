@@ -2,7 +2,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <livox_ros_driver2/msg/custom_msg.hpp>
 
 using namespace std;
 
@@ -13,11 +12,8 @@ typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
 enum LID_TYPE
 {
-  AVIA = 1,
-  VELO16,
-  OUST64,
-  MID360
-};  //{1, 2, 3}
+  XYZI = 0
+};
 enum TIME_UNIT
 {
   SEC = 0,
@@ -112,18 +108,18 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_ros::Point,
     (std::uint32_t, range, range)
 )
 
-namespace livox_ros
+namespace mid360_ros
 {
 typedef struct {
   float x;            /**< X axis, Unit:m */
   float y;            /**< Y axis, Unit:m */
   float z;            /**< Z axis, Unit:m */
   float reflectivity; /**< Reflectivity   */
-  uint8_t tag;        /**< Livox point tag   */
+  uint8_t tag;        /**< Point tag   */
   uint8_t line;       /**< Laser line id     */
-} LivoxPointXyzrtl;
+} PointXyzrtl;
 }
-POINT_CLOUD_REGISTER_POINT_STRUCT(livox_ros::LivoxPointXyzrtl,
+POINT_CLOUD_REGISTER_POINT_STRUCT(mid360_ros::PointXyzrtl,
     (float, x, x)
     (float, y, y)
     (float, z, z)
@@ -140,14 +136,13 @@ class Preprocess
   Preprocess();
   ~Preprocess();
   
-  void process(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
   // sensor_msgs::PointCloud2::ConstPtr pointcloud;
   PointCloudXYZI pl_full, pl_corn, pl_surf;
-  PointCloudXYZI pl_buff[128]; //maximum 128 line lidar
-  vector<orgtype> typess[128]; //maximum 128 line lidar
+  PointCloudXYZI pl_buff[128]; // kept for legacy feature extraction internals
+  vector<orgtype> typess[128];
   float time_unit_scale;
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, time_unit;
   double blind;
@@ -155,7 +150,6 @@ class Preprocess
   // ros::Publisher pub_full, pub_surf, pub_corn;
 
 private:
-  void avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg);
   void oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
