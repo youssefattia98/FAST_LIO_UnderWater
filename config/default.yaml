@@ -3,14 +3,14 @@
         max_iteration: 8
         filter_size_surf: 0.3
         filter_size_map: 0.3
-        cube_side_length: 5.0
+        cube_side_length: 60.0
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/sonar_point_clou"
+            lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
-            imu_rate_hz: 25.0
+            imu_rate_hz: 100.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.8100004196167
 
@@ -18,10 +18,10 @@
             blind: 0.2
 
         mapping:
-            acc_cov: 0.1
-            gyr_cov: 0.1
-            b_acc_cov: 0.0001
-            b_gyr_cov: 0.0001
+            acc_cov: 0.001
+            gyr_cov: 0.000001
+            b_acc_cov: 0.0000001
+            b_gyr_cov: 0.0000001
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]

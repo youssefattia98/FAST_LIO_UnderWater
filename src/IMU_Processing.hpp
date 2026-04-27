@@ -4,6 +4,7 @@
 #include <mutex>
 #include <thread>
 #include <fstream>
+#include <iomanip>
 #include <csignal>
 #include <so3_math.h>
 #include <Eigen/Eigen>
@@ -376,6 +377,19 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
       std::cout << "IMU Initial Done" << std::endl;
+      {
+        const state_ikfom st = kf_state.get_x();
+        std::cout << "[FLIO_INIT]"
+                  << " t=" << std::fixed << std::setprecision(6) << first_lidar_time
+                  << " mean_acc=[" << mean_acc.transpose() << "]"
+                  << " |mean_acc|=" << mean_acc.norm()
+                  << " mean_gyr=[" << mean_gyr.transpose() << "]"
+                  << " grav_init=[" << st.grav[0] << "," << st.grav[1] << "," << st.grav[2] << "]"
+                  << " g_set=" << gravity_m_s2_
+                  << " bg_init=[" << st.bg.transpose() << "]"
+                  << " N=" << init_iter_num
+                  << std::endl;
+      }
       // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience: %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
       //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
       fout_imu.open(DEBUG_FILE_DIR("imu.txt"),ios::out);
