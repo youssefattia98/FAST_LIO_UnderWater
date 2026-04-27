@@ -66,8 +66,9 @@
 #include <ikd-Tree/ikd_Tree.h>
 
 #define INIT_TIME           (0.1)
-#define LASER_POINT_COV     (0.001)
+#define LASER_POINT_COV_DEFAULT (0.001)
 #define PUBFRAME_PERIOD     (20)
+double LASER_POINT_COV = LASER_POINT_COV_DEFAULT;
 
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
@@ -89,6 +90,8 @@ string map_file_path, lid_topic, imu_topic, world_frame;
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
+bool noiseless_imu = false;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double last_processed_time = -1.0, lidar_timeout = 0.25, imu_rate_hz = 100.0;
@@ -860,6 +863,8 @@ public:
         this->declare_parameter<double>("mapping.acc_cov", 0.1);
         this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
+        this->declare_parameter<bool>("mapping.noiseless_imu", false);
+        this->declare_parameter<double>("mapping.laser_point_cov", LASER_POINT_COV_DEFAULT);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.scan_line", 16);
         this->declare_parameter<int>("preprocess.timestamp_unit", US);
@@ -895,6 +900,8 @@ public:
         this->get_parameter_or<double>("mapping.acc_cov",acc_cov,0.1);
         this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
+        this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
+        this->get_parameter_or<double>("mapping.laser_point_cov",LASER_POINT_COV,double(LASER_POINT_COV_DEFAULT));
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
@@ -914,6 +921,23 @@ public:
         {
             RCLCPP_WARN(this->get_logger(), "common.gravity_m_s2 must be positive. Falling back to %.2f m/s^2.", G_m_s2);
             gravity_m_s2 = G_m_s2;
+        }
+        if (noiseless_imu)
+        {
+            // Simulation-only mode: the IMU has zero bias/noise, so do not let
+            // LiDAR residuals rewrite bias or gravity states to explain scan
+            // mismatch. Real IMUs should leave this false and use normal covariances.
+            b_acc_cov = std::min(b_acc_cov, 1e-10);
+            b_gyr_cov = std::min(b_gyr_cov, 1e-10);
+            init_b_acc_cov = 1e-10;
+            init_b_gyr_cov = 1e-10;
+            init_grav_cov = 1e-10;
+        }
+        else
+        {
+            init_b_acc_cov = 0.001;
+            init_b_gyr_cov = 0.0001;
+            init_grav_cov = 0.00001;
         }
 
         path.header.stamp = this->get_clock()->now();
@@ -944,6 +968,9 @@ public:
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
         p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+        p_imu->set_initial_cov(V3D(init_b_gyr_cov, init_b_gyr_cov, init_b_gyr_cov),
+                               V3D(init_b_acc_cov, init_b_acc_cov, init_b_acc_cov),
+                               init_grav_cov);
 
         fill(epsi, epsi+23, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
@@ -980,9 +1007,10 @@ public:
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
 
         //------------------------------------------------------------------------------------------------------
-        auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::duration<double>(expected_imu_period()));
-        timer_ = rclcpp::create_timer(this, this->get_clock(), period, std::bind(&LaserMappingNode::timer_callback, this));
+        // Drive processing from wall time so rosbag replay can drain buffered
+        // IMU/LiDAR messages even after simulated /clock stops publishing.
+        timer_ = this->create_wall_timer(std::chrono::milliseconds(1),
+                                         std::bind(&LaserMappingNode::timer_callback, this));
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -992,8 +1020,12 @@ public:
                   << " imu_rate_hz=" << imu_rate_hz
                   << " lidar_timeout=" << lidar_timeout
                   << " gravity_m_s2=" << gravity_m_s2
+                  << " noiseless_imu=" << noiseless_imu
                   << " acc_cov=" << acc_cov << " gyr_cov=" << gyr_cov
                   << " b_acc_cov=" << b_acc_cov << " b_gyr_cov=" << b_gyr_cov
+                  << " init_b_acc_cov=" << init_b_acc_cov << " init_b_gyr_cov=" << init_b_gyr_cov
+                  << " init_grav_cov=" << init_grav_cov
+                  << " laser_point_cov=" << LASER_POINT_COV
                   << " extrinT=[" << extrinT[0] << "," << extrinT[1] << "," << extrinT[2] << "]"
                   << " max_iter=" << NUM_MAX_ITERATIONS
                   << std::endl;
@@ -1046,6 +1078,21 @@ private:
             {
                 return;
             }
+
+            // Snapshot of the IMU-predicted state, before any LiDAR update touches it.
+            // Used by [FLIO_LIDAR] below to report the per-scan correction the LiDAR
+            // measurement applies on top of the IMU forward propagation.
+            const state_ikfom state_pred = state_point;
+            const V3D euler_pred = euler_cur;
+            std::cout << "[FLIO_PRED]"
+                      << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
+                      << " mode=" << (imu_only_measure ? "imu_only" : "lidar_tick")
+                      << " pos=[" << state_pred.pos[0] << "," << state_pred.pos[1] << "," << state_pred.pos[2] << "]"
+                      << " vel=[" << state_pred.vel[0] << "," << state_pred.vel[1] << "," << state_pred.vel[2] << "]"
+                      << " rpy=[" << euler_pred[0] << "," << euler_pred[1] << "," << euler_pred[2] << "]"
+                      << " ba=[" << state_pred.ba[0] << "," << state_pred.ba[1] << "," << state_pred.ba[2] << "]"
+                      << " bg=[" << state_pred.bg[0] << "," << state_pred.bg[1] << "," << state_pred.bg[2] << "]"
+                      << std::endl;
 
             if (imu_only_measure)
             {
@@ -1141,6 +1188,26 @@ private:
             update_state_outputs();
 
             double t_update_end = omp_get_wtime();
+
+            // Per-scan LiDAR correction: how much did the iEKF update move the state
+            // away from the IMU-only prediction. dpos.norm() should stay near zero on a
+            // clean run; a large value means scan matching is fighting the IMU (bad
+            // extrinsics, wrong noise covariances, or ambiguous geometry).
+            const V3D dpos = state_point.pos - state_pred.pos;
+            const V3D dvel = state_point.vel - state_pred.vel;
+            const V3D drpy = euler_cur - euler_pred;
+            std::cout << "[FLIO_LIDAR]"
+                      << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
+                      << " feats_in=" << feats_undistort->points.size()
+                      << " feats_down=" << feats_down_size
+                      << " effct=" << effct_feat_num
+                      << " res_mean=" << std::scientific << std::setprecision(3) << res_mean_last
+                      << " dpos=[" << std::fixed << std::setprecision(6)
+                      << dpos[0] << "," << dpos[1] << "," << dpos[2] << "]"
+                      << " |dpos|=" << dpos.norm()
+                      << " dvel=[" << dvel[0] << "," << dvel[1] << "," << dvel[2] << "]"
+                      << " drpy=[" << drpy[0] << "," << drpy[1] << "," << drpy[2] << "]"
+                      << std::endl;
 
             /******* Publish odometry *******/
             g_publish_mode = "lidar_update";

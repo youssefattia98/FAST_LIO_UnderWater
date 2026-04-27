@@ -47,6 +47,7 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  void set_initial_cov(const V3D &b_g, const V3D &b_a, double grav);
   void set_gravity(const double gravity_m_s2);
   bool IsInitialized() const;
   Eigen::Matrix<double, 12, 12> Q;
@@ -59,6 +60,9 @@ class ImuProcess
   V3D cov_gyr_scale;
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
+  V3D init_cov_bias_gyr;
+  V3D init_cov_bias_acc;
+  double init_cov_grav;
   double first_lidar_time;
 
  private:
@@ -94,6 +98,9 @@ ImuProcess::ImuProcess()
   cov_gyr       = V3D(0.1, 0.1, 0.1);
   cov_bias_gyr  = V3D(0.0001, 0.0001, 0.0001);
   cov_bias_acc  = V3D(0.0001, 0.0001, 0.0001);
+  init_cov_bias_gyr = V3D(0.0001, 0.0001, 0.0001);
+  init_cov_bias_acc = V3D(0.001, 0.001, 0.001);
+  init_cov_grav = 0.00001;
   mean_acc      = V3D(0, 0, -1.0);
   mean_gyr      = V3D(0, 0, 0);
   angvel_last     = Zero3d;
@@ -158,6 +165,13 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 
+void ImuProcess::set_initial_cov(const V3D &b_g, const V3D &b_a, double grav)
+{
+  init_cov_bias_gyr = b_g;
+  init_cov_bias_acc = b_a;
+  init_cov_grav = grav;
+}
+
 void ImuProcess::set_gravity(const double gravity_m_s2)
 {
   gravity_m_s2_ = gravity_m_s2;
@@ -217,9 +231,13 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_P.setIdentity();
   init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;
   init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;
-  init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;
-  init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;
-  init_P(21,21) = init_P(22,22) = 0.00001; 
+  init_P(15,15) = init_cov_bias_gyr[0];
+  init_P(16,16) = init_cov_bias_gyr[1];
+  init_P(17,17) = init_cov_bias_gyr[2];
+  init_P(18,18) = init_cov_bias_acc[0];
+  init_P(19,19) = init_cov_bias_acc[1];
+  init_P(20,20) = init_cov_bias_acc[2];
+  init_P(21,21) = init_P(22,22) = init_cov_grav; 
   kf_state.change_P(init_P);
   last_imu_ = meas.imu.back();
 
