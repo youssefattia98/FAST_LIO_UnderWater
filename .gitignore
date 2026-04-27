@@ -7,3 +7,5 @@ Log/*.pdf
 .vscode/settings.json
 PCD/*.pcd
 scripts
+config/imu_only_debug.yaml
+config/lidar_debug.yaml
