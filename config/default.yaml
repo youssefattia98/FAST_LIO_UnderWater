@@ -7,7 +7,7 @@
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/sonar_point_cloud"
+            lid_topic:  "/sonar_point_clou"
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
             imu_rate_hz: 25.0

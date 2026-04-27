@@ -4,7 +4,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition
 
 from launch_ros.actions import Node
@@ -12,12 +12,14 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     package_path = get_package_share_directory('fast_lio')
-    default_config_path = os.path.join(package_path, 'config')
+    package_root_from_launch = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    source_default_config = os.path.join(package_root_from_launch, 'config', 'default.yaml')
+    installed_default_config = os.path.join(package_path, 'config', 'default.yaml')
+    default_config_file = source_default_config if os.path.exists(source_default_config) else installed_default_config
     default_rviz_config_path = os.path.join(
         package_path, 'rviz', 'fastlio.rviz')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
-    config_path = LaunchConfiguration('config_path')
     config_file = LaunchConfiguration('config_file')
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
@@ -26,13 +28,9 @@ def generate_launch_description():
         'use_sim_time', default_value='false',
         description='Use simulation (Gazebo) clock if true'
     )
-    declare_config_path_cmd = DeclareLaunchArgument(
-        'config_path', default_value=default_config_path,
-        description='Yaml config file path'
-    )
     decalre_config_file_cmd = DeclareLaunchArgument(
-        'config_file', default_value='default.yaml',
-        description='Config file'
+        'config_file', default_value=default_config_file,
+        description='Absolute yaml config file path'
     )
     declare_rviz_cmd = DeclareLaunchArgument(
         'rviz', default_value='true',
@@ -46,7 +44,7 @@ def generate_launch_description():
     fast_lio_node = Node(
         package='fast_lio',
         executable='fastlio_mapping',
-        parameters=[PathJoinSubstitution([config_path, config_file]),
+        parameters=[config_file,
                     {'use_sim_time': use_sim_time}],
         output='screen'
     )
@@ -59,7 +57,6 @@ def generate_launch_description():
 
     ld = LaunchDescription()
     ld.add_action(declare_use_sim_time_cmd)
-    ld.add_action(declare_config_path_cmd)
     ld.add_action(decalre_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)

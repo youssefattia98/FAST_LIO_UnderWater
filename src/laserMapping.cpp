@@ -906,7 +906,16 @@ public:
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** ROS subscribe initialization ***/
-        sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+        if (lid_topic.empty())
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "common.lid_topic is empty. LiDAR subscription is disabled; node will run IMU-only odometry.");
+        }
+        else
+        {
+            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+        }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
@@ -981,6 +990,18 @@ private:
 
             if (imu_only_measure)
             {
+                if (last_timestamp_lidar <= 0.0)
+                {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                         "No LiDAR messages received on '%s'. Running IMU-only odometry.",
+                                         lid_topic.c_str());
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                         "No LiDAR scan for %.2f s (timeout %.2f s). Running IMU-only odometry.",
+                                         Measures.lidar_end_time - last_timestamp_lidar, lidar_timeout);
+                }
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
