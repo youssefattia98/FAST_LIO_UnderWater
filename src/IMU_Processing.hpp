@@ -48,6 +48,11 @@ class ImuProcess
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
   void set_initial_cov(const V3D &b_g, const V3D &b_a, double grav);
+  // Auxiliary-bias initial covariances (added with DVL/pressure fusion). Locking
+  // these in noiseless-IMU sim mode is what stops LiDAR scan-match residuals from
+  // bleeding into b_dvl/b_pressure via the P-inverse cross-correlations and
+  // breaking DVL/pressure observability mid-bag.
+  void set_initial_aux_cov(const V3D &b_dvl, double b_pressure);
   void set_gravity(const double gravity_m_s2);
   bool IsInitialized() const;
   Eigen::Matrix<double, 12, 12> Q;
@@ -63,6 +68,8 @@ class ImuProcess
   V3D init_cov_bias_gyr;
   V3D init_cov_bias_acc;
   double init_cov_grav;
+  V3D init_cov_b_dvl;
+  double init_cov_b_pressure;
   double first_lidar_time;
 
  private:
@@ -101,6 +108,12 @@ ImuProcess::ImuProcess()
   init_cov_bias_gyr = V3D(0.0001, 0.0001, 0.0001);
   init_cov_bias_acc = V3D(0.001, 0.001, 0.001);
   init_cov_grav = 0.00001;
+  // Defaults preserve the previous hard-coded values in init_P (1e-8 for b_dvl,
+  // 1e4 for b_pressure). These are loose enough that on the all-sensor run the
+  // LiDAR update was free to absorb scan-vs-pressure z disagreement into a
+  // ~21 cm equivalent pressure bias and to drift b_dvl by O(1e-3) m/s.
+  init_cov_b_dvl = V3D(1e-8, 1e-8, 1e-8);
+  init_cov_b_pressure = 1e4;
   mean_acc      = V3D(0, 0, -1.0);
   mean_gyr      = V3D(0, 0, 0);
   angvel_last     = Zero3d;
@@ -172,6 +185,12 @@ void ImuProcess::set_initial_cov(const V3D &b_g, const V3D &b_a, double grav)
   init_cov_grav = grav;
 }
 
+void ImuProcess::set_initial_aux_cov(const V3D &b_dvl, double b_pressure)
+{
+  init_cov_b_dvl = b_dvl;
+  init_cov_b_pressure = b_pressure;
+}
+
 void ImuProcess::set_gravity(const double gravity_m_s2)
 {
   gravity_m_s2_ = gravity_m_s2;
@@ -237,7 +256,11 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_P(18,18) = init_cov_bias_acc[0];
   init_P(19,19) = init_cov_bias_acc[1];
   init_P(20,20) = init_cov_bias_acc[2];
-  init_P(21,21) = init_P(22,22) = init_cov_grav; 
+  init_P(21,21) = init_P(22,22) = init_cov_grav;
+  init_P(23,23) = init_cov_b_dvl[0];
+  init_P(24,24) = init_cov_b_dvl[1];
+  init_P(25,25) = init_cov_b_dvl[2];
+  init_P(26,26) = init_cov_b_pressure;
   kf_state.change_P(init_P);
   last_imu_ = meas.imu.back();
 

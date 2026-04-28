@@ -29,6 +29,21 @@
                             0.0,         1.0, 0.0,
                             -0.258819045, 0.0, 0.965925826 ]
 
+        dvl:
+            enable: true
+            topic: "/auv/dvl"
+            extrinsic_T: [ -0.079, -0.09691, -0.25938 ]
+            extrinsic_R: [ 1., 0., 0.,
+                           0., 1., 0.,
+                           0., 0., 1. ]
+            dvl_timeout: 0.25
+
+        pressure:
+            enable: true
+            topic: "/auv/pressure/scaled2"
+            extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
+            pressure_timeout: 0.25
+
         publish:
             path_en:  false
             scan_publish_en:  true

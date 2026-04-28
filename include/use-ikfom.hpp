@@ -18,6 +18,8 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, bg))
 ((vect3, ba))
 ((S2, grav))
+((vect3, b_dvl))
+((vect1, b_pressure))
 );
 
 MTK_BUILD_MANIFOLD(input_ikfom,
@@ -43,9 +45,9 @@ MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 }
 
 //vect3 Lidar_offset_to_IMU(L_offset_to_I, 3);
-Eigen::Matrix<double, 24, 1> get_f(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, state_ikfom::DIM, 1> get_f(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 24, 1> res = Eigen::Matrix<double, 24, 1>::Zero();
+	Eigen::Matrix<double, state_ikfom::DIM, 1> res = Eigen::Matrix<double, state_ikfom::DIM, 1>::Zero();
 	vect3 omega;
 	in.gyro.boxminus(omega, s.bg);
 	vect3 a_inertial = s.rot * (in.acc-s.ba);
@@ -57,9 +59,9 @@ Eigen::Matrix<double, 24, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	return res;
 }
 
-Eigen::Matrix<double, 24, 23> df_dx(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> df_dx(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 24, 23> cov = Eigen::Matrix<double, 24, 23>::Zero();
+	Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> cov = Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF>::Zero();
 	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
 	vect3 acc_;
 	in.acc.boxminus(acc_, s.ba);
@@ -76,9 +78,9 @@ Eigen::Matrix<double, 24, 23> df_dx(state_ikfom &s, const input_ikfom &in)
 }
 
 
-Eigen::Matrix<double, 24, 12> df_dw(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, state_ikfom::DIM, 12> df_dw(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 24, 12> cov = Eigen::Matrix<double, 24, 12>::Zero();
+	Eigen::Matrix<double, state_ikfom::DIM, 12> cov = Eigen::Matrix<double, state_ikfom::DIM, 12>::Zero();
 	cov.template block<3, 3>(12, 3) = -s.rot.toRotationMatrix();
 	cov.template block<3, 3>(3, 0) = -Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(15, 6) = Eigen::Matrix3d::Identity();
