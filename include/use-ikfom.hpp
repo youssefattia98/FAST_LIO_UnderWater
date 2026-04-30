@@ -20,6 +20,7 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((S2, grav))
 ((vect3, b_dvl))
 ((vect1, b_pressure))
+((vect3, b_mag))
 );
 
 MTK_BUILD_MANIFOLD(input_ikfom,
@@ -32,15 +33,17 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 ((vect3, na))
 ((vect3, nbg))
 ((vect3, nba))
+((vect3, nb_mag))
 );
 
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 {
 	MTK::get_cov<process_noise_ikfom>::type cov = MTK::get_cov<process_noise_ikfom>::type::Zero();
-	MTK::setDiagonal<process_noise_ikfom, vect3, 0>(cov, &process_noise_ikfom::ng, 0.0001);// 0.03
-	MTK::setDiagonal<process_noise_ikfom, vect3, 3>(cov, &process_noise_ikfom::na, 0.0001); // *dt 0.01 0.01 * dt * dt 0.05
-	MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg, 0.00001); // *dt 0.00001 0.00001 * dt *dt 0.3 //0.001 0.0001 0.01
-	MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba, 0.00001);   //0.001 0.05 0.0001/out 0.01
+	MTK::setDiagonal<process_noise_ikfom, vect3, 0>(cov, &process_noise_ikfom::ng, 0.0001);
+	MTK::setDiagonal<process_noise_ikfom, vect3, 3>(cov, &process_noise_ikfom::na, 0.0001);
+	MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg, 0.00001);
+	MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba, 0.00001);
+	MTK::setDiagonal<process_noise_ikfom, vect3, 12>(cov, &process_noise_ikfom::nb_mag, 0.001);
 	return cov;
 }
 
@@ -78,13 +81,14 @@ Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> df_dx(state_ikfom &s, 
 }
 
 
-Eigen::Matrix<double, state_ikfom::DIM, 12> df_dw(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, state_ikfom::DIM, 15> df_dw(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, state_ikfom::DIM, 12> cov = Eigen::Matrix<double, state_ikfom::DIM, 12>::Zero();
+	Eigen::Matrix<double, state_ikfom::DIM, 15> cov = Eigen::Matrix<double, state_ikfom::DIM, 15>::Zero();
 	cov.template block<3, 3>(12, 3) = -s.rot.toRotationMatrix();
 	cov.template block<3, 3>(3, 0) = -Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(15, 6) = Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(18, 9) = Eigen::Matrix3d::Identity();
+	cov.template block<3, 3>(27, 12) = Eigen::Matrix3d::Identity();
 	return cov;
 }
 

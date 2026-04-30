@@ -10,31 +10,28 @@
             lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
-
-            world_to_camera_init_T: [ -2.5231126653215394, -4.198916600709732, -1.9162049228024167 ]
-            world_to_camera_init_R: [  0.85322300, -0.52145800, -0.01295800,
-                          0.52134200,  0.85331600, -0.01143000,
-                          0.01701800,  0.00299800,  0.99985100 ]
-
+            world_to_camera_init_T: [ 0.0, 0.0, 0.0 ]
+            world_to_camera_init_R: [ 1.0, 0.0, 0.0,
+                                      0.0, 1.0, 0.0,
+                                      0.0, 0.0, 1.0 ]
             imu_rate_hz: 100.0
             lidar_timeout: 0.25
-            gravity_m_s2: 9.8
+            gravity_m_s2: 9.8100004196167
 
         preprocess:
             blind: 0.2
 
         mapping:
-            noiseless_imu: false
-            imu_gyro_scale: [ 1.0, 1.0, 1.3514 ]
+            noiseless_imu: true
             acc_cov: 0.001
-            gyr_cov: 1e-6
-            laser_point_cov: 1e-5
+            gyr_cov: 0.000001
+            laser_point_cov: 0.0001
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
-            extrinsic_R: [ 0.994521895, 0.0, 0.104528463,
-                0.0,         1.0, 0.0,
-                -0.104528463, 0.0, 0.994521895 ]
+            extrinsic_R: [ 0.965925826, 0.0, 0.258819045,
+                            0.0,         1.0, 0.0,
+                            -0.258819045, 0.0, 0.965925826 ]
 
         dvl:
             enable: true
@@ -50,18 +47,6 @@
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             pressure_timeout: 0.25
-
-        magnetometer:
-            enable: false
-            topic: "/auv/imu/magnetic_field"
-            earth_field_world: [ 0.0, 0.0, 0.0 ]
-            hard_iron_offset: [ 0.0, 0.0, 0.0 ]
-            soft_iron_matrix: [ 1., 0., 0.,  0., 1., 0.,  0., 0., 1. ]
-            mag_cov: 1849.0
-            b_mag_init_cov: 1000000.0
-            b_mag_proc_cov: 0.001
-            innovation_gate_sigma: 3.0
-            mag_timeout: 0.25
 
         publish:
             path_en:  false

@@ -46,6 +46,7 @@
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -91,8 +92,9 @@ string map_file_path, lid_topic, imu_topic, world_frame;
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+V3D imu_gyro_scale(1.0, 1.0, 1.0);  // per-axis multiplicative correction for raw gyro (e.g. 1/0.74 for a known scale error)
 double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
-double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4;
+double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4, init_b_mag_cov = 1e6;
 bool noiseless_imu = false;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -137,7 +139,7 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
-esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
+esekfom::esekf<state_ikfom, 15, input_ikfom> kf;
 state_ikfom state_point;
 vect3 pos_lid;
 
@@ -299,6 +301,10 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     publish_count ++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+
+    msg->angular_velocity.x *= imu_gyro_scale.x();
+    msg->angular_velocity.y *= imu_gyro_scale.y();
+    msg->angular_velocity.z *= imu_gyro_scale.z();
 
     double timestamp = get_time_sec(msg->header.stamp);
 
@@ -680,6 +686,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
                   << " grav=[" << state_point.grav[0] << "," << state_point.grav[1] << "," << state_point.grav[2] << "]"
                   << " b_dvl=[" << state_point.b_dvl[0] << "," << state_point.b_dvl[1] << "," << state_point.b_dvl[2] << "]"
                   << " b_pressure=" << state_point.b_pressure[0]
+                  << " b_mag=[" << state_point.b_mag[0] << "," << state_point.b_mag[1] << "," << state_point.b_mag[2] << "]"
                   << " imu_buf=" << imu_buffer.size()
                   << " lid_buf=" << lidar_buffer.size()
                   << " feats=" << feats_down_size
@@ -854,6 +861,11 @@ public:
         this->declare_parameter<string>("common.lid_topic", "/points_raw");
         this->declare_parameter<string>("common.imu_topic", "/imu/data");
         this->declare_parameter<string>("common.world_frame", "world");
+        this->declare_parameter<vector<double>>("common.world_to_camera_init_T", {0.0, 0.0, 0.0});
+        this->declare_parameter<vector<double>>("common.world_to_camera_init_R",
+                             {1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0});
         this->declare_parameter<double>("common.imu_rate_hz", 100.0);
         this->declare_parameter<double>("common.lidar_timeout", 0.25);
         this->declare_parameter<double>("common.gravity_m_s2", G_m_s2);
@@ -868,6 +880,7 @@ public:
         this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
+        this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         this->declare_parameter<double>("mapping.laser_point_cov", LASER_POINT_COV_DEFAULT);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.scan_line", 16);
@@ -892,6 +905,16 @@ public:
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/points_raw");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/imu/data");
         this->get_parameter_or<string>("common.world_frame", world_frame, "world");
+        std::vector<double> world_to_camera_init_T;
+        std::vector<double> world_to_camera_init_R;
+        this->get_parameter_or<vector<double>>("common.world_to_camera_init_T",
+                            world_to_camera_init_T,
+                            {0.0, 0.0, 0.0});
+        this->get_parameter_or<vector<double>>("common.world_to_camera_init_R",
+                            world_to_camera_init_R,
+                            {1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.0, 0.0, 1.0});
         this->get_parameter_or<double>("common.imu_rate_hz", imu_rate_hz, 100.0);
         this->get_parameter_or<double>("common.lidar_timeout", lidar_timeout, 0.25);
         this->get_parameter_or<double>("common.gravity_m_s2", gravity_m_s2, G_m_s2);
@@ -906,6 +929,14 @@ public:
         this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
         this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
+        {
+            vector<double> scale_vec = {1.0, 1.0, 1.0};
+            this->get_parameter_or<vector<double>>("mapping.imu_gyro_scale", scale_vec, {1.0, 1.0, 1.0});
+            if (scale_vec.size() == 3)
+                imu_gyro_scale = V3D(scale_vec[0], scale_vec[1], scale_vec[2]);
+            else
+                RCLCPP_WARN(this->get_logger(), "mapping.imu_gyro_scale must have 3 values. Using [1,1,1].");
+        }
         this->get_parameter_or<double>("mapping.laser_point_cov",LASER_POINT_COV,double(LASER_POINT_COV_DEFAULT));
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
@@ -987,6 +1018,8 @@ public:
                                init_grav_cov);
         p_imu->set_initial_aux_cov(V3D(init_b_dvl_cov, init_b_dvl_cov, init_b_dvl_cov),
                                    init_b_pressure_cov);
+        init_b_mag_cov = aux_fusion_.mag_b_init_cov();
+        p_imu->set_initial_mag_cov(init_b_mag_cov, aux_fusion_.mag_b_proc_cov());
 
         fill(epsi, epsi + state_ikfom::DOF, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
@@ -1010,18 +1043,43 @@ public:
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
+        if (world_to_camera_init_T.size() != 3)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "common.world_to_camera_init_T must have 3 values. Using zero translation.");
+            world_to_camera_init_T = {0.0, 0.0, 0.0};
+        }
+        Eigen::Matrix3d world_to_camera_init_rot = Eigen::Matrix3d::Identity();
+        if (world_to_camera_init_R.size() == 9)
+        {
+            world_to_camera_init_rot << world_to_camera_init_R[0], world_to_camera_init_R[1], world_to_camera_init_R[2],
+                                        world_to_camera_init_R[3], world_to_camera_init_R[4], world_to_camera_init_R[5],
+                                        world_to_camera_init_R[6], world_to_camera_init_R[7], world_to_camera_init_R[8];
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "common.world_to_camera_init_R must have 9 values. Using identity rotation.");
+        }
+        Eigen::Quaterniond world_to_camera_init_quat(world_to_camera_init_rot);
+        world_to_camera_init_quat.normalize();
+
         geometry_msgs::msg::TransformStamped world_to_camera_init;
         world_to_camera_init.header.stamp = this->get_clock()->now();
         world_to_camera_init.header.frame_id = world_frame;
         world_to_camera_init.child_frame_id = "camera_init";
-        world_to_camera_init.transform.translation.x = 0.0;
-        world_to_camera_init.transform.translation.y = 0.0;
-        world_to_camera_init.transform.translation.z = 0.0;
-        world_to_camera_init.transform.rotation.x = 0.0;
-        world_to_camera_init.transform.rotation.y = 0.0;
-        world_to_camera_init.transform.rotation.z = 0.0;
-        world_to_camera_init.transform.rotation.w = 1.0;
+        world_to_camera_init.transform.translation.x = world_to_camera_init_T[0];
+        world_to_camera_init.transform.translation.y = world_to_camera_init_T[1];
+        world_to_camera_init.transform.translation.z = world_to_camera_init_T[2];
+        world_to_camera_init.transform.rotation.x = world_to_camera_init_quat.x();
+        world_to_camera_init.transform.rotation.y = world_to_camera_init_quat.y();
+        world_to_camera_init.transform.rotation.z = world_to_camera_init_quat.z();
+        world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
+
+        // Inform the pressure model where camera_init sits in the world z-axis so
+        // depth calculations remain correct when world_to_camera_init_T.z != 0.
+        aux_fusion_.set_camera_init_z_in_world(world_to_camera_init_T[2]);
 
         //------------------------------------------------------------------------------------------------------
         // Drive processing from wall time so rosbag replay can drain buffered
@@ -1038,6 +1096,7 @@ public:
                   << " lidar_timeout=" << lidar_timeout
                   << " gravity_m_s2=" << gravity_m_s2
                   << " noiseless_imu=" << noiseless_imu
+                  << " imu_gyro_scale=[" << imu_gyro_scale.transpose() << "]"
                   << " acc_cov=" << acc_cov << " gyr_cov=" << gyr_cov
                   << " b_acc_cov=" << b_acc_cov << " b_gyr_cov=" << b_gyr_cov
                   << " init_b_acc_cov=" << init_b_acc_cov << " init_b_gyr_cov=" << init_b_gyr_cov
@@ -1048,11 +1107,17 @@ public:
                   << " dvl_enable=" << aux_fusion_.dvl_enabled()
                   << " dvl_topic='" << aux_fusion_.dvl_topic() << "'"
                   << " dvl_timeout=" << aux_fusion_.dvl_timeout()
+                  << " dvl_velocity_cov=" << aux_fusion_.dvl_velocity_cov()
+                  << " dvl_innovation_gate_sigma=" << aux_fusion_.dvl_innovation_gate_sigma()
                   << " dvl_T=[" << aux_fusion_.dvl_T()[0] << "," << aux_fusion_.dvl_T()[1] << "," << aux_fusion_.dvl_T()[2] << "]"
                   << " pressure_enable=" << aux_fusion_.pressure_enabled()
                   << " pressure_topic='" << aux_fusion_.pressure_topic() << "'"
                   << " pressure_timeout=" << aux_fusion_.pressure_timeout()
                   << " pressure_T=[" << aux_fusion_.pressure_T()[0] << "," << aux_fusion_.pressure_T()[1] << "," << aux_fusion_.pressure_T()[2] << "]"
+                  << " mag_enable=" << aux_fusion_.mag_enabled()
+                  << " mag_topic='" << aux_fusion_.mag_topic() << "'"
+                  << " mag_timeout=" << aux_fusion_.mag_timeout()
+                  << " init_b_mag_cov=" << init_b_mag_cov
                   << " max_iter=" << NUM_MAX_ITERATIONS
                   << std::endl;
 

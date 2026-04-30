@@ -4,7 +4,9 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
+        - /Global Options1
         - /CloudRegistered1/Topic1
+        - /TF1
         - /TF1/Frames1
       Splitter Ratio: 0.5
     Tree Height: 1567
@@ -71,8 +73,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 1.5455572605133057
-        Min Value: -1.744666576385498
+        Max Value: 0.6739780902862549
+        Min Value: -6.097348690032959
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -108,45 +110,45 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        BROV_low:
-          Value: true
+        ENU:
+          Value: false
         World:
           Value: true
-        barometer_link:
-          Value: false
+        base_link:
+          Value: true
         body:
           Value: true
         camera_init:
           Value: false
         dvl_link:
           Value: false
-        goal_frame:
-          Value: false
-        imu_link:
-          Value: false
-        three_d_sonar_link:
-          Value: false
+        locator_link:
+          Value: true
+        pressure_link:
+          Value: true
+        sonar_frame:
+          Value: true
       Marker Scale: 3
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
       Tree:
+        ENU:
+          {}
         World:
-          BROV_low:
-            barometer_link:
-              {}
+          base_link:
             dvl_link:
               {}
-            imu_link:
+            locator_link:
               {}
-            three_d_sonar_link:
+            pressure_link:
+              {}
+            sonar_frame:
               {}
           camera_init:
             body:
               {}
-          goal_frame:
-            {}
       Update Interval: 0
       Value: true
   Enabled: true
@@ -195,25 +197,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 37.79740905761719
+      Distance: 19.892946243286133
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 2.441232442855835
-        Y: 4.8185577392578125
-        Z: 4.229916095733643
+        X: 0.7296010851860046
+        Y: 2.9168763160705566
+        Z: 4.22841215133667
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8697983026504517
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 3.395411729812622
+      Yaw: 4.550405502319336
     Saved: ~
 Window Geometry:
   Displays:
