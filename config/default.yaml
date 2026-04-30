@@ -52,11 +52,26 @@
             pressure_timeout: 0.25
 
         magnetometer:
-            enable: false
+            enable: true
             topic: "/auv/imu/magnetic_field"
-            earth_field_world: [ 0.0, 0.0, 0.0 ]
-            hard_iron_offset: [ 0.0, 0.0, 0.0 ]
-            soft_iron_matrix: [ 1., 0., 0.,  0., 1., 0.,  0., 0., 1. ]
+
+            # In raw-count units, not Tesla.
+            # Estimated from your calibrated mag_debug.csv using the corrected World frame.
+            earth_field_world: [ 96.8, 313.7, 519.1 ]
+
+            # Raw hard-iron offset in the original /auv/imu/magnetic_field axes.
+            # bx_cal = bx_raw - 120.0
+            # by_cal = by_raw - (-50.0) = by_raw + 50.0
+            hard_iron_offset: [ 120.0, -50.0, 0.0 ]
+
+            #Tested
+            # mx = -bx_cal
+            # my = -by_cal
+            # mz = -bz_cal
+            soft_iron_matrix: [ -1., 0., 0.,
+                                0., -1., 0.,
+                                0., 0., -1. ]
+
             mag_cov: 1849.0
             b_mag_init_cov: 1000000.0
             b_mag_proc_cov: 0.001
