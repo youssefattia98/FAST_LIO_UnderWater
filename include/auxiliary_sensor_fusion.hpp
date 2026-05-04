@@ -30,10 +30,21 @@ public:
     struct UpdateSummary
     {
         int dvl_count = 0;
+        int dvl_accepted = 0;
+        int dvl_rejected = 0;
         int pressure_count = 0;
+        int pressure_accepted = 0;
+        int pressure_rejected = 0;
         int mag_count = 0;
+        int mag_accepted = 0;
+        int mag_rejected = 0;
         double dvl_res_norm_sum = 0.0;
         double dvl_res_norm_max = 0.0;
+        V3D dvl_res_sum = V3D::Zero();
+        V3D dvl_res_abs_max = V3D::Zero();
+        V3D dvl_meas_sum = V3D::Zero();
+        V3D dvl_pred_sum = V3D::Zero();
+        V3D dvl_body_vel_sum = V3D::Zero();
         double pressure_res_depth_sum = 0.0;
         double pressure_res_depth_max = 0.0;
         double mag_res_norm_sum = 0.0;
@@ -50,6 +61,42 @@ public:
         double mean_dvl_residual() const
         {
             return dvl_count > 0 ? dvl_res_norm_sum / static_cast<double>(dvl_count) : 0.0;
+        }
+
+        V3D mean_dvl_residual_axis() const
+        {
+            if (dvl_count <= 0)
+            {
+                return V3D::Zero();
+            }
+            return dvl_res_sum / static_cast<double>(dvl_count);
+        }
+
+        V3D mean_dvl_measurement() const
+        {
+            if (dvl_count <= 0)
+            {
+                return V3D::Zero();
+            }
+            return dvl_meas_sum / static_cast<double>(dvl_count);
+        }
+
+        V3D mean_dvl_prediction() const
+        {
+            if (dvl_count <= 0)
+            {
+                return V3D::Zero();
+            }
+            return dvl_pred_sum / static_cast<double>(dvl_count);
+        }
+
+        V3D mean_dvl_body_velocity() const
+        {
+            if (dvl_count <= 0)
+            {
+                return V3D::Zero();
+            }
+            return dvl_body_vel_sum / static_cast<double>(dvl_count);
         }
 
         double mean_pressure_depth_residual() const
@@ -81,6 +128,7 @@ public:
 
         node.declare_parameter<double>("dvl.velocity_cov", 4e-4);
         node.declare_parameter<double>("dvl.innovation_gate_sigma", 5.0);
+        node.declare_parameter<double>("dvl.bias_init_cov", 1e-3);
         node.declare_parameter<double>("pressure.pressure_cov", 1e4);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
         node.declare_parameter<double>("pressure.gravity", 9.80665);
@@ -89,7 +137,9 @@ public:
 
         node.declare_parameter<bool>("magnetometer.enable", false);
         node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
-        node.declare_parameter<std::vector<double>>("magnetometer.earth_field_world", {0.0, 0.0, 0.0});
+        // Field expressed in camera_init/body-at-start frame. The IEKF state frame is
+        // camera_init, so this is the reference used by h = R_ci_body^T * B_ci.
+        node.declare_parameter<std::vector<double>>("magnetometer.earth_field_imu", {0.0, 0.0, 0.0});
         node.declare_parameter<std::vector<double>>("magnetometer.hard_iron_offset", {0.0, 0.0, 0.0});
         node.declare_parameter<std::vector<double>>("magnetometer.soft_iron_matrix",
             {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
@@ -107,6 +157,7 @@ public:
         node.get_parameter_or<double>("dvl.dvl_timeout", dvl_timeout_, 0.25);
         node.get_parameter_or<double>("dvl.velocity_cov", dvl_velocity_cov_, 4e-4);
         node.get_parameter_or<double>("dvl.innovation_gate_sigma", dvl_innovation_gate_sigma_, 5.0);
+        node.get_parameter_or<double>("dvl.bias_init_cov", dvl_b_init_cov_, 1e-3);
 
         node.get_parameter_or<bool>("pressure.enable", pressure_enable_, false);
         node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
@@ -168,15 +219,15 @@ public:
         node.get_parameter_or<double>("magnetometer.mag_timeout", mag_timeout_, 0.5);
 
         std::vector<double> earth_field, hard_iron, soft_iron;
-        node.get_parameter_or<std::vector<double>>("magnetometer.earth_field_world", earth_field, {0., 0., 0.});
+        node.get_parameter_or<std::vector<double>>("magnetometer.earth_field_imu", earth_field, {0., 0., 0.});
         node.get_parameter_or<std::vector<double>>("magnetometer.hard_iron_offset", hard_iron, {0., 0., 0.});
         node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron_matrix", soft_iron,
             {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
 
         if (earth_field.size() == 3)
-            mag_earth_field_world_ << earth_field[0], earth_field[1], earth_field[2];
+            mag_earth_field_imu_ << earth_field[0], earth_field[1], earth_field[2];
         else
-            mag_earth_field_world_.setZero();
+            mag_earth_field_imu_.setZero();
 
         if (hard_iron.size() == 3)
             mag_hard_iron_ << hard_iron[0], hard_iron[1], hard_iron[2];
@@ -199,6 +250,7 @@ public:
         mag_timeout_ = std::max(0.0, mag_timeout_);
         dvl_velocity_cov_ = std::max(1e-12, dvl_velocity_cov_);
         dvl_innovation_gate_sigma_ = std::max(0.0, dvl_innovation_gate_sigma_);
+        dvl_b_init_cov_ = std::max(1e-12, dvl_b_init_cov_);
         pressure_cov_ = std::max(1e-6, pressure_cov_);
         pressure_fluid_density_ = std::max(1e-6, pressure_fluid_density_);
         pressure_gravity_ = std::max(1e-6, pressure_gravity_);
@@ -240,11 +292,23 @@ public:
             const auto messages = take_dvl_measurements(begin_time, end_time);
             for (const auto &msg : messages)
             {
-                const V3D residual = dvl_residual(*msg, kf.get_x(), omega_body);
+                const state_ikfom state = kf.get_x();
+                const V3D measurement = dvl_measurement(*msg);
+                const V3D prediction = dvl_prediction(state, omega_body);
+                const V3D body_velocity = dvl_sensor_origin_velocity_body(state, omega_body);
+                const V3D residual = measurement - prediction;
                 summary.dvl_count++;
                 summary.dvl_res_norm_sum += residual.norm();
                 summary.dvl_res_norm_max = std::max(summary.dvl_res_norm_max, residual.norm());
-                summary.dvl_updated = apply_dvl_update(*msg, omega_body, kf) || summary.dvl_updated;
+                summary.dvl_res_sum += residual;
+                summary.dvl_res_abs_max = summary.dvl_res_abs_max.cwiseMax(residual.cwiseAbs());
+                summary.dvl_meas_sum += measurement;
+                summary.dvl_pred_sum += prediction;
+                summary.dvl_body_vel_sum += body_velocity;
+                const bool accepted = apply_dvl_update(*msg, omega_body, kf);
+                summary.dvl_accepted += accepted ? 1 : 0;
+                summary.dvl_rejected += accepted ? 0 : 1;
+                summary.dvl_updated = accepted || summary.dvl_updated;
             }
         }
 
@@ -260,6 +324,8 @@ public:
                 summary.pressure_res_depth_sum = std::abs(residual_depth);
                 summary.pressure_res_depth_max = std::abs(residual_depth);
                 summary.pressure_updated = apply_pressure_update(*msg, kf);
+                summary.pressure_accepted = summary.pressure_updated ? 1 : 0;
+                summary.pressure_rejected = summary.pressure_updated ? 0 : 1;
             }
         }
 
@@ -272,7 +338,10 @@ public:
                 summary.mag_count++;
                 summary.mag_res_norm_sum += residual.norm();
                 summary.mag_res_norm_max = std::max(summary.mag_res_norm_max, residual.norm());
-                summary.mag_updated = apply_mag_update(*msg, kf) || summary.mag_updated;
+                const bool accepted = apply_mag_update(*msg, kf);
+                summary.mag_accepted += accepted ? 1 : 0;
+                summary.mag_rejected += accepted ? 0 : 1;
+                summary.mag_updated = accepted || summary.mag_updated;
             }
         }
 
@@ -315,6 +384,7 @@ public:
     const V3D &pressure_T() const { return pressure_T_; }
     double dvl_velocity_cov() const { return dvl_velocity_cov_; }
     double dvl_innovation_gate_sigma() const { return dvl_innovation_gate_sigma_; }
+    double dvl_b_init_cov() const { return dvl_b_init_cov_; }
     double mag_b_init_cov() const { return mag_b_init_cov_; }
     double mag_b_proc_cov() const { return mag_b_proc_cov_; }
 
@@ -322,6 +392,17 @@ public:
     // depth model works correctly when world_to_camera_init_T.z != 0.
     // Call this after loading world_to_camera_init_T from config.
     void set_camera_init_z_in_world(double z) { camera_init_z_in_world_ = z; }
+
+    // The IEKF state lives in the camera_init frame, which equals the body frame at t=0
+    // (state.rot = Identity at startup). B_reference must therefore be expressed in
+    // camera_init frame = B_imu (the field measured in the initial body frame). No
+    // rotation into world coordinates is needed or correct here.
+    void apply_initial_rotation(const M3D & /*R_BtoW*/)
+    {
+        mag_earth_field_world_ = mag_earth_field_imu_;
+    }
+
+    const V3D &earth_field_world() const { return mag_earth_field_world_; }
 
 private:
     static M3D skew(const V3D &v)
@@ -365,19 +446,28 @@ private:
         return V3D(gyro.x, gyro.y, gyro.z) - V3D(state.bg[0], state.bg[1], state.bg[2]);
     }
 
-    V3D dvl_prediction(const state_ikfom &state, const V3D &omega_body) const
+    V3D dvl_measurement(const DvlMsg &msg) const
+    {
+        const auto &linear = msg.twist.twist.linear;
+        return V3D(linear.x, linear.y, linear.z);
+    }
+
+    V3D dvl_sensor_origin_velocity_body(const state_ikfom &state, const V3D &omega_body) const
     {
         const M3D R_wb = state.rot.toRotationMatrix();
         const V3D body_velocity = R_wb.transpose() * V3D(state.vel[0], state.vel[1], state.vel[2]);
-        const V3D sensor_origin_velocity = body_velocity + omega_body.cross(dvl_T_);
-        return dvl_R_.transpose() * sensor_origin_velocity + V3D(state.b_dvl[0], state.b_dvl[1], state.b_dvl[2]);
+        return body_velocity + omega_body.cross(dvl_T_);
+    }
+
+    V3D dvl_prediction(const state_ikfom &state, const V3D &omega_body) const
+    {
+        return dvl_R_.transpose() * dvl_sensor_origin_velocity_body(state, omega_body) +
+               V3D(state.b_dvl[0], state.b_dvl[1], state.b_dvl[2]);
     }
 
     V3D dvl_residual(const DvlMsg &msg, const state_ikfom &state, const V3D &omega_body) const
     {
-        const auto &linear = msg.twist.twist.linear;
-        const V3D z(linear.x, linear.y, linear.z);
-        return z - dvl_prediction(state, omega_body);
+        return dvl_measurement(msg) - dvl_prediction(state, omega_body);
     }
 
     double pressure_raw_depth(const state_ikfom &state) const
@@ -407,10 +497,14 @@ private:
     {
         const state_ikfom state = kf.get_x();
         const V3D residual = dvl_residual(msg, state, omega_body);
+
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(3, state_ikfom::DOF);
 
         const M3D R_wb = state.rot.toRotationMatrix();
+        const V3D vel_body = R_wb.transpose() * V3D(state.vel[0], state.vel[1], state.vel[2]);
         H.block<3, 3>(0, 12) = dvl_R_.transpose() * R_wb.transpose();
+        H.block<3, 3>(0, 3) = dvl_R_.transpose() * skew(vel_body);
+        H.block<3, 3>(0, 15) = dvl_R_.transpose() * skew(dvl_T_);
         H.block<3, 3>(0, 23) = M3D::Identity();
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Zero(3, 3);
@@ -587,7 +681,7 @@ private:
         return mag_soft_iron_ * (raw - mag_hard_iron_);
     }
 
-    // h(state) = R^T * B_world + b_mag
+    // h(state) = R_ci_body^T * B_ci + b_mag
     V3D mag_prediction(const state_ikfom &state) const
     {
         return state.rot.toRotationMatrix().transpose() * mag_earth_field_world_ +
@@ -656,6 +750,7 @@ private:
     double mag_timeout_ = 0.5;
     double dvl_velocity_cov_ = 4e-4;
     double dvl_innovation_gate_sigma_ = 5.0;
+    double dvl_b_init_cov_ = 1e-3;
     double pressure_cov_ = 1e4;
     double camera_init_z_in_world_ = 0.0;
     double pressure_fluid_density_ = 1025.0;
@@ -669,7 +764,8 @@ private:
     V3D dvl_T_ = V3D::Zero();
     M3D dvl_R_ = M3D::Identity();
     V3D pressure_T_ = V3D::Zero();
-    V3D mag_earth_field_world_ = V3D::Zero();
+    V3D mag_earth_field_imu_   = V3D::Zero();  // loaded from config (body frame at init)
+    V3D mag_earth_field_world_ = V3D::Zero();  // set by apply_initial_rotation()
     V3D mag_hard_iron_ = V3D::Zero();
     M3D mag_soft_iron_ = M3D::Identity();
 

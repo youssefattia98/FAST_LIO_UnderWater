@@ -7,7 +7,7 @@
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/sonar_point_cloud"
+            lid_topic:  "/sonar_point_cloud"                      # Tuned DVL+mag+pressure test: sonar DISABLED
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
 
@@ -16,7 +16,7 @@
                           0.52134200,  0.85331600, -0.01143000,
                           0.01701800,  0.00299800,  0.99985100 ]
 
-            imu_rate_hz: 100.0
+            imu_rate_hz: 200.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.8
 
@@ -24,8 +24,14 @@
             blind: 0.2
 
         mapping:
-            noiseless_imu: false
-            imu_gyro_scale: [ 1.0, 1.0, 1.3514 ]
+            # Bag-tuned no-sonar mode: freeze ba/bg because DVL+mag alone cannot
+            # reliably observe IMU biases on this zigzagwall bag.
+            noiseless_imu: true
+            # No sonar -> freeze ba/bg immediately via ObservabilityManager when noiseless_imu is false.
+            obs_manager_sonar_timeout: 0.0
+            obs_manager_ramp_time: 0.0
+            obs_manager_freeze_cov: 1.0e-10
+            imu_gyro_scale: [ 1.0, 1.0, 0.875 ]
             acc_cov: 0.001
             gyr_cov: 1e-6
             laser_point_cov: 1e-5
@@ -43,39 +49,31 @@
             extrinsic_R: [ 1., 0., 0.,
                            0., 1., 0.,
                            0., 0., 1. ]
-            dvl_timeout: 0.25
+            dvl_timeout: 0.50
+            velocity_cov: 5.0e-5
+            innovation_gate_sigma: 0.0
+            # Keep DVL bias fixed near zero in no-sonar mode so velocity cannot be hidden in b_dvl.
+            bias_init_cov: 1.0e-10
 
         pressure:
             enable: true
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             pressure_timeout: 0.25
+            pressure_cov: 10000.0
 
         magnetometer:
             enable: true
             topic: "/auv/imu/magnetic_field"
-
-            # In raw-count units, not Tesla.
-            # Estimated from your calibrated mag_debug.csv using the corrected World frame.
-            earth_field_world: [ 96.8, 313.7, 519.1 ]
-
-            # Raw hard-iron offset in the original /auv/imu/magnetic_field axes.
-            # bx_cal = bx_raw - 120.0
-            # by_cal = by_raw - (-50.0) = by_raw + 50.0
+            earth_field_imu: [ 242.6, 224.6, 530.6 ]
             hard_iron_offset: [ 120.0, -50.0, 0.0 ]
-
-            #Tested
-            # mx = -bx_cal
-            # my = -by_cal
-            # mz = -bz_cal
             soft_iron_matrix: [ -1., 0., 0.,
                                 0., -1., 0.,
                                 0., 0., -1. ]
-
-            mag_cov: 1849.0
-            b_mag_init_cov: 1000000.0
+            mag_cov: 15.0
+            b_mag_init_cov: 500.0
             b_mag_proc_cov: 0.001
-            innovation_gate_sigma: 3.0
+            innovation_gate_sigma: 0.0
             mag_timeout: 0.25
 
         publish:
@@ -85,5 +83,5 @@
             scan_bodyframe_pub_en: true
 
         pcd_save:
-            pcd_save_en: true
+            pcd_save_en: false
             interval: -1

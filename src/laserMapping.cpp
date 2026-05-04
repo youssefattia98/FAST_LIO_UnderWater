@@ -64,6 +64,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "auxiliary_sensor_fusion.hpp"
+#include "observability_manager.hpp"
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
 
@@ -96,6 +97,7 @@ V3D imu_gyro_scale(1.0, 1.0, 1.0);  // per-axis multiplicative correction for ra
 double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
 double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4, init_b_mag_cov = 1e6;
 bool noiseless_imu = false;
+ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double last_processed_time = -1.0, lidar_timeout = 0.25, imu_rate_hz = 100.0;
@@ -292,6 +294,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(cur_time);
     last_timestamp_lidar = cur_time;
+    obs_manager.notify_sonar_scan(cur_time);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
@@ -419,9 +422,14 @@ bool sync_imu_only_packages(MeasureGroup &meas)
     const double first_imu_time = get_time_sec(imu_buffer.front()->header.stamp);
     if (last_processed_time > 0.0 && first_imu_time - last_processed_time > expected_imu_timeout())
     {
-        std::cerr << "imu timeout: next imu is " << first_imu_time - last_processed_time
-                  << " s after the last processed state; expected about "
-                  << expected_imu_period() << " s from imu_rate_hz" << std::endl;
+        static double last_imu_gap_warn_time = -1e30;
+        if (first_imu_time - last_imu_gap_warn_time >= 5.0)
+        {
+            last_imu_gap_warn_time = first_imu_time;
+            std::cerr << "imu timestamp gap: next IMU is " << first_imu_time - last_processed_time
+                      << " s after the last processed state; nominal period is "
+                      << expected_imu_period() << " s from imu_rate_hz. Continuing; warning throttled to 5 s." << std::endl;
+        }
     }
 
     meas.imu.clear();
@@ -881,6 +889,7 @@ public:
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
+        ObservabilityManager::declare_parameters(*this);
         this->declare_parameter<double>("mapping.laser_point_cov", LASER_POINT_COV_DEFAULT);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.scan_line", 16);
@@ -961,29 +970,22 @@ public:
         }
         if (noiseless_imu)
         {
-            // Simulation-only mode: the IMU has zero bias/noise, so do not let
-            // LiDAR residuals rewrite bias or gravity states to explain scan
-            // mismatch. Real IMUs should leave this false and use normal covariances.
+            // Simulation-only mode: IMU has zero bias/noise. Freeze ba/bg/grav so
+            // LiDAR residuals cannot rewrite them. Only valid for simulated IMUs.
             b_acc_cov = std::min(b_acc_cov, 1e-10);
             b_gyr_cov = std::min(b_gyr_cov, 1e-10);
             init_b_acc_cov = 1e-10;
             init_b_gyr_cov = 1e-10;
             init_grav_cov = 1e-10;
-            // The simulator's DVL and pressure are also zero-bias. Locking these
-            // closes the all-sensors regression where LiDAR scan-match residuals
-            // bled into b_dvl/b_pressure via the iEKF P-inverse cross-correlations
-            // and broke DVL/pressure observability mid-bag.
-            init_b_dvl_cov = 1e-12;
-            init_b_pressure_cov = 1e-12;
         }
         else
         {
             init_b_acc_cov = 0.001;
             init_b_gyr_cov = 0.0001;
             init_grav_cov = 0.00001;
-            init_b_dvl_cov = 1e-8;
-            init_b_pressure_cov = 1e4;
         }
+        init_b_dvl_cov = aux_fusion_.dvl_b_init_cov();
+        init_b_pressure_cov = 1e4;
 
         path.header.stamp = this->get_clock()->now();
         path.header.frame_id ="camera_init";
@@ -1020,6 +1022,7 @@ public:
                                    init_b_pressure_cov);
         init_b_mag_cov = aux_fusion_.mag_b_init_cov();
         p_imu->set_initial_mag_cov(init_b_mag_cov, aux_fusion_.mag_b_proc_cov());
+        obs_manager.load_parameters(*this, b_gyr_cov, b_acc_cov);
 
         fill(epsi, epsi + state_ikfom::DOF, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
@@ -1081,6 +1084,10 @@ public:
         // depth calculations remain correct when world_to_camera_init_T.z != 0.
         aux_fusion_.set_camera_init_z_in_world(world_to_camera_init_T[2]);
 
+        // The IEKF state frame is camera_init, equal to body at startup. The
+        // configured magnetic reference is already in that frame, not global World.
+        aux_fusion_.apply_initial_rotation(world_to_camera_init_rot);
+
         //------------------------------------------------------------------------------------------------------
         // Drive processing from wall time so rosbag replay can drain buffered
         // IMU/LiDAR messages even after simulated /clock stops publishing.
@@ -1096,6 +1103,7 @@ public:
                   << " lidar_timeout=" << lidar_timeout
                   << " gravity_m_s2=" << gravity_m_s2
                   << " noiseless_imu=" << noiseless_imu
+                  << " obs_manager_active=" << !noiseless_imu
                   << " imu_gyro_scale=[" << imu_gyro_scale.transpose() << "]"
                   << " acc_cov=" << acc_cov << " gyr_cov=" << gyr_cov
                   << " b_acc_cov=" << b_acc_cov << " b_gyr_cov=" << b_gyr_cov
@@ -1109,6 +1117,7 @@ public:
                   << " dvl_timeout=" << aux_fusion_.dvl_timeout()
                   << " dvl_velocity_cov=" << aux_fusion_.dvl_velocity_cov()
                   << " dvl_innovation_gate_sigma=" << aux_fusion_.dvl_innovation_gate_sigma()
+                  << " dvl_bias_init_cov=" << aux_fusion_.dvl_b_init_cov()
                   << " dvl_T=[" << aux_fusion_.dvl_T()[0] << "," << aux_fusion_.dvl_T()[1] << "," << aux_fusion_.dvl_T()[2] << "]"
                   << " pressure_enable=" << aux_fusion_.pressure_enabled()
                   << " pressure_topic='" << aux_fusion_.pressure_topic() << "'"
@@ -1117,6 +1126,7 @@ public:
                   << " mag_enable=" << aux_fusion_.mag_enabled()
                   << " mag_topic='" << aux_fusion_.mag_topic() << "'"
                   << " mag_timeout=" << aux_fusion_.mag_timeout()
+                  << " earth_field_ci=[" << aux_fusion_.earth_field_world().transpose() << "]"
                   << " init_b_mag_cov=" << init_b_mag_cov
                   << " max_iter=" << NUM_MAX_ITERATIONS
                   << std::endl;
@@ -1162,6 +1172,14 @@ private:
             t0 = omp_get_wtime();
 
             const double process_begin_time = last_processed_time > 0.0 ? last_processed_time : Measures.lidar_beg_time;
+            if (!noiseless_imu)
+            {
+                const double now = Measures.lidar_end_time;
+                const double dyn_bg = obs_manager.bg_cov(now);
+                const double dyn_ba = obs_manager.ba_cov(now);
+                p_imu->set_gyr_bias_cov(V3D(dyn_bg, dyn_bg, dyn_bg));
+                p_imu->set_acc_bias_cov(V3D(dyn_ba, dyn_ba, dyn_ba));
+            }
             p_imu->Process(Measures, kf, feats_undistort);
             last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
@@ -1176,15 +1194,6 @@ private:
             // measurement applies on top of the IMU forward propagation.
             const state_ikfom state_imu = state_point;
             const V3D euler_imu = euler_cur;
-            std::cout << "[FLIO_PRED]"
-                      << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
-                      << " mode=" << (imu_only_measure ? "imu_only" : "lidar_tick")
-                      << " pos=[" << state_imu.pos[0] << "," << state_imu.pos[1] << "," << state_imu.pos[2] << "]"
-                      << " vel=[" << state_imu.vel[0] << "," << state_imu.vel[1] << "," << state_imu.vel[2] << "]"
-                      << " rpy=[" << euler_imu[0] << "," << euler_imu[1] << "," << euler_imu[2] << "]"
-                      << " ba=[" << state_imu.ba[0] << "," << state_imu.ba[1] << "," << state_imu.ba[2] << "]"
-                      << " bg=[" << state_imu.bg[0] << "," << state_imu.bg[1] << "," << state_imu.bg[2] << "]"
-                      << std::endl;
 
             auto aux_summary = aux_fusion_.process_interval(process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
             aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
@@ -1194,22 +1203,41 @@ private:
                 const V3D dpos_aux = state_point.pos - state_imu.pos;
                 const V3D dvel_aux = state_point.vel - state_imu.vel;
                 const V3D drpy_aux = euler_cur - euler_imu;
-                const bool log_aux = aux_summary.dvl_count > 0 ||
-                                     last_aux_log_time_ < 0.0 ||
-                                     Measures.lidar_end_time - last_aux_log_time_ >= 5.0;
+                const bool log_aux = last_aux_log_time_ < 0.0 ||
+                                     Measures.lidar_end_time - last_aux_log_time_ >= 1.0;
                 if (log_aux)
                 {
                     last_aux_log_time_ = Measures.lidar_end_time;
+                    const V3D dvl_res_axis_mean = aux_summary.mean_dvl_residual_axis();
+                    const V3D dvl_meas_mean = aux_summary.mean_dvl_measurement();
+                    const V3D dvl_pred_mean = aux_summary.mean_dvl_prediction();
+                    const V3D dvl_body_vel_mean = aux_summary.mean_dvl_body_velocity();
                     std::cout << "[FLIO_AUX]"
                               << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
                               << " dvl_n=" << aux_summary.dvl_count
+                              << " dvl_acc=" << aux_summary.dvl_accepted
+                              << " dvl_rej=" << aux_summary.dvl_rejected
                               << " dvl_res_mean=" << aux_summary.mean_dvl_residual()
                               << " dvl_res_max=" << aux_summary.dvl_res_norm_max
+                              << " dvl_res_axis_mean=[" << dvl_res_axis_mean[0] << "," << dvl_res_axis_mean[1] << "," << dvl_res_axis_mean[2] << "]"
+                              << " dvl_res_axis_abs_max=[" << aux_summary.dvl_res_abs_max[0] << "," << aux_summary.dvl_res_abs_max[1] << "," << aux_summary.dvl_res_abs_max[2] << "]"
+                              << " dvl_meas_mean=[" << dvl_meas_mean[0] << "," << dvl_meas_mean[1] << "," << dvl_meas_mean[2] << "]"
+                              << " dvl_pred_mean=[" << dvl_pred_mean[0] << "," << dvl_pred_mean[1] << "," << dvl_pred_mean[2] << "]"
+                              << " dvl_body_vel_mean=[" << dvl_body_vel_mean[0] << "," << dvl_body_vel_mean[1] << "," << dvl_body_vel_mean[2] << "]"
                               << " pressure_n=" << aux_summary.pressure_count
+                              << " pressure_acc=" << aux_summary.pressure_accepted
+                              << " pressure_rej=" << aux_summary.pressure_rejected
                               << " pressure_depth_res_mean=" << aux_summary.mean_pressure_depth_residual()
+                              << " mag_n=" << aux_summary.mag_count
+                              << " mag_acc=" << aux_summary.mag_accepted
+                              << " mag_rej=" << aux_summary.mag_rejected
+                              << " mag_res_mean=" << aux_summary.mean_mag_residual()
+                              << " mag_res_max=" << aux_summary.mag_res_norm_max
                               << " dpos=[" << dpos_aux[0] << "," << dpos_aux[1] << "," << dpos_aux[2] << "]"
                               << " dvel=[" << dvel_aux[0] << "," << dvel_aux[1] << "," << dvel_aux[2] << "]"
                               << " drpy=[" << drpy_aux[0] << "," << drpy_aux[1] << "," << drpy_aux[2] << "]"
+                              << " yaw_deg=" << std::fixed << std::setprecision(2) << euler_cur[2]
+                              << " b_mag=[" << state_point.b_mag[0] << "," << state_point.b_mag[1] << "," << state_point.b_mag[2] << "]"
                               << std::endl;
                 }
             }
@@ -1219,7 +1247,11 @@ private:
 
             if (imu_only_measure)
             {
-                if (last_timestamp_lidar <= 0.0)
+                if (lid_topic.empty())
+                {
+                    // Intentional no-lidar mode. Startup already reported this once.
+                }
+                else if (last_timestamp_lidar <= 0.0)
                 {
                     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                                          "No LiDAR messages received on '%s'. Running IMU-only odometry.",
