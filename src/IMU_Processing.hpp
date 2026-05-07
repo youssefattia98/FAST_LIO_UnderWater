@@ -59,6 +59,16 @@ class ImuProcess
   Eigen::Matrix<double, 15, 15> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
+  // Forward-propagate the EKF from last_lidar_end_time_ to target_time, using
+  // IMU samples from imu_msgs whose stamp is within that window. Final
+  // sub-step (covering the remainder up to target_time) reuses the most recent
+  // IMU pair's averaged input. Updates last_lidar_end_time_ to target_time.
+  // Pre-init or non-positive dt: no-op, returns true. Returns false only on
+  // missing IMU data when one is genuinely needed.
+  bool PartialPropagate(double target_time,
+                        esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state,
+                        const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs);
+
   ofstream fout_imu;
   V3D cov_acc;
   V3D cov_gyr;
@@ -362,7 +372,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
   kf_state.predict(dt, Q, in);
-  
+
   imu_state = kf_state.get_x();
   last_imu_ = meas.imu.back();
   last_lidar_end_time_ = pcl_end_time;
@@ -456,6 +466,83 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
   t2 = omp_get_wtime();
   t3 = omp_get_wtime();
-  
+
   // cout<<"[ IMU Process ]: Time: "<<t3 - t1<<endl;
+}
+
+bool ImuProcess::PartialPropagate(double target_time,
+                                  esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state,
+                                  const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs)
+{
+  // Skip when EKF is not ready or target is in the past relative to current state.
+  if (imu_need_init_) return true;
+  if (last_lidar_end_time_ < 0.0) return true;
+  if (target_time <= last_lidar_end_time_ + 1e-9) return true;
+
+  // Build the same head/tail walk used in UndistortPcl: prepend last_imu_ so the
+  // first pair starts from the most recently fully-consumed sample.
+  std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> v_imu = imu_msgs;
+  if (last_imu_) v_imu.push_front(last_imu_);
+  if (v_imu.size() < 2) return false;
+
+  V3D angvel_avr, acc_avr;
+  input_ikfom in;
+  bool have_input = false;
+
+  for (auto it_imu = v_imu.begin(); it_imu < v_imu.end() - 1; ++it_imu)
+  {
+    if (last_lidar_end_time_ >= target_time - 1e-9) break;
+
+    const auto &head = *it_imu;
+    const auto &tail = *(it_imu + 1);
+    const double tail_stamp = rclcpp::Time(tail->header.stamp).seconds();
+    const double head_stamp = rclcpp::Time(head->header.stamp).seconds();
+
+    if (tail_stamp < last_lidar_end_time_) continue;
+    if (head_stamp >= target_time) break;
+
+    angvel_avr << 0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
+                  0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
+                  0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
+    acc_avr   << 0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
+                  0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
+                  0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
+    acc_avr = acc_avr * gravity_m_s2_ / mean_acc.norm();
+
+    const double seg_start = std::max(head_stamp, last_lidar_end_time_);
+    const double seg_end = std::min(tail_stamp, target_time);
+    double dt = seg_end - seg_start;
+    if (dt <= 0.0) continue;
+
+    in.acc = acc_avr;
+    in.gyro = angvel_avr;
+    have_input = true;
+    Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
+    Q.block<3, 3>(3, 3).diagonal() = cov_acc;
+    Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
+    Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
+    Q.block<3, 3>(12, 12).diagonal() = V3D(cov_bias_mag, cov_bias_mag, cov_bias_mag);
+    kf_state.predict(dt, Q, in);
+
+    last_lidar_end_time_ = seg_end;
+    state_ikfom st = kf_state.get_x();
+    angvel_last = angvel_avr - st.bg;
+    acc_s_last = st.rot * (acc_avr - st.ba);
+    for (int i = 0; i < 3; ++i) acc_s_last[i] += st.grav[i];
+  }
+
+  // If target is past the last available IMU sample, extrapolate using the
+  // most recent averaged input we computed.
+  if (last_lidar_end_time_ < target_time - 1e-9 && have_input)
+  {
+    double dt = target_time - last_lidar_end_time_;
+    kf_state.predict(dt, Q, in);
+    last_lidar_end_time_ = target_time;
+    state_ikfom st = kf_state.get_x();
+    angvel_last = angvel_avr - st.bg;
+    acc_s_last = st.rot * (acc_avr - st.ba);
+    for (int i = 0; i < 3; ++i) acc_s_last[i] += st.grav[i];
+  }
+
+  return last_lidar_end_time_ >= target_time - 1e-9;
 }

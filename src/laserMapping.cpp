@@ -887,6 +887,9 @@ public:
         this->declare_parameter<double>("mapping.acc_cov", 0.1);
         this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
+        this->declare_parameter<double>("mapping.init_b_gyr_cov", 0.0001);
+        this->declare_parameter<double>("mapping.init_b_acc_cov", 0.001);
+        this->declare_parameter<double>("mapping.init_grav_cov", 0.00001);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         ObservabilityManager::declare_parameters(*this);
@@ -937,6 +940,9 @@ public:
         this->get_parameter_or<double>("mapping.acc_cov",acc_cov,0.1);
         this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
+        this->get_parameter_or<double>("mapping.init_b_gyr_cov",init_b_gyr_cov,0.0001);
+        this->get_parameter_or<double>("mapping.init_b_acc_cov",init_b_acc_cov,0.001);
+        this->get_parameter_or<double>("mapping.init_grav_cov",init_grav_cov,0.00001);
         this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
         {
             vector<double> scale_vec = {1.0, 1.0, 1.0};
@@ -978,12 +984,7 @@ public:
             init_b_gyr_cov = 1e-10;
             init_grav_cov = 1e-10;
         }
-        else
-        {
-            init_b_acc_cov = 0.001;
-            init_b_gyr_cov = 0.0001;
-            init_grav_cov = 0.00001;
-        }
+        // else: init_b_acc_cov / init_b_gyr_cov / init_grav_cov already loaded from YAML above.
         init_b_dvl_cov = aux_fusion_.dvl_b_init_cov();
         init_b_pressure_cov = 1e4;
 
@@ -1180,23 +1181,50 @@ private:
                 p_imu->set_gyr_bias_cov(V3D(dyn_bg, dyn_bg, dyn_bg));
                 p_imu->set_acc_bias_cov(V3D(dyn_ba, dyn_ba, dyn_ba));
             }
+            // Run a once-per-frame Process call that handles IMU initialization
+            // and only does meaningful propagation while imu_need_init_ is true.
+            // After init, this call is effectively a no-op (PartialPropagate +
+            // the final Process below do the real work in the correct order).
+            if (!p_imu->IsInitialized())
+            {
+                p_imu->Process(Measures, kf, feats_undistort);
+                last_processed_time = Measures.lidar_end_time;
+                update_state_outputs();
+                return;
+            }
+
+            // Snapshot of the state at the START of this frame's processing,
+            // before any IMU prop or aux/LiDAR update. The [FLIO_AUX] log
+            // below uses this as the "before" reference; with timestamp-
+            // ordered aux fusion the per-aux IMU prop is interleaved, so
+            // there is no single "post-IMU-only, pre-aux" snapshot to take.
+            // dpos/dvel/drpy in [FLIO_AUX] thus represents the integrated
+            // motion across this frame (IMU prop + aux corrections) up to
+            // the FLIO_AUX log point (still before the LiDAR update).
+            const state_ikfom state_imu_pre = kf.get_x();
+
+            // Time-ordered aux fusion: each DVL/pressure/mag measurement is
+            // evaluated against the EKF state at its OWN timestamp. The
+            // propagator lambda advances IMU state by integrating IMU samples
+            // up to the requested time; subsequent calls continue from where
+            // the previous call left off.
+            auto aux_summary = aux_fusion_.process_interval_interleaved(
+                process_begin_time, Measures.lidar_end_time, Measures.imu, kf,
+                [&](double t_evt) {
+                    p_imu->PartialPropagate(t_evt, kf, Measures.imu);
+                });
+            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+
+            // Finish IMU propagation to lidar_end_time and run point
+            // undistortion. Process picks up at last_lidar_end_time_ which
+            // PartialPropagate has advanced to the most recent aux event time
+            // (or the original frame begin if no aux fired this frame).
             p_imu->Process(Measures, kf, feats_undistort);
             last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
 
-            if (!p_imu->IsInitialized())
-            {
-                return;
-            }
-
-            // Snapshot of the IMU-predicted state, before any LiDAR update touches it.
-            // Used by [FLIO_LIDAR] below to report the per-scan correction the LiDAR
-            // measurement applies on top of the IMU forward propagation.
-            const state_ikfom state_imu = state_point;
-            const V3D euler_imu = euler_cur;
-
-            auto aux_summary = aux_fusion_.process_interval(process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
-            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+            const state_ikfom state_imu = state_imu_pre;
+            const V3D euler_imu = SO3ToEuler(state_imu.rot);
             if (aux_summary.updated())
             {
                 update_state_outputs();

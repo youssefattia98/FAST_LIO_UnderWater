@@ -26,12 +26,17 @@
         mapping:
             # Bag-tuned no-sonar mode: freeze ba/bg because DVL+mag alone cannot
             # reliably observe IMU biases on this zigzagwall bag.
-            noiseless_imu: true
+            noiseless_imu: false
             # No sonar -> freeze ba/bg immediately via ObservabilityManager when noiseless_imu is false.
             obs_manager_sonar_timeout: 0.0
             obs_manager_ramp_time: 0.0
             obs_manager_freeze_cov: 1.0e-10
             imu_gyro_scale: [ 1.0, 1.0, 0.875 ]
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            init_b_acc_cov: 0.001
+            init_b_gyr_cov: 0.0001
+            init_grav_cov: 0.00001
             acc_cov: 0.001
             gyr_cov: 1e-6
             laser_point_cov: 1e-5
@@ -61,6 +66,7 @@
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             pressure_timeout: 0.25
             pressure_cov: 10000.0
+            innovation_gate_sigma: 3.0
 
         magnetometer:
             enable: true

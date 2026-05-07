@@ -130,6 +130,7 @@ public:
         node.declare_parameter<double>("dvl.innovation_gate_sigma", 5.0);
         node.declare_parameter<double>("dvl.bias_init_cov", 1e-3);
         node.declare_parameter<double>("pressure.pressure_cov", 1e4);
+        node.declare_parameter<double>("pressure.innovation_gate_sigma", 0.0);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
         node.declare_parameter<double>("pressure.gravity", 9.80665);
         node.declare_parameter<double>("pressure.surface_pressure", 101325.0);
@@ -163,6 +164,7 @@ public:
         node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
         node.get_parameter_or<double>("pressure.pressure_timeout", pressure_timeout_, 0.25);
         node.get_parameter_or<double>("pressure.pressure_cov", pressure_cov_, 1e4);
+        node.get_parameter_or<double>("pressure.innovation_gate_sigma", pressure_innovation_gate_sigma_, 0.0);
         node.get_parameter_or<double>("pressure.fluid_density", pressure_fluid_density_, 1025.0);
         node.get_parameter_or<double>("pressure.gravity", pressure_gravity_, 9.80665);
         node.get_parameter_or<double>("pressure.surface_pressure", pressure_surface_pressure_, 101325.0);
@@ -252,6 +254,7 @@ public:
         dvl_innovation_gate_sigma_ = std::max(0.0, dvl_innovation_gate_sigma_);
         dvl_b_init_cov_ = std::max(1e-12, dvl_b_init_cov_);
         pressure_cov_ = std::max(1e-6, pressure_cov_);
+        pressure_innovation_gate_sigma_ = std::max(0.0, pressure_innovation_gate_sigma_);
         pressure_fluid_density_ = std::max(1e-6, pressure_fluid_density_);
         pressure_gravity_ = std::max(1e-6, pressure_gravity_);
         mag_cov_ = std::max(1e-6, mag_cov_);
@@ -277,6 +280,119 @@ public:
             sub_mag_ = node.create_subscription<MagMsg>(
                 mag_topic_, qos, std::bind(&AuxiliarySensorFusion::mag_callback, this, std::placeholders::_1));
         }
+    }
+
+    // Time-ordered event fusion: walks all DVL/pressure/mag measurements in
+    // [begin_time, end_time] in chronological order, calling propagate_to(t)
+    // before each so the EKF state is at the measurement's own timestamp when
+    // the residual and update are computed. This avoids the previous
+    // scan-epoch-batched fusion where every aux measurement was evaluated at
+    // the trailing sonar/state time, producing wrong velocity residuals
+    // proportional to (state_time - measurement_time).
+    template <typename PropagatorFn>
+    UpdateSummary process_interval_interleaved(double begin_time,
+                                               double end_time,
+                                               const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
+                                               Ekf &kf,
+                                               PropagatorFn &&propagate_to)
+    {
+        UpdateSummary summary;
+
+        std::vector<DvlMsg::ConstSharedPtr> dvl_msgs;
+        std::vector<PressureMsg::ConstSharedPtr> pres_msgs;
+        std::vector<MagMsg::ConstSharedPtr> mag_msgs;
+        if (dvl_enable_)      dvl_msgs  = take_dvl_measurements(begin_time, end_time);
+        if (pressure_enable_) pres_msgs = take_pressure_measurements(begin_time, end_time);
+        if (mag_enable_)      mag_msgs  = take_mag_measurements(begin_time, end_time);
+
+        // Pressure: apply ALL messages in [begin_time, end_time], each at its
+        // own timestamp. Matches Codex's original timestamp-ordered fusion
+        // (which the user wants restored). The earlier "messages.back() only"
+        // logic in process_interval was a workaround for the wrong-time bug.
+
+        enum Kind { K_DVL, K_PRES, K_MAG };
+        struct Event {
+            double t;
+            Kind kind;
+            std::size_t idx;
+        };
+        std::vector<Event> events;
+        events.reserve(dvl_msgs.size() + pres_msgs.size() + mag_msgs.size());
+        for (std::size_t i = 0; i < dvl_msgs.size(); ++i)
+            events.push_back({get_time_sec(dvl_msgs[i]->header.stamp), K_DVL, i});
+        for (std::size_t i = 0; i < pres_msgs.size(); ++i)
+            events.push_back({get_time_sec(pres_msgs[i]->header.stamp), K_PRES, i});
+        for (std::size_t i = 0; i < mag_msgs.size(); ++i)
+            events.push_back({get_time_sec(mag_msgs[i]->header.stamp), K_MAG, i});
+        std::stable_sort(events.begin(), events.end(),
+                         [](const Event &a, const Event &b) { return a.t < b.t; });
+
+        for (const auto &ev : events)
+        {
+            // Advance EKF state to the measurement's own timestamp.
+            propagate_to(ev.t);
+
+            // Body angular velocity at the measurement time. We pick the IMU
+            // sample closest to ev.t; gives a closer omega than always using
+            // the most recent IMU when t_aux is mid-interval.
+            const V3D omega_body = body_omega_at_time(ev.t, imu_msgs, kf.get_x());
+
+            switch (ev.kind)
+            {
+                case K_DVL:
+                {
+                    const auto &msg = *dvl_msgs[ev.idx];
+                    const state_ikfom state = kf.get_x();
+                    const V3D measurement  = dvl_measurement(msg);
+                    const V3D prediction   = dvl_prediction(state, omega_body);
+                    const V3D body_velocity = dvl_sensor_origin_velocity_body(state, omega_body);
+                    const V3D residual = measurement - prediction;
+                    summary.dvl_count++;
+                    summary.dvl_res_norm_sum += residual.norm();
+                    summary.dvl_res_norm_max = std::max(summary.dvl_res_norm_max, residual.norm());
+                    summary.dvl_res_sum += residual;
+                    summary.dvl_res_abs_max = summary.dvl_res_abs_max.cwiseMax(residual.cwiseAbs());
+                    summary.dvl_meas_sum += measurement;
+                    summary.dvl_pred_sum += prediction;
+                    summary.dvl_body_vel_sum += body_velocity;
+                    const bool accepted = apply_dvl_update(msg, omega_body, kf);
+                    summary.dvl_accepted += accepted ? 1 : 0;
+                    summary.dvl_rejected += accepted ? 0 : 1;
+                    summary.dvl_updated = accepted || summary.dvl_updated;
+                    break;
+                }
+                case K_PRES:
+                {
+                    const auto &msg = *pres_msgs[ev.idx];
+                    const double residual_pa = pressure_residual(msg, kf.get_x());
+                    const double residual_depth = residual_pa / pressure_scale();
+                    summary.pressure_count++;
+                    summary.pressure_res_depth_sum += std::abs(residual_depth);
+                    summary.pressure_res_depth_max = std::max(summary.pressure_res_depth_max,
+                                                              std::abs(residual_depth));
+                    const bool accepted = apply_pressure_update(msg, kf);
+                    summary.pressure_accepted += accepted ? 1 : 0;
+                    summary.pressure_rejected += accepted ? 0 : 1;
+                    summary.pressure_updated = accepted || summary.pressure_updated;
+                    break;
+                }
+                case K_MAG:
+                {
+                    const auto &msg = *mag_msgs[ev.idx];
+                    const V3D residual = mag_residual(msg, kf.get_x());
+                    summary.mag_count++;
+                    summary.mag_res_norm_sum += residual.norm();
+                    summary.mag_res_norm_max = std::max(summary.mag_res_norm_max, residual.norm());
+                    const bool accepted = apply_mag_update(msg, kf);
+                    summary.mag_accepted += accepted ? 1 : 0;
+                    summary.mag_rejected += accepted ? 0 : 1;
+                    summary.mag_updated = accepted || summary.mag_updated;
+                    break;
+                }
+            }
+        }
+
+        return summary;
     }
 
     UpdateSummary process_interval(double begin_time,
@@ -446,6 +562,24 @@ private:
         return V3D(gyro.x, gyro.y, gyro.z) - V3D(state.bg[0], state.bg[1], state.bg[2]);
     }
 
+    // Pick the IMU sample whose stamp is closest to target_t and return the
+    // body-frame angular velocity it implies (raw gyro minus current bg).
+    V3D body_omega_at_time(double target_t,
+                           const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
+                           const state_ikfom &state) const
+    {
+        if (imu_msgs.empty()) return V3D::Zero();
+        auto best = imu_msgs.begin();
+        double best_diff = std::abs(get_time_sec((*best)->header.stamp) - target_t);
+        for (auto it = imu_msgs.begin(); it != imu_msgs.end(); ++it)
+        {
+            const double d = std::abs(get_time_sec((*it)->header.stamp) - target_t);
+            if (d < best_diff) { best_diff = d; best = it; }
+        }
+        const auto &gyro = (*best)->angular_velocity;
+        return V3D(gyro.x, gyro.y, gyro.z) - V3D(state.bg[0], state.bg[1], state.bg[2]);
+    }
+
     V3D dvl_measurement(const DvlMsg &msg) const
     {
         const auto &linear = msg.twist.twist.linear;
@@ -546,6 +680,13 @@ private:
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Zero(1, 1);
         R(0, 0) = covariance_or_fallback(msg.variance, pressure_cov_);
+
+        if (pressure_innovation_gate_sigma_ > 0.0)
+        {
+            const double sigma_pres = std::sqrt(R(0, 0));
+            if (std::abs(residual(0)) > pressure_innovation_gate_sigma_ * sigma_pres)
+                return false;
+        }
 
         return apply_linear_update(residual, H, R, kf);
     }
@@ -752,6 +893,7 @@ private:
     double dvl_innovation_gate_sigma_ = 5.0;
     double dvl_b_init_cov_ = 1e-3;
     double pressure_cov_ = 1e4;
+    double pressure_innovation_gate_sigma_ = 0.0;
     double camera_init_z_in_world_ = 0.0;
     double pressure_fluid_density_ = 1025.0;
     double pressure_gravity_ = 9.80665;
