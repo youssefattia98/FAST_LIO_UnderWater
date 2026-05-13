@@ -7,7 +7,7 @@
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/sonar_point_cloud"                      # Tuned DVL+mag+pressure test: sonar DISABLED
+            lid_topic:  "/sonar_point_cloud"               
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
 
@@ -24,10 +24,7 @@
             blind: 0.2
 
         mapping:
-            # Bag-tuned no-sonar mode: freeze ba/bg because DVL+mag alone cannot
-            # reliably observe IMU biases on this zigzagwall bag.
             noiseless_imu: false
-            # No sonar -> freeze ba/bg immediately via ObservabilityManager when noiseless_imu is false.
             obs_manager_sonar_timeout: 0.0
             obs_manager_ramp_time: 0.0
             obs_manager_freeze_cov: 1.0e-10

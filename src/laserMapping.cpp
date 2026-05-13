@@ -36,13 +36,11 @@
 #include <mutex>
 #include <math.h>
 #include <thread>
-#include <fstream>
 #include <csignal>
 #include <chrono>
 #include <algorithm>
 #include <unistd.h>
 #include <Python.h>
-#include <iomanip>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
@@ -155,8 +153,8 @@ shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
 void SigHandle(int sig)
 {
+    (void)sig;
     flg_exit = true;
-    std::cout << "catch sig %d" << sig << std::endl;
     sig_buffer.notify_all();
     rclcpp::shutdown();
 }
@@ -281,7 +279,6 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     double cur_time = get_time_sec(msg->header.stamp);
     if (!is_first_lidar && cur_time < last_timestamp_lidar)
     {
-        std::cerr << "lidar loop back, clear buffer" << std::endl;
         lidar_buffer.clear();
     }
     if (is_first_lidar)
@@ -302,7 +299,6 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
     publish_count ++;
-    // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
     msg->angular_velocity.x *= imu_gyro_scale.x();
@@ -315,7 +311,6 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
     if (timestamp < last_timestamp_imu)
     {
-        std::cerr << "imu loop back, clear buffer" << std::endl;
         imu_buffer.clear();
     }
 
@@ -348,8 +343,6 @@ bool sync_packages(MeasureGroup &meas)
     while (!lidar_pushed && !lidar_buffer.empty() && last_processed_time > 0.0 &&
            time_buffer.front() < last_processed_time - 1e-4)
     {
-        std::cerr << "drop stale lidar scan at " << time_buffer.front()
-                  << " because EKF is already propagated to " << last_processed_time << std::endl;
         lidar_buffer.pop_front();
         time_buffer.pop_front();
     }
@@ -366,7 +359,6 @@ bool sync_packages(MeasureGroup &meas)
         if (meas.lidar->points.size() <= 1) // time too little
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
-            std::cerr << "Too few input point cloud!\n";
         }
         else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
         {
@@ -420,18 +412,6 @@ bool sync_imu_only_packages(MeasureGroup &meas)
         return false;
     }
     const double first_imu_time = get_time_sec(imu_buffer.front()->header.stamp);
-    if (last_processed_time > 0.0 && first_imu_time - last_processed_time > expected_imu_timeout())
-    {
-        static double last_imu_gap_warn_time = -1e30;
-        if (first_imu_time - last_imu_gap_warn_time >= 5.0)
-        {
-            last_imu_gap_warn_time = first_imu_time;
-            std::cerr << "imu timestamp gap: next IMU is " << first_imu_time - last_processed_time
-                      << " s after the last processed state; nominal period is "
-                      << expected_imu_period() << " s from imu_rate_hz. Continuing; warning throttled to 5 s." << std::endl;
-        }
-    }
-
     meas.imu.clear();
     meas.lidar.reset(new PointCloudXYZI());
     double packet_begin_time = last_processed_time > 0.0 ? last_processed_time : first_imu_time;
@@ -571,7 +551,6 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
             pcd_index ++;
             string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
             pcl::PCDWriter pcd_writer;
-            cout << "current scan saved to /PCD/" << all_points_dir << endl;
             pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
             pcl_wait_save->clear();
             scan_wait_num = 0;
@@ -682,25 +661,6 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
 
-    {
-        std::cout << "[FLIO_STATE]"
-                  << " mode=" << g_publish_mode
-                  << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
-                  << " pos=[" << state_point.pos[0] << "," << state_point.pos[1] << "," << state_point.pos[2] << "]"
-                  << " vel=[" << state_point.vel[0] << "," << state_point.vel[1] << "," << state_point.vel[2] << "]"
-                  << " rpy=[" << euler_cur[0] << "," << euler_cur[1] << "," << euler_cur[2] << "]"
-                  << " ba=[" << state_point.ba[0] << "," << state_point.ba[1] << "," << state_point.ba[2] << "]"
-                  << " bg=[" << state_point.bg[0] << "," << state_point.bg[1] << "," << state_point.bg[2] << "]"
-                  << " grav=[" << state_point.grav[0] << "," << state_point.grav[1] << "," << state_point.grav[2] << "]"
-                  << " b_dvl=[" << state_point.b_dvl[0] << "," << state_point.b_dvl[1] << "," << state_point.b_dvl[2] << "]"
-                  << " b_pressure=" << state_point.b_pressure[0]
-                  << " b_mag=[" << state_point.b_mag[0] << "," << state_point.b_mag[1] << "," << state_point.b_mag[2] << "]"
-                  << " imu_buf=" << imu_buffer.size()
-                  << " lid_buf=" << lidar_buffer.size()
-                  << " feats=" << feats_down_size
-                  << " effct=" << effct_feat_num
-                  << std::endl;
-    }
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
     {
@@ -817,8 +777,6 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     if (effct_feat_num < 1)
     {
         ekfom_data.valid = false;
-        std::cerr << "No Effective Points!" << std::endl;
-        // ROS_WARN("No Effective Points! \n");
         return;
     }
 
@@ -1097,41 +1055,6 @@ public:
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
-        std::cout << "[FLIO_PARAMS]"
-                  << " imu_topic=" << imu_topic
-                  << " lid_topic='" << lid_topic << "'"
-                  << " imu_rate_hz=" << imu_rate_hz
-                  << " lidar_timeout=" << lidar_timeout
-                  << " gravity_m_s2=" << gravity_m_s2
-                  << " noiseless_imu=" << noiseless_imu
-                  << " obs_manager_active=" << !noiseless_imu
-                  << " imu_gyro_scale=[" << imu_gyro_scale.transpose() << "]"
-                  << " acc_cov=" << acc_cov << " gyr_cov=" << gyr_cov
-                  << " b_acc_cov=" << b_acc_cov << " b_gyr_cov=" << b_gyr_cov
-                  << " init_b_acc_cov=" << init_b_acc_cov << " init_b_gyr_cov=" << init_b_gyr_cov
-                  << " init_grav_cov=" << init_grav_cov
-                  << " init_b_dvl_cov=" << init_b_dvl_cov << " init_b_pressure_cov=" << init_b_pressure_cov
-                  << " laser_point_cov=" << LASER_POINT_COV
-                  << " extrinT=[" << extrinT[0] << "," << extrinT[1] << "," << extrinT[2] << "]"
-                  << " dvl_enable=" << aux_fusion_.dvl_enabled()
-                  << " dvl_topic='" << aux_fusion_.dvl_topic() << "'"
-                  << " dvl_timeout=" << aux_fusion_.dvl_timeout()
-                  << " dvl_velocity_cov=" << aux_fusion_.dvl_velocity_cov()
-                  << " dvl_innovation_gate_sigma=" << aux_fusion_.dvl_innovation_gate_sigma()
-                  << " dvl_bias_init_cov=" << aux_fusion_.dvl_b_init_cov()
-                  << " dvl_T=[" << aux_fusion_.dvl_T()[0] << "," << aux_fusion_.dvl_T()[1] << "," << aux_fusion_.dvl_T()[2] << "]"
-                  << " pressure_enable=" << aux_fusion_.pressure_enabled()
-                  << " pressure_topic='" << aux_fusion_.pressure_topic() << "'"
-                  << " pressure_timeout=" << aux_fusion_.pressure_timeout()
-                  << " pressure_T=[" << aux_fusion_.pressure_T()[0] << "," << aux_fusion_.pressure_T()[1] << "," << aux_fusion_.pressure_T()[2] << "]"
-                  << " mag_enable=" << aux_fusion_.mag_enabled()
-                  << " mag_topic='" << aux_fusion_.mag_topic() << "'"
-                  << " mag_timeout=" << aux_fusion_.mag_timeout()
-                  << " earth_field_ci=[" << aux_fusion_.earth_field_world().transpose() << "]"
-                  << " init_b_mag_cov=" << init_b_mag_cov
-                  << " max_iter=" << NUM_MAX_ITERATIONS
-                  << std::endl;
-
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
 
@@ -1193,16 +1116,6 @@ private:
                 return;
             }
 
-            // Snapshot of the state at the START of this frame's processing,
-            // before any IMU prop or aux/LiDAR update. The [FLIO_AUX] log
-            // below uses this as the "before" reference; with timestamp-
-            // ordered aux fusion the per-aux IMU prop is interleaved, so
-            // there is no single "post-IMU-only, pre-aux" snapshot to take.
-            // dpos/dvel/drpy in [FLIO_AUX] thus represents the integrated
-            // motion across this frame (IMU prop + aux corrections) up to
-            // the FLIO_AUX log point (still before the LiDAR update).
-            const state_ikfom state_imu_pre = kf.get_x();
-
             // Time-ordered aux fusion: each DVL/pressure/mag measurement is
             // evaluated against the EKF state at its OWN timestamp. The
             // propagator lambda advances IMU state by integrating IMU samples
@@ -1222,56 +1135,6 @@ private:
             p_imu->Process(Measures, kf, feats_undistort);
             last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
-
-            const state_ikfom state_imu = state_imu_pre;
-            const V3D euler_imu = SO3ToEuler(state_imu.rot);
-            if (aux_summary.updated())
-            {
-                update_state_outputs();
-                const V3D dpos_aux = state_point.pos - state_imu.pos;
-                const V3D dvel_aux = state_point.vel - state_imu.vel;
-                const V3D drpy_aux = euler_cur - euler_imu;
-                const bool log_aux = last_aux_log_time_ < 0.0 ||
-                                     Measures.lidar_end_time - last_aux_log_time_ >= 1.0;
-                if (log_aux)
-                {
-                    last_aux_log_time_ = Measures.lidar_end_time;
-                    const V3D dvl_res_axis_mean = aux_summary.mean_dvl_residual_axis();
-                    const V3D dvl_meas_mean = aux_summary.mean_dvl_measurement();
-                    const V3D dvl_pred_mean = aux_summary.mean_dvl_prediction();
-                    const V3D dvl_body_vel_mean = aux_summary.mean_dvl_body_velocity();
-                    std::cout << "[FLIO_AUX]"
-                              << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
-                              << " dvl_n=" << aux_summary.dvl_count
-                              << " dvl_acc=" << aux_summary.dvl_accepted
-                              << " dvl_rej=" << aux_summary.dvl_rejected
-                              << " dvl_res_mean=" << aux_summary.mean_dvl_residual()
-                              << " dvl_res_max=" << aux_summary.dvl_res_norm_max
-                              << " dvl_res_axis_mean=[" << dvl_res_axis_mean[0] << "," << dvl_res_axis_mean[1] << "," << dvl_res_axis_mean[2] << "]"
-                              << " dvl_res_axis_abs_max=[" << aux_summary.dvl_res_abs_max[0] << "," << aux_summary.dvl_res_abs_max[1] << "," << aux_summary.dvl_res_abs_max[2] << "]"
-                              << " dvl_meas_mean=[" << dvl_meas_mean[0] << "," << dvl_meas_mean[1] << "," << dvl_meas_mean[2] << "]"
-                              << " dvl_pred_mean=[" << dvl_pred_mean[0] << "," << dvl_pred_mean[1] << "," << dvl_pred_mean[2] << "]"
-                              << " dvl_body_vel_mean=[" << dvl_body_vel_mean[0] << "," << dvl_body_vel_mean[1] << "," << dvl_body_vel_mean[2] << "]"
-                              << " pressure_n=" << aux_summary.pressure_count
-                              << " pressure_acc=" << aux_summary.pressure_accepted
-                              << " pressure_rej=" << aux_summary.pressure_rejected
-                              << " pressure_depth_res_mean=" << aux_summary.mean_pressure_depth_residual()
-                              << " mag_n=" << aux_summary.mag_count
-                              << " mag_acc=" << aux_summary.mag_accepted
-                              << " mag_rej=" << aux_summary.mag_rejected
-                              << " mag_res_mean=" << aux_summary.mean_mag_residual()
-                              << " mag_res_max=" << aux_summary.mag_res_norm_max
-                              << " dpos=[" << dpos_aux[0] << "," << dpos_aux[1] << "," << dpos_aux[2] << "]"
-                              << " dvel=[" << dvel_aux[0] << "," << dvel_aux[1] << "," << dvel_aux[2] << "]"
-                              << " drpy=[" << drpy_aux[0] << "," << drpy_aux[1] << "," << drpy_aux[2] << "]"
-                              << " yaw_deg=" << std::fixed << std::setprecision(2) << euler_cur[2]
-                              << " b_mag=[" << state_point.b_mag[0] << "," << state_point.b_mag[1] << "," << state_point.b_mag[2] << "]"
-                              << std::endl;
-                }
-            }
-
-            const state_ikfom state_pred = state_point;
-            const V3D euler_pred = euler_cur;
 
             if (imu_only_measure)
             {
@@ -1335,8 +1198,6 @@ private:
             int featsFromMapNum = ikdtree.validnum();
             kdtree_size_st = ikdtree.size();
             
-            // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
-
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
@@ -1348,14 +1209,6 @@ private:
             
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
-
-            if(0) // If you need to see map point, change to "if(1)"
-            {
-                PointVector ().swap(ikdtree.PCL_Storage);
-                ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
-                featsFromMap->clear();
-                featsFromMap->points = ikdtree.PCL_Storage;
-            }
 
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
@@ -1371,26 +1224,6 @@ private:
             update_state_outputs();
 
             double t_update_end = omp_get_wtime();
-
-            // Per-scan LiDAR correction: how much did the iEKF update move the state
-            // away from the IMU/DVL/pressure prediction. A large value means scan
-            // matching is fighting the prediction (bad extrinsics, wrong noise
-            // covariances, or ambiguous geometry).
-            const V3D dpos = state_point.pos - state_pred.pos;
-            const V3D dvel = state_point.vel - state_pred.vel;
-            const V3D drpy = euler_cur - euler_pred;
-            std::cout << "[FLIO_LIDAR]"
-                      << " t=" << std::fixed << std::setprecision(6) << lidar_end_time
-                      << " feats_in=" << feats_undistort->points.size()
-                      << " feats_down=" << feats_down_size
-                      << " effct=" << effct_feat_num
-                      << " res_mean=" << std::scientific << std::setprecision(3) << res_mean_last
-                      << " dpos=[" << std::fixed << std::setprecision(6)
-                      << dpos[0] << "," << dpos[1] << "," << dpos[2] << "]"
-                      << " |dpos|=" << dpos.norm()
-                      << " dvel=[" << dvel[0] << "," << dvel[1] << "," << dvel[2] << "]"
-                      << " drpy=[" << drpy[0] << "," << drpy[1] << "," << drpy[2] << "]"
-                      << std::endl;
 
             /******* Publish odometry *******/
             g_publish_mode = "lidar_update";
@@ -1438,7 +1271,6 @@ private:
     int effect_feat_num = 0;
     double deltaT, deltaR;
     bool flg_EKF_converged, EKF_stop_flg = 0;
-    double last_aux_log_time_ = -1.0;
     double epsi[state_ikfom::DOF] = {0.001};
 };
 
@@ -1460,7 +1292,6 @@ int main(int argc, char** argv)
         string file_name = string("scans.pcd");
         string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
         pcl::PCDWriter pcd_writer;
-        cout << "current scan saved to /PCD/" << file_name<<endl;
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
     }
 

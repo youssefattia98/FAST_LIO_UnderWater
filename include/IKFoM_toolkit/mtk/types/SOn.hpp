@@ -139,14 +139,12 @@ struct SO2 : public Eigen::Rotation2D<_scalar> {
 	//! @name Manifold requirements
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}
@@ -250,14 +248,12 @@ struct SO3 : public Eigen::Quaternion<_scalar, Options> {
 	}
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}
@@ -314,4 +310,3 @@ struct UnalignedType<SO3<Scalar, Options > >{
 }  // namespace MTK
 
 #endif /*SON_H_*/
-

@@ -141,8 +141,6 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
   else
   {
     double time_stamp = rclcpp::Time(msg->header.stamp).seconds();
-    // cout << "===================================" << endl;
-    // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
     for (int i = 0; i < pl_orig.points.size(); i++)
     {
       if (i % point_filter_num != 0)
@@ -241,7 +239,6 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
         double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
         if (is_first[layer])
         {
-          // printf("layer: %d; is first: %d", layer, is_first[layer]);
           yaw_fp[layer] = yaw_angle;
           is_first[layer] = false;
           added_pt.curvature = 0.0;
@@ -296,7 +293,6 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
     for (int i = 0; i < plsize; i++)
     {
       PointType added_pt;
-      // cout<<"!!!!!!"<<i<<" "<<plsize<<endl;
 
       added_pt.normal_x = 0;
       added_pt.normal_y = 0;
@@ -306,7 +302,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
       added_pt.z = pl_orig.points[i].z;
       added_pt.intensity = pl_orig.points[i].intensity;
       added_pt.curvature =
-          pl_orig.points[i].time * time_unit_scale;  // curvature unit: ms // cout<<added_pt.curvature<<endl;
+          pl_orig.points[i].time * time_unit_scale;  // curvature unit: ms
 
       if (!given_offset_time)
       {
@@ -315,7 +311,6 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
 
         if (is_first[layer])
         {
-          // printf("layer: %d; is first: %d", layer, is_first[layer]);
           yaw_fp[layer] = yaw_angle;
           is_first[layer] = false;
           added_pt.curvature = 0.0;
@@ -403,7 +398,6 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
 
     if (is_first[layer])
     {
-      // printf("layer: %d; is first: %d", layer, is_first[layer]);
       yaw_fp[layer] = yaw_angle;
       is_first[layer] = false;
       added_pt.curvature = 0.0;
@@ -518,14 +512,8 @@ void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr 
     }
   };
 
-  static bool printed_missing_intensity_warning = false;
   const bool intensity_missing = (intensity_field == nullptr);
   const float fallback_intensity = std::numeric_limits<float>::max();
-  if (intensity_missing && !printed_missing_intensity_warning)
-  {
-    std::cerr << "Missing 'intensity' field in PointCloud2. Using max intensity for all points." << std::endl;
-    printed_missing_intensity_warning = true;
-  }
 
   pl_surf.reserve(point_count);
 
@@ -560,7 +548,6 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
   int plsize2;
   if (plsize == 0)
   {
-    printf("something wrong\n");
     return;
   }
   uint head = 0;

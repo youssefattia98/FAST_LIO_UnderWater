@@ -386,7 +386,6 @@ public:
 	void update_iterated(measurement& z, measurementnoisecovariance &R) {
 		
 		if(!(is_same<typename measurement::scalar, scalar_type>())){
-			std::cerr << "the scalar type of measurment must be the same as the state" << std::endl;
 			std::exit(100);
 		}
 		int t = 0;
@@ -592,7 +591,6 @@ public:
 	void update_iterated_share() {
 		
 		if(!(is_same<typename measurement::scalar, scalar_type>())){
-			std::cerr << "the scalar type of measurment must be the same as the state" << std::endl;
 			std::exit(100);
 		}
 
@@ -918,7 +916,6 @@ public:
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
-				std::cout << "iteration time:" << t << "," << i << std::endl;
 		
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
@@ -1124,7 +1121,6 @@ public:
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
-				std::cout << "iteration time:" << t << "," << i << std::endl;
 		
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
@@ -1328,7 +1324,6 @@ public:
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
-				std::cout << "iteration time:" << t << "," << i << std::endl;
 		
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
@@ -1536,7 +1531,6 @@ public:
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
-				std::cout << "iteration time:" << t << "," << i << std::endl;
 		
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
@@ -1785,7 +1779,6 @@ public:
 				P_temp. template block<12, 12>(0, 0) += HTH;
 				/*
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
-				//std::cout << "line 1767" << std::endl;
 				h_x_cur.col(0) = h_x_.col(0);
 				h_x_cur.col(1) = h_x_.col(1);
 				h_x_cur.col(2) = h_x_.col(2);
@@ -1800,9 +1793,7 @@ public:
 				h_x_cur.col(11) = h_x_.col(11);
 				*/
 				cov P_inv = P_temp.inverse();
-				//std::cout << "line 1781" << std::endl;
 				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h;
-				//std::cout << "line 1780" << std::endl;
 				//cov HTH_cur = cov::Zero();
 				//HTH_cur. template block<12, 12>(0, 0) = HTH;
 				K_x.setZero(); // = cov::Zero();
@@ -1834,7 +1825,6 @@ public:
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
-				//std::cout << "iteration time" << t << "," << i << std::endl; 
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
 				for(typename std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
@@ -1994,7 +1984,6 @@ private:
         double pos_dis = temp_vec.block( 3, 0, 3, 1 ).norm();
         if ( angular_dis >= 20 || pos_dis > 1 )
         {
-            printf( "Angular dis = %.2f, pos dis = %.2f\r\n", angular_dis, pos_dis );
             temp_vec.setZero();
         }
         return temp_vec;

@@ -132,14 +132,12 @@ struct vect : public Eigen::Matrix<_scalar, D, 1, _Options> {
 
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}
@@ -253,14 +251,12 @@ struct matrix : public Eigen::Matrix<_scalar, M, N, _Options> {
 
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}
@@ -303,14 +299,12 @@ struct Scalar {
 
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}
@@ -362,14 +356,12 @@ struct PositiveScalar {
 
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}
@@ -416,14 +408,12 @@ struct Complex : public std::complex<_scalar>{
 
 	void S2_Nx_yy(Eigen::Matrix<scalar, 2, 3> &res)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 2, 3>::Zero();
 	}
 
 	void S2_Mx(Eigen::Matrix<scalar, 3, 2> &res, MTK::vectview<const scalar, 2> delta)
 	{
-		std::cerr << "wrong idx for S2" << std::endl;
 		std::exit(100);	
     	res = Eigen::Matrix<scalar, 3, 2>::Zero();
 	}

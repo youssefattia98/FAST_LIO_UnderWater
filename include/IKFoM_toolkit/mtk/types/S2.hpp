@@ -251,7 +251,6 @@ public:
 		}
 		else
 		{
-			std::cerr << "No N(x, y) for x=-y" << std::endl;
 			std::exit(100);
 		}
 	}

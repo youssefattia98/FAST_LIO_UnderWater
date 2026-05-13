@@ -3,8 +3,6 @@
 #include <deque>
 #include <mutex>
 #include <thread>
-#include <fstream>
-#include <iomanip>
 #include <csignal>
 #include <so3_math.h>
 #include <Eigen/Eigen>
@@ -69,7 +67,6 @@ class ImuProcess
                         esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state,
                         const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs);
 
-  ofstream fout_imu;
   V3D cov_acc;
   V3D cov_gyr;
   V3D cov_acc_scale;
@@ -254,8 +251,6 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     cov_acc = cov_acc * (N - 1.0) / N + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) * (N - 1.0) / (N * N);
     cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (N - 1.0) / (N * N);
 
-    // cout<<"acc norm: "<<cur_acc.norm()<<" "<<mean_acc.norm()<<endl;
-
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
@@ -301,8 +296,6 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   /*** sort point clouds by offset time ***/
   pcl_out = *(meas.lidar);
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
-  // cout<<"[ IMU Process ]: Process lidar from "<<pcl_beg_time<<" to "<<pcl_end_time<<", " \
-  //          <<meas.imu.size()<<" imu msgs from "<<imu_beg_time<<" to "<<imu_end_time<<endl;
 
   /*** Initialize IMU pose ***/
   state_ikfom imu_state = kf_state.get_x();
@@ -333,7 +326,6 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
                 0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
 
-    // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
     acc_avr     = acc_avr * gravity_m_s2_ / mean_acc.norm(); // - state_inout.ba;
 
@@ -385,7 +377,6 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     auto head = it_kp - 1;
     auto tail = it_kp;
     R_imu<<MAT_FROM_ARRAY(head->rot);
-    // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
     vel_imu<<VEC_FROM_ARRAY(head->vel);
     pos_imu<<VEC_FROM_ARRAY(head->pos);
     acc_imu<<VEC_FROM_ARRAY(tail->acc);
@@ -417,9 +408,6 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
 void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
 {
-  double t1,t2,t3;
-  t1 = omp_get_wtime();
-
   if(meas.imu.empty()) {return;};
   assert(meas.lidar != nullptr);
 
@@ -432,7 +420,6 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     
     last_imu_   = meas.imu.back();
 
-    state_ikfom imu_state = kf_state.get_x();
     if (init_iter_num > MAX_INI_COUNT)
     {
       cov_acc *= pow(gravity_m_s2_ / mean_acc.norm(), 2);
@@ -440,34 +427,12 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
-      std::cout << "IMU Initial Done" << std::endl;
-      {
-        const state_ikfom st = kf_state.get_x();
-        std::cout << "[FLIO_INIT]"
-                  << " t=" << std::fixed << std::setprecision(6) << first_lidar_time
-                  << " mean_acc=[" << mean_acc.transpose() << "]"
-                  << " |mean_acc|=" << mean_acc.norm()
-                  << " mean_gyr=[" << mean_gyr.transpose() << "]"
-                  << " grav_init=[" << st.grav[0] << "," << st.grav[1] << "," << st.grav[2] << "]"
-                  << " g_set=" << gravity_m_s2_
-                  << " bg_init=[" << st.bg.transpose() << "]"
-                  << " N=" << init_iter_num
-                  << std::endl;
-      }
-      // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience: %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
-      //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
-      fout_imu.open(DEBUG_FILE_DIR("imu.txt"),ios::out);
     }
 
     return;
   }
 
   UndistortPcl(meas, kf_state, *cur_pcl_un_);
-
-  t2 = omp_get_wtime();
-  t3 = omp_get_wtime();
-
-  // cout<<"[ IMU Process ]: Time: "<<t3 - t1<<endl;
 }
 
 bool ImuProcess::PartialPropagate(double target_time,
