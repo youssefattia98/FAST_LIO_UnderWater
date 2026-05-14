@@ -11,3 +11,4 @@ config/imu_only_debug.yaml
 config/lidar_debug.yaml
 AIContext/*.md
 .claude/*
+plotter.py

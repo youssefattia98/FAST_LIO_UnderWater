@@ -13,12 +13,20 @@
             
 
             # zigzagwall_processed5
-            world_to_camera_init_T: [ -2.4879, -4.1801, -1.9160 ]
+            world_to_camera_init_T: [ -2.4879, -4.1801, -1.55 ]
             world_to_camera_init_R: [
                 0.7364, -0.6765, -0.0117,
                 0.6763,  0.7365, -0.0142,
                 0.0182,  0.0025,  0.9998
                 ]
+
+            # pillars_LF_1_processed/
+            # world_to_camera_init_T: [13.5140, -68.0855, -3.5146]
+            # world_to_camera_init_R: [
+            #     0.7351, -0.6750, -0.0594,
+            #     0.6757,  0.7371, -0.0112,
+            #     0.0513, -0.0319,  0.9982
+            #     ]
             imu_rate_hz: 200.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.8
@@ -32,12 +40,16 @@
             obs_manager_ramp_time: 0.0
             obs_manager_freeze_cov: 1.0e-10
             imu_gyro_scale: [ 1.0, 1.0, 0.875 ]
+
+
             b_acc_cov: 0.0001
             b_gyr_cov: 0.0001
             init_b_acc_cov: 0.001
             init_b_gyr_cov: 0.0001
             init_grav_cov: 0.00001
-            acc_cov: 0.001
+
+
+            acc_cov: 0.1
             gyr_cov: 1e-6
             laser_point_cov: 1e-5
             fov_degree:    90.0
@@ -64,8 +76,9 @@
             enable: true
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
+            surface_pressure: 103967.0
             pressure_timeout: 0.25
-            pressure_cov: 10000.0
+            pressure_cov: 1.0
             innovation_gate_sigma: 3.0
 
         magnetometer:
