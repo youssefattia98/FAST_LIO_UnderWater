@@ -867,12 +867,17 @@ private:
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Identity(3, 3) * mag_cov_;
 
+        // Innovation covariance: use S = H*P*H^T + R for a proper gate.
+        // This lets large residuals through when state uncertainty is large (e.g.,
+        // during b_mag init) and tightens automatically as covariance collapses.
         if (mag_innovation_gate_sigma_ > 0.0)
         {
-            const double sigma_mag = std::sqrt(mag_cov_);
+            const typename Ekf::cov &P_state = kf.get_P();
+            const Eigen::MatrixXd S_innov = H * P_state * H.transpose() + R;
             for (int i = 0; i < 3; ++i)
             {
-                if (std::abs(residual[i]) > mag_innovation_gate_sigma_ * sigma_mag)
+                const double innov_sigma = std::sqrt(S_innov(i, i));
+                if (std::abs(residual[i]) > mag_innovation_gate_sigma_ * innov_sigma)
                     return false;
             }
         }

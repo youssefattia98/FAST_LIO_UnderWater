@@ -1066,11 +1066,15 @@ private:
     void timer_callback()
     {
         bool imu_only_measure = false;
-        bool has_measurement = sync_packages(Measures);
-        if (!has_measurement)
+        bool has_measurement = false;
         {
-            imu_only_measure = sync_imu_only_packages(Measures);
-            has_measurement = imu_only_measure;
+            std::lock_guard<std::mutex> lock(mtx_buffer);
+            has_measurement = sync_packages(Measures);
+            if (!has_measurement)
+            {
+                imu_only_measure = sync_imu_only_packages(Measures);
+                has_measurement = imu_only_measure;
+            }
         }
 
         if(has_measurement)
@@ -1150,9 +1154,13 @@ private:
                 }
                 else
                 {
-                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                         "No LiDAR scan for %.2f s (timeout %.2f s). Running IMU-only odometry.",
-                                         Measures.lidar_end_time - last_timestamp_lidar, lidar_timeout);
+                    const double lidar_gap = Measures.lidar_end_time - last_timestamp_lidar;
+                    if (lidar_gap >= lidar_timeout)
+                    {
+                        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                             "No LiDAR scan for %.2f s (timeout %.2f s). Running IMU-only odometry.",
+                                             lidar_gap, lidar_timeout);
+                    }
                 }
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
