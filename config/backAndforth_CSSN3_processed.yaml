@@ -1,7 +1,10 @@
 /**:
     ros__parameters:
+        # Maximum IEKF scan-to-map correction iterations per LiDAR/sonar frame.
         max_iteration: 16
+        # Voxel leaf size in meters for downsampling the current scan before matching.
         filter_size_surf: 0.3
+        # Voxel leaf size in meters for downsampling points inserted into the map/ikd-tree.
         filter_size_map: 0.3
         cube_side_length: 60.0
         map_file_path: "./test.pcd"
