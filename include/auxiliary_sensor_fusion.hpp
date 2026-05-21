@@ -996,20 +996,6 @@ private:
     double pressure_gravity_ = 9.80665;
     double pressure_surface_pressure_ = 101325.0;
     double pressure_surface_z_ = 0.0;
-    // Pressure auto-zero (two-stage). Mirrors how IMU_init averages early
-    // samples, but the final reference also needs the EKF's initial pose to
-    // produce a zero initial residual:
-    //   stage 1 (pressure_callback): accumulate first N readings; do NOT push
-    //           them into pressure_buffer_, so the EKF sees no pressure
-    //           updates during calibration. Mark pressure_samples_ready_ once
-    //           N collected.
-    //   stage 2 (apply_pressure_update, first call): with the EKF state now
-    //           available, set
-    //               pressure_surface_pressure_ = mean - rho*g*(surface_z - sensor_z(0))
-    //           so the predicted pressure exactly matches the mean measurement
-    //           at the initial state. This avoids a large initial residual
-    //           getting distributed across pos.z, rotation and b_pressure
-    //           (the off-axis pressure_T means it WOULD perturb pitch/roll).
     static constexpr int kPressureInitSamples = 10;
     int    pressure_init_samples_collected_ = 0;
     double pressure_init_sum_               = 0.0;
