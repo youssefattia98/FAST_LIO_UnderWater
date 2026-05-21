@@ -67,6 +67,27 @@ class ImuProcess
                         esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state,
                         const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs);
 
+  // Set the initial body pose in the World frame. With this set, IMU_init
+  // starts state.pos/state.rot at these values (instead of 0/identity) and
+  // rotates the measured gravity into World so the EKF runs directly in the
+  // World frame. Default values (zero/identity) preserve the original
+  // camera_init-origin behavior.
+  void set_world_init_pose(const V3D &T, const M3D &R)
+  {
+    world_init_T_ = T;
+    world_init_R_ = R;
+  }
+
+  // Seed IMUpose with the frame-start anchor (offset_time=0.0, current state).
+  // Records pcl_beg_time so PartialPropagate / UndistortPcl can compute
+  // per-sample offset_times. Call once per LiDAR frame, BEFORE any
+  // PartialPropagate call (i.e. before aux fusion). Without this, UndistortPcl
+  // would seed the anchor itself from a state that PartialPropagate has
+  // already advanced past frame start, corrupting motion compensation of
+  // early-frame points.
+  void begin_undistortion_frame(const MeasureGroup &meas,
+                                esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state);
+
   V3D cov_acc;
   V3D cov_gyr;
   V3D cov_acc_scale;
@@ -101,6 +122,15 @@ class ImuProcess
   double gravity_m_s2_;
   double start_timestamp_;
   double last_lidar_end_time_;
+  // Frame-start lidar timestamp (set by begin_undistortion_frame), used to
+  // convert absolute IMU/aux timestamps into offset_time entries in IMUpose
+  // that both PartialPropagate and UndistortPcl append to.
+  double pcl_beg_time_ = 0.0;
+  // Initial body pose in World, set via set_world_init_pose(). Defaults to
+  // identity, in which case IMU_init behaves as the original FAST-LIO (state
+  // starts at origin/identity in camera_init).
+  V3D world_init_T_ = V3D::Zero();
+  M3D world_init_R_ = M3D::Identity();
   int    init_iter_num = 1;
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;
@@ -254,9 +284,21 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
-  init_state.grav = S2(- mean_acc / mean_acc.norm() * gravity_m_s2_);
-  
-  //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
+
+  // Initialize body pose in World from the configured world_init transform.
+  // With defaults (zero/identity) this preserves original behavior (state starts
+  // at origin in camera_init frame). With non-trivial values, the EKF runs
+  // directly in the World frame -> raw state values match the GT /tf.
+  init_state.pos = world_init_T_;
+  Eigen::Quaterniond q_world_init(world_init_R_);
+  q_world_init.normalize();
+  init_state.rot = SO3(q_world_init);
+
+  // Gravity must be expressed in the EKF's "world" frame. mean_acc is in the
+  // body frame; rotate by world_init_R_ (body-in-World) to get gravity in
+  // World. With world_init_R_ = identity this reduces to the original formula.
+  init_state.grav = S2(world_init_R_ * (- mean_acc / mean_acc.norm() * gravity_m_s2_));
+
   init_state.bg  = mean_gyr;
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
@@ -298,9 +340,18 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
 
   /*** Initialize IMU pose ***/
+  // If begin_undistortion_frame() was called this frame, IMUpose is already seeded
+  // with the offset_time=0.0 anchor (frame-start state) and any per-aux entries
+  // populated by PartialPropagate. Continue appending from there so the trajectory
+  // is complete. Only fall back to seeding the anchor here if nothing pre-seeded it
+  // (e.g. callers that bypass the interleaved aux path).
   state_ikfom imu_state = kf_state.get_x();
-  IMUpose.clear();
-  IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
+  if (IMUpose.empty())
+  {
+    IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last,
+                                 imu_state.vel, imu_state.pos,
+                                 imu_state.rot.toRotationMatrix()));
+  }
 
   /*** forward propagation at each imu point ***/
   V3D angvel_avr, acc_avr, acc_imu, vel_imu, pos_imu;
@@ -435,6 +486,22 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
   UndistortPcl(meas, kf_state, *cur_pcl_un_);
 }
 
+void ImuProcess::begin_undistortion_frame(const MeasureGroup &meas,
+                                          esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state)
+{
+  // Capture pcl_beg_time so PartialPropagate's appends to IMUpose use the
+  // same offset_time convention UndistortPcl will use later.
+  pcl_beg_time_ = meas.lidar_beg_time;
+  // Seed IMUpose with the anchor pose at offset_time=0.0, taken from the
+  // current EKF state (which at this point is the frame-start state, before
+  // PartialPropagate has touched it).
+  IMUpose.clear();
+  const state_ikfom imu_state = kf_state.get_x();
+  IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last,
+                               imu_state.vel, imu_state.pos,
+                               imu_state.rot.toRotationMatrix()));
+}
+
 bool ImuProcess::PartialPropagate(double target_time,
                                   esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state,
                                   const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs)
@@ -494,6 +561,12 @@ bool ImuProcess::PartialPropagate(double target_time,
     angvel_last = angvel_avr - st.bg;
     acc_s_last = st.rot * (acc_avr - st.ba);
     for (int i = 0; i < 3; ++i) acc_s_last[i] += st.grav[i];
+    // Record the propagated pose so UndistortPcl can motion-compensate points
+    // captured in [previous_aux_time, seg_end]. Same set_pose6d call shape that
+    // UndistortPcl's forward loop uses; offset_time relative to pcl_beg_time_
+    // seeded by begin_undistortion_frame().
+    IMUpose.push_back(set_pose6d(seg_end - pcl_beg_time_, acc_s_last, angvel_last,
+                                 st.vel, st.pos, st.rot.toRotationMatrix()));
   }
 
   // If target is past the last available IMU sample, extrapolate using the
@@ -507,6 +580,8 @@ bool ImuProcess::PartialPropagate(double target_time,
     angvel_last = angvel_avr - st.bg;
     acc_s_last = st.rot * (acc_avr - st.ba);
     for (int i = 0; i < 3; ++i) acc_s_last[i] += st.grav[i];
+    IMUpose.push_back(set_pose6d(target_time - pcl_beg_time_, acc_s_last, angvel_last,
+                                 st.vel, st.pos, st.rot.toRotationMatrix()));
   }
 
   return last_lidar_end_time_ >= target_time - 1e-9;

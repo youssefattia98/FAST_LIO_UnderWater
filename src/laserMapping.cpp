@@ -43,6 +43,7 @@
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
@@ -944,7 +945,7 @@ public:
         }
         // else: init_b_acc_cov / init_b_gyr_cov / init_grav_cov already loaded from YAML above.
         init_b_dvl_cov = aux_fusion_.dvl_b_init_cov();
-        init_b_pressure_cov = 1e4;
+        init_b_pressure_cov = aux_fusion_.pressure_b_init_cov();
 
         path.header.stamp = this->get_clock()->now();
         path.header.frame_id ="camera_init";
@@ -987,6 +988,11 @@ public:
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** ROS subscribe initialization ***/
+        sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+        processing_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::SubscriptionOptions sensor_options;
+        sensor_options.callback_group = sensor_callback_group_;
+
         if (lid_topic.empty())
         {
             RCLCPP_WARN(this->get_logger(),
@@ -995,11 +1001,11 @@ public:
         else
         {
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+                lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk, sensor_options);
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk);
-        aux_fusion_.create_subscriptions(*this);
+            imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk, sensor_options);
+        aux_fusion_.create_subscriptions(*this, sensor_callback_group_);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -1023,35 +1029,41 @@ public:
             RCLCPP_WARN(this->get_logger(),
                         "common.world_to_camera_init_R must have 9 values. Using identity rotation.");
         }
-        Eigen::Quaterniond world_to_camera_init_quat(world_to_camera_init_rot);
-        world_to_camera_init_quat.normalize();
+        // EKF state lives directly in the World frame: hand world_to_camera_init
+        // to ImuProcess so IMU_init starts state.pos / state.rot at those values
+        // and rotates gravity into World. Defaults (zero/identity) preserve
+        // original camera_init-origin behavior.
+        V3D world_init_T_vec(world_to_camera_init_T[0],
+                             world_to_camera_init_T[1],
+                             world_to_camera_init_T[2]);
+        p_imu->set_world_init_pose(world_init_T_vec, world_to_camera_init_rot);
 
+        // Now that the EKF runs in World, the static frame "camera_init" is just
+        // an alias for World. Publish the World -> camera_init TF as identity so
+        // the camera_init points and odometry overlay World directly (no double
+        // application of world_to_camera_init).
         geometry_msgs::msg::TransformStamped world_to_camera_init;
         world_to_camera_init.header.stamp = this->get_clock()->now();
         world_to_camera_init.header.frame_id = world_frame;
         world_to_camera_init.child_frame_id = "camera_init";
-        world_to_camera_init.transform.translation.x = world_to_camera_init_T[0];
-        world_to_camera_init.transform.translation.y = world_to_camera_init_T[1];
-        world_to_camera_init.transform.translation.z = world_to_camera_init_T[2];
-        world_to_camera_init.transform.rotation.x = world_to_camera_init_quat.x();
-        world_to_camera_init.transform.rotation.y = world_to_camera_init_quat.y();
-        world_to_camera_init.transform.rotation.z = world_to_camera_init_quat.z();
-        world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
+        world_to_camera_init.transform.translation.x = 0.0;
+        world_to_camera_init.transform.translation.y = 0.0;
+        world_to_camera_init.transform.translation.z = 0.0;
+        world_to_camera_init.transform.rotation.x = 0.0;
+        world_to_camera_init.transform.rotation.y = 0.0;
+        world_to_camera_init.transform.rotation.z = 0.0;
+        world_to_camera_init.transform.rotation.w = 1.0;
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
 
-        // Inform the pressure model where camera_init sits in the world z-axis so
-        // depth calculations remain correct when world_to_camera_init_T.z != 0.
-        aux_fusion_.set_camera_init_z_in_world(world_to_camera_init_T[2]);
-
-        // The IEKF state frame is camera_init, equal to body at startup. The
-        // configured magnetic reference is already in that frame, not global World.
-        aux_fusion_.apply_initial_rotation(world_to_camera_init_rot);
+        // EKF state is in World now; camera_init's z offset in World is zero.
+        aux_fusion_.set_camera_init_z_in_world(0.0);
 
         //------------------------------------------------------------------------------------------------------
         // Drive processing from wall time so rosbag replay can drain buffered
         // IMU/LiDAR messages even after simulated /clock stops publishing.
         timer_ = this->create_wall_timer(std::chrono::milliseconds(1),
-                                         std::bind(&LaserMappingNode::timer_callback, this));
+                                         std::bind(&LaserMappingNode::timer_callback, this),
+                                         processing_callback_group_);
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -1119,6 +1131,14 @@ private:
                 update_state_outputs();
                 return;
             }
+
+            // Seed IMUpose with the frame-start anchor BEFORE the interleaved aux
+            // fusion runs. PartialPropagate appends per-aux entries; UndistortPcl
+            // later continues appending for IMU samples beyond the last aux event.
+            // Without this, PartialPropagate would advance the EKF past frame start
+            // and UndistortPcl would seed the anchor from a mid-frame state ->
+            // corrupted motion compensation for early-frame points (the a1f8b56 bug).
+            p_imu->begin_undistortion_frame(Measures, kf);
 
             // Time-ordered aux fusion: each DVL/pressure/mag measurement is
             // evaluated against the EKF state at its OWN timestamp. The
@@ -1269,6 +1289,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
+    rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr processing_callback_group_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
@@ -1288,7 +1310,10 @@ int main(int argc, char** argv)
 
     signal(SIGINT, SigHandle);
 
-    rclcpp::spin(std::make_shared<LaserMappingNode>());
+    auto node = std::make_shared<LaserMappingNode>();
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+    executor.add_node(node);
+    executor.spin();
 
     if (rclcpp::ok())
         rclcpp::shutdown();

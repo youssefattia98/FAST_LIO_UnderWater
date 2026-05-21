@@ -10,13 +10,18 @@
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/sonar_point_cloud"
+            lid_topic:  "/sonar_point_cloud"               
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
+            
+
             world_to_camera_init_T: [ 0.0, 0.0, 0.0 ]
-            world_to_camera_init_R: [ 1.0, 0.0, 0.0,
-                                      0.0, 1.0, 0.0,
-                                      0.0, 0.0, 1.0 ]
+            world_to_camera_init_R: [
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0
+                ]
+
             imu_rate_hz: 100.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.8100004196167
@@ -26,7 +31,20 @@
 
         mapping:
             noiseless_imu: true
-            acc_cov: 0.001
+            obs_manager_sonar_timeout: 0.0
+            obs_manager_ramp_time: 0.0
+            obs_manager_freeze_cov: 1.0e-10
+            imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
+
+
+            b_acc_cov: 0.001
+            b_gyr_cov: 0.0001
+            init_b_acc_cov: 0.001
+            init_b_gyr_cov: 0.0001
+            init_grav_cov: 0.00001
+
+
+            acc_cov: 0.1
             gyr_cov: 0.000001
             laser_point_cov: 0.0001
             fov_degree:    90.0
@@ -43,13 +61,22 @@
             extrinsic_R: [ 1., 0., 0.,
                            0., 1., 0.,
                            0., 0., 1. ]
-            dvl_timeout: 0.25
+            dvl_timeout: 0.55
+            velocity_cov: 5.0e-5
+            innovation_gate_sigma: 0.0
+            # Keep DVL bias fixed near zero in no-sonar mode so velocity cannot be hidden in b_dvl.
+            bias_init_cov: 1.0e-10
 
         pressure:
-            enable: true
+            enable: true    
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
+            surface_pressure: 101325.0
             pressure_timeout: 0.25
+            pressure_cov: 1.0
+            bias_init_cov: 1.0e-10
+            innovation_gate_sigma: 3.0
+
 
         publish:
             path_en:  false
@@ -58,5 +85,5 @@
             scan_bodyframe_pub_en: true
 
         pcd_save:
-            pcd_save_en: true
+            pcd_save_en: false
             interval: -1

@@ -75,16 +75,17 @@
             surface_pressure: 103967.0
             pressure_timeout: 0.25
             pressure_cov: 1.0e8
+            bias_init_cov: 1.0e4
             innovation_gate_sigma: 3.0
 
         magnetometer:
             enable: true
             topic: "/auv/imu/magnetic_field"
-            earth_field_imu: [ -242.6, 224.6, 530.6 ]
             hard_iron_offset: [ 120.0, -50.0, 0.0 ]
-            soft_iron_matrix: [ -1., 0., 0.,
-                                0., -1., 0.,
-                                0., 0., -1. ]
+            soft_iron_matrix: [ 1., 0., 0.,
+                                0., 1., 0.,
+                                0., 0., 1. ]
+            axis_sign: [ -1.0, -1.0, -1.0 ]
             mag_cov: 100.0
             b_mag_init_cov: 1.0e6
             b_mag_proc_cov: 0.001

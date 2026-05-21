@@ -130,6 +130,7 @@ public:
         node.declare_parameter<double>("dvl.innovation_gate_sigma", 5.0);
         node.declare_parameter<double>("dvl.bias_init_cov", 1e-3);
         node.declare_parameter<double>("pressure.pressure_cov", 1e4);
+        node.declare_parameter<double>("pressure.bias_init_cov", 1e4);
         node.declare_parameter<double>("pressure.innovation_gate_sigma", 0.0);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
         node.declare_parameter<double>("pressure.gravity", 9.80665);
@@ -138,12 +139,10 @@ public:
 
         node.declare_parameter<bool>("magnetometer.enable", false);
         node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
-        // Field expressed in camera_init/body-at-start frame. The IEKF state frame is
-        // camera_init, so this is the reference used by h = R_ci_body^T * B_ci.
-        node.declare_parameter<std::vector<double>>("magnetometer.earth_field_imu", {0.0, 0.0, 0.0});
         node.declare_parameter<std::vector<double>>("magnetometer.hard_iron_offset", {0.0, 0.0, 0.0});
         node.declare_parameter<std::vector<double>>("magnetometer.soft_iron_matrix",
             {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
+        node.declare_parameter<std::vector<double>>("magnetometer.axis_sign", {1.0, 1.0, 1.0});
         node.declare_parameter<double>("magnetometer.mag_cov", 1849.0);
         node.declare_parameter<double>("magnetometer.b_mag_init_cov", 1e6);
         node.declare_parameter<double>("magnetometer.b_mag_proc_cov", 0.001);
@@ -164,6 +163,7 @@ public:
         node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
         node.get_parameter_or<double>("pressure.pressure_timeout", pressure_timeout_, 0.25);
         node.get_parameter_or<double>("pressure.pressure_cov", pressure_cov_, 1e4);
+        node.get_parameter_or<double>("pressure.bias_init_cov", pressure_b_init_cov_, 1e4);
         node.get_parameter_or<double>("pressure.innovation_gate_sigma", pressure_innovation_gate_sigma_, 0.0);
         node.get_parameter_or<double>("pressure.fluid_density", pressure_fluid_density_, 1025.0);
         node.get_parameter_or<double>("pressure.gravity", pressure_gravity_, 9.80665);
@@ -220,16 +220,11 @@ public:
         node.get_parameter_or<double>("magnetometer.innovation_gate_sigma", mag_innovation_gate_sigma_, 3.0);
         node.get_parameter_or<double>("magnetometer.mag_timeout", mag_timeout_, 0.5);
 
-        std::vector<double> earth_field, hard_iron, soft_iron;
-        node.get_parameter_or<std::vector<double>>("magnetometer.earth_field_imu", earth_field, {0., 0., 0.});
+        std::vector<double> hard_iron, soft_iron, axis_sign;
         node.get_parameter_or<std::vector<double>>("magnetometer.hard_iron_offset", hard_iron, {0., 0., 0.});
         node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron_matrix", soft_iron,
             {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
-
-        if (earth_field.size() == 3)
-            mag_earth_field_imu_ << earth_field[0], earth_field[1], earth_field[2];
-        else
-            mag_earth_field_imu_.setZero();
+        node.get_parameter_or<std::vector<double>>("magnetometer.axis_sign", axis_sign, {1., 1., 1.});
 
         if (hard_iron.size() == 3)
             mag_hard_iron_ << hard_iron[0], hard_iron[1], hard_iron[2];
@@ -246,6 +241,10 @@ public:
         {
             mag_soft_iron_.setIdentity();
         }
+        if (axis_sign.size() == 3)
+            mag_axis_sign_ << axis_sign[0], axis_sign[1], axis_sign[2];
+        else
+            mag_axis_sign_.setOnes();
 
         dvl_timeout_ = std::max(0.0, dvl_timeout_);
         pressure_timeout_ = std::max(0.0, pressure_timeout_);
@@ -254,31 +253,38 @@ public:
         dvl_innovation_gate_sigma_ = std::max(0.0, dvl_innovation_gate_sigma_);
         dvl_b_init_cov_ = std::max(1e-12, dvl_b_init_cov_);
         pressure_cov_ = std::max(1e-6, pressure_cov_);
+        pressure_b_init_cov_ = std::max(1e-12, pressure_b_init_cov_);
         pressure_innovation_gate_sigma_ = std::max(0.0, pressure_innovation_gate_sigma_);
         pressure_fluid_density_ = std::max(1e-6, pressure_fluid_density_);
         pressure_gravity_ = std::max(1e-6, pressure_gravity_);
         mag_cov_ = std::max(1e-6, mag_cov_);
     }
 
-    void create_subscriptions(rclcpp::Node &node)
+    void create_subscriptions(rclcpp::Node &node,
+                              const rclcpp::CallbackGroup::SharedPtr &callback_group = nullptr)
     {
         auto qos = rclcpp::QoS(rclcpp::KeepLast(200000));
         qos.best_effort();
+        rclcpp::SubscriptionOptions options;
+        options.callback_group = callback_group;
 
         if (dvl_enable_)
         {
             sub_dvl_ = node.create_subscription<DvlMsg>(
-                dvl_topic_, qos, std::bind(&AuxiliarySensorFusion::dvl_callback, this, std::placeholders::_1));
+                dvl_topic_, qos, std::bind(&AuxiliarySensorFusion::dvl_callback, this, std::placeholders::_1),
+                options);
         }
         if (pressure_enable_)
         {
             sub_pressure_ = node.create_subscription<PressureMsg>(
-                pressure_topic_, qos, std::bind(&AuxiliarySensorFusion::pressure_callback, this, std::placeholders::_1));
+                pressure_topic_, qos, std::bind(&AuxiliarySensorFusion::pressure_callback, this, std::placeholders::_1),
+                options);
         }
         if (mag_enable_)
         {
             sub_mag_ = node.create_subscription<MagMsg>(
-                mag_topic_, qos, std::bind(&AuxiliarySensorFusion::mag_callback, this, std::placeholders::_1));
+                mag_topic_, qos, std::bind(&AuxiliarySensorFusion::mag_callback, this, std::placeholders::_1),
+                options);
         }
     }
 
@@ -379,7 +385,8 @@ public:
                 case K_MAG:
                 {
                     const auto &msg = *mag_msgs[ev.idx];
-                    const V3D residual = mag_residual(msg, kf.get_x());
+                    const state_ikfom state = kf.get_x();
+                    const V3D residual = mag_reference_ready_ ? mag_residual(msg, state) : V3D::Zero();
                     summary.mag_count++;
                     summary.mag_res_norm_sum += residual.norm();
                     summary.mag_res_norm_max = std::max(summary.mag_res_norm_max, residual.norm());
@@ -450,7 +457,8 @@ public:
             const auto messages = take_mag_measurements(begin_time, end_time);
             for (const auto &msg : messages)
             {
-                const V3D residual = mag_residual(*msg, kf.get_x());
+                const state_ikfom state = kf.get_x();
+                const V3D residual = mag_reference_ready_ ? mag_residual(*msg, state) : V3D::Zero();
                 summary.mag_count++;
                 summary.mag_res_norm_sum += residual.norm();
                 summary.mag_res_norm_max = std::max(summary.mag_res_norm_max, residual.norm());
@@ -501,6 +509,7 @@ public:
     double dvl_velocity_cov() const { return dvl_velocity_cov_; }
     double dvl_innovation_gate_sigma() const { return dvl_innovation_gate_sigma_; }
     double dvl_b_init_cov() const { return dvl_b_init_cov_; }
+    double pressure_b_init_cov() const { return pressure_b_init_cov_; }
     double mag_b_init_cov() const { return mag_b_init_cov_; }
     double mag_b_proc_cov() const { return mag_b_proc_cov_; }
 
@@ -508,15 +517,6 @@ public:
     // depth model works correctly when world_to_camera_init_T.z != 0.
     // Call this after loading world_to_camera_init_T from config.
     void set_camera_init_z_in_world(double z) { camera_init_z_in_world_ = z; }
-
-    // The IEKF state lives in the camera_init frame, which equals the body frame at t=0
-    // (state.rot = Identity at startup). B_reference must therefore be expressed in
-    // camera_init frame = B_imu (the field measured in the initial body frame). No
-    // rotation into world coordinates is needed or correct here.
-    void apply_initial_rotation(const M3D & /*R_BtoW*/)
-    {
-        mag_earth_field_world_ = mag_earth_field_imu_;
-    }
 
     const V3D &earth_field_world() const { return mag_earth_field_world_; }
 
@@ -660,9 +660,40 @@ private:
         return apply_linear_update(residual, H, R, kf);
     }
 
+    bool finalize_pressure_reference_if_needed(const state_ikfom &state)
+    {
+        if (pressure_ref_finalized_)
+        {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pressure_ref_finalized_)
+        {
+            return true;
+        }
+        if (!pressure_samples_ready_ || pressure_init_samples_collected_ <= 0)
+        {
+            return false;
+        }
+
+        const double mean_pressure =
+            pressure_init_sum_ / static_cast<double>(pressure_init_samples_collected_);
+        const double initial_depth = std::max(0.0, pressure_raw_depth(state));
+        pressure_surface_pressure_ =
+            mean_pressure - pressure_scale() * initial_depth - state.b_pressure[0];
+        pressure_ref_finalized_ = true;
+        return true;
+    }
+
     bool apply_pressure_update(const PressureMsg &msg, Ekf &kf)
     {
         const state_ikfom state = kf.get_x();
+        if (!finalize_pressure_reference_if_needed(state))
+        {
+            return false;
+        }
+
         const double measured_depth = (msg.fluid_pressure - pressure_surface_pressure_) / pressure_scale();
         if (pressure_raw_depth(state) <= 0.0 && measured_depth <= 0.0)
         {
@@ -798,8 +829,24 @@ private:
         if (timestamp < last_timestamp_pressure_)
         {
             pressure_buffer_.clear();
+            pressure_init_samples_collected_ = 0;
+            pressure_init_sum_ = 0.0;
+            pressure_samples_ready_ = false;
+            pressure_ref_finalized_ = false;
         }
         last_timestamp_pressure_ = timestamp;
+
+        if (!pressure_samples_ready_)
+        {
+            pressure_init_sum_ += msg->fluid_pressure;
+            pressure_init_samples_collected_++;
+            if (pressure_init_samples_collected_ >= kPressureInitSamples)
+            {
+                pressure_samples_ready_ = true;
+            }
+            return;
+        }
+
         pressure_buffer_.push_back(msg);
     }
 
@@ -810,16 +857,32 @@ private:
         if (timestamp < last_timestamp_mag_)
         {
             mag_buffer_.clear();
+            mag_init_sum_.setZero();
+            mag_init_count_ = 0;
+            mag_samples_ready_ = false;
+            mag_reference_ready_ = false;
         }
         last_timestamp_mag_ = timestamp;
+
+        if (!mag_samples_ready_)
+        {
+            mag_init_sum_ += mag_corrected(*msg);
+            ++mag_init_count_;
+            if (mag_init_count_ >= kMagInitSamples)
+            {
+                mag_samples_ready_ = true;
+            }
+            return;
+        }
+
         mag_buffer_.push_back(msg);
     }
 
-    // Apply offline hard-iron/soft-iron calibration and return corrected body-frame field.
+    // Apply offline hard-iron/soft-iron calibration, then the explicit sensor-to-body axis sign.
     V3D mag_corrected(const MagMsg &msg) const
     {
         const V3D raw(msg.magnetic_field.x, msg.magnetic_field.y, msg.magnetic_field.z);
-        return mag_soft_iron_ * (raw - mag_hard_iron_);
+        return mag_axis_sign_.cwiseProduct(mag_soft_iron_ * (raw - mag_hard_iron_));
     }
 
     // h(state) = R_ci_body^T * B_ci + b_mag
@@ -832,6 +895,29 @@ private:
     V3D mag_residual(const MagMsg &msg, const state_ikfom &state) const
     {
         return mag_corrected(msg) - mag_prediction(state);
+    }
+
+    bool finalize_mag_reference_if_needed(const state_ikfom &state)
+    {
+        if (mag_reference_ready_)
+        {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (mag_reference_ready_)
+        {
+            return true;
+        }
+        if (!mag_samples_ready_ || mag_init_count_ <= 0)
+        {
+            return false;
+        }
+
+        const V3D initial_body_field = mag_init_sum_ / static_cast<double>(mag_init_count_);
+        mag_earth_field_world_ = state.rot.toRotationMatrix() * initial_body_field;
+        mag_reference_ready_ = true;
+        return true;
     }
 
     std::vector<MagMsg::ConstSharedPtr> take_mag_measurements(double begin_time, double end_time)
@@ -857,6 +943,11 @@ private:
     bool apply_mag_update(const MagMsg &msg, Ekf &kf)
     {
         const state_ikfom state = kf.get_x();
+        if (!finalize_mag_reference_if_needed(state))
+        {
+            return false;
+        }
+
         const V3D residual = mag_residual(msg, state);
 
         // b_mag is at DOF 27-29
@@ -898,12 +989,32 @@ private:
     double dvl_innovation_gate_sigma_ = 5.0;
     double dvl_b_init_cov_ = 1e-3;
     double pressure_cov_ = 1e4;
+    double pressure_b_init_cov_ = 1e4;
     double pressure_innovation_gate_sigma_ = 0.0;
     double camera_init_z_in_world_ = 0.0;
     double pressure_fluid_density_ = 1025.0;
     double pressure_gravity_ = 9.80665;
     double pressure_surface_pressure_ = 101325.0;
     double pressure_surface_z_ = 0.0;
+    // Pressure auto-zero (two-stage). Mirrors how IMU_init averages early
+    // samples, but the final reference also needs the EKF's initial pose to
+    // produce a zero initial residual:
+    //   stage 1 (pressure_callback): accumulate first N readings; do NOT push
+    //           them into pressure_buffer_, so the EKF sees no pressure
+    //           updates during calibration. Mark pressure_samples_ready_ once
+    //           N collected.
+    //   stage 2 (apply_pressure_update, first call): with the EKF state now
+    //           available, set
+    //               pressure_surface_pressure_ = mean - rho*g*(surface_z - sensor_z(0))
+    //           so the predicted pressure exactly matches the mean measurement
+    //           at the initial state. This avoids a large initial residual
+    //           getting distributed across pos.z, rotation and b_pressure
+    //           (the off-axis pressure_T means it WOULD perturb pitch/roll).
+    static constexpr int kPressureInitSamples = 10;
+    int    pressure_init_samples_collected_ = 0;
+    double pressure_init_sum_               = 0.0;
+    bool   pressure_samples_ready_          = false;
+    bool   pressure_ref_finalized_          = false;
     double mag_cov_ = 1849.0;
     double mag_b_init_cov_ = 1e6;
     double mag_b_proc_cov_ = 0.001;
@@ -911,10 +1022,15 @@ private:
     V3D dvl_T_ = V3D::Zero();
     M3D dvl_R_ = M3D::Identity();
     V3D pressure_T_ = V3D::Zero();
-    V3D mag_earth_field_imu_   = V3D::Zero();  // loaded from config (body frame at init)
-    V3D mag_earth_field_world_ = V3D::Zero();  // set by apply_initial_rotation()
+    V3D mag_earth_field_world_ = V3D::Zero();  // initialized from first corrected mag samples
     V3D mag_hard_iron_ = V3D::Zero();
     M3D mag_soft_iron_ = M3D::Identity();
+    V3D mag_axis_sign_ = V3D::Ones();
+    static constexpr int kMagInitSamples = 10;
+    V3D mag_init_sum_ = V3D::Zero();
+    int mag_init_count_ = 0;
+    bool mag_samples_ready_ = false;
+    bool mag_reference_ready_ = false;
 
     mutable std::mutex mutex_;
     std::deque<DvlMsg::ConstSharedPtr> dvl_buffer_;
