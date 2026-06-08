@@ -22,8 +22,6 @@
                 0.0, 0.0, 1.0
                 ]
 
-            imu_rate_hz: 100.0
-            lidar_timeout: 0.25
             gravity_m_s2: 9.8100004196167
 
         preprocess:
@@ -31,8 +29,8 @@
 
         mapping:
             noiseless_imu: true
-            obs_manager_sonar_timeout: 0.0
-            obs_manager_ramp_time: 0.0
+            obs_manager_sonar_timeout: 1.0
+            obs_manager_ramp_time: 2.0
             obs_manager_freeze_cov: 1.0e-10
             imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
 
@@ -71,7 +69,6 @@
             enable: true    
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
-            surface_pressure: 101325.0
             pressure_timeout: 0.25
             pressure_cov: 1.0
             bias_init_cov: 1.0e-10

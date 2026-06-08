@@ -67,17 +67,6 @@ class ImuProcess
                         esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state,
                         const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs);
 
-  // Set the initial body pose in the World frame. With this set, IMU_init
-  // starts state.pos/state.rot at these values (instead of 0/identity) and
-  // rotates the measured gravity into World so the EKF runs directly in the
-  // World frame. Default values (zero/identity) preserve the original
-  // camera_init-origin behavior.
-  void set_world_init_pose(const V3D &T, const M3D &R)
-  {
-    world_init_T_ = T;
-    world_init_R_ = R;
-  }
-
   // Seed IMUpose with the frame-start anchor (offset_time=0.0, current state).
   // Records pcl_beg_time so PartialPropagate / UndistortPcl can compute
   // per-sample offset_times. Call once per LiDAR frame, BEFORE any
@@ -126,11 +115,6 @@ class ImuProcess
   // convert absolute IMU/aux timestamps into offset_time entries in IMUpose
   // that both PartialPropagate and UndistortPcl append to.
   double pcl_beg_time_ = 0.0;
-  // Initial body pose in World, set via set_world_init_pose(). Defaults to
-  // identity, in which case IMU_init behaves as the original FAST-LIO (state
-  // starts at origin/identity in camera_init).
-  V3D world_init_T_ = V3D::Zero();
-  M3D world_init_R_ = M3D::Identity();
   int    init_iter_num = 1;
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;
@@ -255,7 +239,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
    ** 2. normalize the acceleration measurenments to unit gravity **/
   
   V3D cur_acc, cur_gyr;
-  
+
   if (b_first_frame_)
   {
     Reset();
@@ -285,19 +269,54 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   }
   state_ikfom init_state = kf_state.get_x();
 
-  // Initialize body pose in World from the configured world_init transform.
-  // With defaults (zero/identity) this preserves original behavior (state starts
-  // at origin in camera_init frame). With non-trivial values, the EKF runs
-  // directly in the World frame -> raw state values match the GT /tf.
-  init_state.pos = world_init_T_;
-  Eigen::Quaterniond q_world_init(world_init_R_);
-  q_world_init.normalize();
-  init_state.rot = SO3(q_world_init);
+  // SMART gravity-aligned init.
+  //
+  // The straightforward "rotate world-z onto mean_acc" only gives the true
+  // attitude if mean_acc during init was PURE GRAVITY. If the body was
+  // rotating during init (e.g. yawing on the spot), centripetal/tangential
+  // accelerations contaminate mean_acc and we'd gravity-align onto a fake
+  // tilt - producing a tilted EKF world frame that then leaks gyro-bias
+  // errors into roll (the pillars failure mode: init window was level
+  // but yawing -19 deg/s, mean_acc had a 6 deg apparent tilt from centripetal
+  // accel, gravity-align baked that in, and downstream bg.z error rotated
+  // into world roll).
+  //
+  // Detection: if the gyro covariance during init is large (the body was
+  // turning while we sampled), we can't trust mean_acc. Fall back to
+  // identity rot + mean_acc-based grav so we don't bake a phantom tilt.
+  const double gyr_cov_max = cov_gyr.cwiseAbs().maxCoeff();
+  const double init_clean_gyr_var = (0.02 * 0.02);  // (rad/s)^2 - 1.1 deg/s std-dev
+  const bool init_data_clean = gyr_cov_max < init_clean_gyr_var;
 
-  // Gravity must be expressed in the EKF's "world" frame. mean_acc is in the
-  // body frame; rotate by world_init_R_ (body-in-World) to get gravity in
-  // World. With world_init_R_ = identity this reduces to the original formula.
-  init_state.grav = S2(world_init_R_ * (- mean_acc / mean_acc.norm() * gravity_m_s2_));
+  if (init_data_clean)
+  {
+    const V3D body_up = mean_acc / mean_acc.norm();
+    const V3D world_up(0.0, 0.0, 1.0);
+    const V3D axis_cross = body_up.cross(world_up);
+    const double sin_a = axis_cross.norm();
+    const double cos_a = body_up.dot(world_up);
+    Eigen::Quaterniond q_align;
+    if (sin_a < 1e-8)
+    {
+      q_align = Eigen::Quaterniond::Identity();
+    }
+    else
+    {
+      const V3D axis_norm = axis_cross / sin_a;
+      const double angle = std::atan2(sin_a, cos_a);
+      q_align = Eigen::AngleAxisd(angle, axis_norm);
+    }
+    q_align.normalize();
+    init_state.rot = SO3(q_align);
+    init_state.grav = S2(V3D(0.0, 0.0, -gravity_m_s2_));
+  }
+  else
+  {
+    // Noisy init: leave rot=identity, set grav from mean_acc as-is.
+    // The EKF world frame matches body-at-init orientation; the world TF
+    // and aux measurements (mag, accel-attitude) will correct it over time.
+    init_state.grav = S2(- mean_acc / mean_acc.norm() * gravity_m_s2_);
+  }
 
   init_state.bg  = mean_gyr;
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;

@@ -2,6 +2,7 @@
 #define AUXILIARY_SENSOR_FUSION_HPP
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <functional>
@@ -134,8 +135,6 @@ public:
         node.declare_parameter<double>("pressure.innovation_gate_sigma", 0.0);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
         node.declare_parameter<double>("pressure.gravity", 9.80665);
-        node.declare_parameter<double>("pressure.surface_pressure", 101325.0);
-        node.declare_parameter<double>("pressure.surface_z", 0.0);
 
         node.declare_parameter<bool>("magnetometer.enable", false);
         node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
@@ -148,6 +147,7 @@ public:
         node.declare_parameter<double>("magnetometer.b_mag_proc_cov", 0.001);
         node.declare_parameter<double>("magnetometer.innovation_gate_sigma", 3.0);
         node.declare_parameter<double>("magnetometer.mag_timeout", 0.5);
+
     }
 
     void load_parameters(rclcpp::Node &node)
@@ -167,8 +167,6 @@ public:
         node.get_parameter_or<double>("pressure.innovation_gate_sigma", pressure_innovation_gate_sigma_, 0.0);
         node.get_parameter_or<double>("pressure.fluid_density", pressure_fluid_density_, 1025.0);
         node.get_parameter_or<double>("pressure.gravity", pressure_gravity_, 9.80665);
-        node.get_parameter_or<double>("pressure.surface_pressure", pressure_surface_pressure_, 101325.0);
-        node.get_parameter_or<double>("pressure.surface_z", pressure_surface_z_, 0.0);
 
         std::vector<double> dvl_T;
         std::vector<double> dvl_R;
@@ -513,11 +511,6 @@ public:
     double mag_b_init_cov() const { return mag_b_init_cov_; }
     double mag_b_proc_cov() const { return mag_b_proc_cov_; }
 
-    // Set the camera_init frame's z-coordinate in the world frame so the pressure
-    // depth model works correctly when world_to_camera_init_T.z != 0.
-    // Call this after loading world_to_camera_init_T from config.
-    void set_camera_init_z_in_world(double z) { camera_init_z_in_world_ = z; }
-
     const V3D &earth_field_world() const { return mag_earth_field_world_; }
 
 private:
@@ -606,19 +599,20 @@ private:
 
     double pressure_raw_depth(const state_ikfom &state) const
     {
-        // state.pos is in camera_init coordinates.
-        // pressure_surface_z_ is the water-surface z in WORLD coordinates (usually 0.0).
-        // The surface in camera_init coordinates is: surface_z_world - camera_init_z_in_world_.
-        // This correctly handles world_to_camera_init_T.z != 0 (e.g., robot starts underwater).
+        // Depth is measured RELATIVE to the position at startup. The EKF runs
+        // in camera_init coordinates with pos = (0,0,0) at t=0, so depth-from-
+        // start is just -z. No world-frame or surface-altitude inputs required;
+        // the absolute starting depth is unknown and irrelevant for the EKF.
         const V3D sensor_ci = V3D(state.pos[0], state.pos[1], state.pos[2]) +
                               state.rot.toRotationMatrix() * pressure_T_;
-        const double surface_z_ci = pressure_surface_z_ - camera_init_z_in_world_;
-        return surface_z_ci - sensor_ci.z();
+        return -sensor_ci.z();
     }
 
     double pressure_prediction(const state_ikfom &state) const
     {
-        const double depth = std::max(0.0, pressure_raw_depth(state));
+        // Signed depth: negative depth (above start) gives prediction below
+        // the reference pressure, which is physically correct. No clamp at 0.
+        const double depth = pressure_raw_depth(state);
         return pressure_surface_pressure_ + pressure_scale() * depth + state.b_pressure[0];
     }
 
@@ -679,9 +673,11 @@ private:
 
         const double mean_pressure =
             pressure_init_sum_ / static_cast<double>(pressure_init_samples_collected_);
-        const double initial_depth = std::max(0.0, pressure_raw_depth(state));
-        pressure_surface_pressure_ =
-            mean_pressure - pressure_scale() * initial_depth - state.b_pressure[0];
+        // Define depth=0 at the moment we finalize. Whatever the absolute
+        // pressure at start is, we treat it as the reference; all subsequent
+        // measurements give depth = (P(t) - P_ref) / scale, signed positive
+        // for descending below the start position.
+        pressure_surface_pressure_ = mean_pressure - state.b_pressure[0];
         pressure_ref_finalized_ = true;
         return true;
     }
@@ -694,11 +690,8 @@ private:
             return false;
         }
 
-        const double measured_depth = (msg.fluid_pressure - pressure_surface_pressure_) / pressure_scale();
-        if (pressure_raw_depth(state) <= 0.0 && measured_depth <= 0.0)
-        {
-            return false;
-        }
+        // Depth is signed (negative = above start, positive = below start). The
+        // old "above-surface skip" no longer applies in relative-depth mode.
 
         Eigen::VectorXd residual(1);
         residual(0) = pressure_residual(msg, state);
@@ -722,6 +715,57 @@ private:
         return apply_linear_update(residual, H, R, kf);
     }
 
+public:
+    // === Accelerometer-as-gravity attitude observation ===
+    // Sparse-sonar AUV configurations lack the dense geometric constraint that
+    // original FAST-LIO uses to pin pitch/roll. Without it, gravity leaks into
+    // horizontal accel during propagation and position/velocity drift unboundedly.
+    // This observation reads the accelerometer as a noisy gravity vector when
+    // the body is quasi-stationary, giving the EKF a direct attitude reference.
+    //
+    // Hard gates (no config knobs - thresholds hardcoded for sparse-sonar AUV use):
+    //   - |omega_body| < kAccelAttGateOmega: skip when actively rotating
+    //     (centripetal accel contaminates the gravity reading via lever arms).
+    //   - |residual| < kAccelAttGateResidual: skip when the body is actually
+    //     accelerating (residual contains real motion, not just gravity).
+    // Cov is tight (sigma 0.1 m/s^2) so accepted samples strongly pin attitude.
+    static constexpr double kAccelAttCov          = 0.01;  // (m/s^2)^2
+    static constexpr double kAccelAttGateOmega    = 0.2;   // rad/s
+    static constexpr double kAccelAttGateResidual = 0.3;   // m/s^2
+
+    bool apply_accel_gravity_update(const sensor_msgs::msg::Imu &imu, Ekf &kf)
+    {
+        const state_ikfom state = kf.get_x();
+
+        const V3D gyro_raw(imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z);
+        const V3D omega_body = gyro_raw - V3D(state.bg[0], state.bg[1], state.bg[2]);
+        if (omega_body.norm() > kAccelAttGateOmega) return false;
+
+        const V3D acc_raw(imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z);
+        const M3D R_wb = state.rot.toRotationMatrix();
+        const V3D grav(state.grav[0], state.grav[1], state.grav[2]);
+        const V3D ba(state.ba[0], state.ba[1], state.ba[2]);
+
+        // Prediction at rest: acc_raw = ba + R^T * (-grav)
+        // (FAST-LIO convention: vel_dot = R*(acc - ba) + grav, so at rest
+        //  acc - ba = -R^T * grav.)
+        const V3D pred = ba + R_wb.transpose() * (-grav);
+        const V3D residual = acc_raw - pred;
+
+        if (residual.norm() > kAccelAttGateResidual) return false;
+
+        // Jacobian. We update rot (DOF 3-5) and ba (DOF 18-20). grav (S2, DOF
+        // 21-22) coupling ignored: the measurement primarily constrains the
+        // rotation that maps grav into body.
+        Eigen::MatrixXd H = Eigen::MatrixXd::Zero(3, state_ikfom::DOF);
+        H.block<3, 3>(0, 3)  = skew(R_wb.transpose() * (-grav));
+        H.block<3, 3>(0, 18) = M3D::Identity();
+
+        Eigen::MatrixXd R = Eigen::MatrixXd::Identity(3, 3) * kAccelAttCov;
+        return apply_linear_update(residual, H, R, kf);
+    }
+
+private:
     bool apply_linear_update(const Eigen::VectorXd &residual,
                              const Eigen::MatrixXd &H,
                              const Eigen::MatrixXd &R,
@@ -829,6 +873,10 @@ private:
         if (timestamp < last_timestamp_pressure_)
         {
             pressure_buffer_.clear();
+            if (pressure_ref_finalized_)
+            {
+                return;
+            }
             pressure_init_samples_collected_ = 0;
             pressure_init_sum_ = 0.0;
             pressure_samples_ready_ = false;
@@ -857,10 +905,15 @@ private:
         if (timestamp < last_timestamp_mag_)
         {
             mag_buffer_.clear();
+            if (mag_reference_ready_)
+            {
+                return;
+            }
             mag_init_sum_.setZero();
             mag_init_count_ = 0;
             mag_samples_ready_ = false;
             mag_reference_ready_ = false;
+            mag_init_body_field_.setZero();
         }
         last_timestamp_mag_ = timestamp;
 
@@ -914,8 +967,8 @@ private:
             return false;
         }
 
-        const V3D initial_body_field = mag_init_sum_ / static_cast<double>(mag_init_count_);
-        mag_earth_field_world_ = state.rot.toRotationMatrix() * initial_body_field;
+        mag_init_body_field_ = mag_init_sum_ / static_cast<double>(mag_init_count_);
+        mag_earth_field_world_ = state.rot.toRotationMatrix() * mag_init_body_field_;
         mag_reference_ready_ = true;
         return true;
     }
@@ -959,19 +1012,22 @@ private:
         Eigen::MatrixXd R = Eigen::MatrixXd::Identity(3, 3) * mag_cov_;
 
         // Innovation covariance: use S = H*P*H^T + R for a proper gate.
-        // This lets large residuals through when state uncertainty is large (e.g.,
-        // during b_mag init) and tightens automatically as covariance collapses.
+        bool gated_out = false;
+        std::array<double, 3> innov_sigmas{0.0, 0.0, 0.0};
         if (mag_innovation_gate_sigma_ > 0.0)
         {
             const typename Ekf::cov &P_state = kf.get_P();
             const Eigen::MatrixXd S_innov = H * P_state * H.transpose() + R;
             for (int i = 0; i < 3; ++i)
             {
-                const double innov_sigma = std::sqrt(S_innov(i, i));
-                if (std::abs(residual[i]) > mag_innovation_gate_sigma_ * innov_sigma)
-                    return false;
+                innov_sigmas[i] = std::sqrt(S_innov(i, i));
+                if (std::abs(residual[i]) > mag_innovation_gate_sigma_ * innov_sigmas[i])
+                    gated_out = true;
             }
         }
+
+        if (gated_out)
+            return false;
 
         return apply_linear_update(residual, H, R, kf);
     }
@@ -991,11 +1047,11 @@ private:
     double pressure_cov_ = 1e4;
     double pressure_b_init_cov_ = 1e4;
     double pressure_innovation_gate_sigma_ = 0.0;
-    double camera_init_z_in_world_ = 0.0;
     double pressure_fluid_density_ = 1025.0;
     double pressure_gravity_ = 9.80665;
-    double pressure_surface_pressure_ = 101325.0;
-    double pressure_surface_z_ = 0.0;
+    // Runtime-only: auto-zeroed from the first kPressureInitSamples samples in
+    // finalize_pressure_reference_if_needed(). Not a config parameter.
+    double pressure_surface_pressure_ = 0.0;
     static constexpr int kPressureInitSamples = 10;
     int    pressure_init_samples_collected_ = 0;
     double pressure_init_sum_               = 0.0;
@@ -1014,6 +1070,7 @@ private:
     V3D mag_axis_sign_ = V3D::Ones();
     static constexpr int kMagInitSamples = 10;
     V3D mag_init_sum_ = V3D::Zero();
+    V3D mag_init_body_field_ = V3D::Zero();
     int mag_init_count_ = 0;
     bool mag_samples_ready_ = false;
     bool mag_reference_ready_ = false;

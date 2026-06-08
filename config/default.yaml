@@ -15,13 +15,14 @@
             world_frame: "World"
             
 
-            # backAndforth_CSSN3_processed
-            world_to_camera_init_T: [ -5.140, -3.843, -0.330 ]
-            world_to_camera_init_R: [ 0.469503040, -0.882815819,  0.014252208,
-                                    0.882753813,  0.469024500, -0.027599339,
-                                    0.017680498,  0.025539164,  0.999517459 ]
-            imu_rate_hz: 200.0
-            lidar_timeout: 0.25
+            # zigzagwall_processed5
+            world_to_camera_init_T: [ -2.4879, -4.1801, -1.55 ]
+            world_to_camera_init_R: [
+                0.7364, -0.6765, -0.0117,
+                0.6763,  0.7365, -0.0142,
+                0.0182,  0.0025,  0.9998
+                ]
+
             gravity_m_s2: 9.8
 
         preprocess:
@@ -29,13 +30,13 @@
 
         mapping:
             noiseless_imu: false
-            obs_manager_sonar_timeout: 0.0
-            obs_manager_ramp_time: 0.0
+            obs_manager_sonar_timeout: 1.0
+            obs_manager_ramp_time: 2.0
             obs_manager_freeze_cov: 1.0e-10
             imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
 
 
-            b_acc_cov: 0.0001
+            b_acc_cov: 0.001
             b_gyr_cov: 0.0001
             init_b_acc_cov: 0.001
             init_b_gyr_cov: 0.0001
@@ -43,7 +44,7 @@
 
 
             acc_cov: 0.1
-            gyr_cov: 0.00000001
+            gyr_cov: 0.000001
             laser_point_cov: 1e-5
             fov_degree:    90.0
             det_range:     15.0
@@ -69,7 +70,6 @@
             enable: true
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
-            surface_pressure: 111506.0
             pressure_timeout: 0.25
             pressure_cov: 1.0e8
             bias_init_cov: 1.0e4
@@ -78,14 +78,14 @@
         magnetometer:
             enable: false
             topic: "/auv/imu/magnetic_field"
-            hard_iron_offset: [ -0.30, -19.96, 86.70 ]
-            soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
-                                0.000000, -1.257623, 0.000000,
-                                0.000000, 0.000000, 1.000000 ]
-            axis_sign: [ 1.0, -1.0, -1.0 ]
+            hard_iron_offset: [ 120.0, -50.0, 0.0 ]
+            soft_iron_matrix: [ 1., 0., 0.,
+                                0., 1., 0.,
+                                0., 0., 1. ]
+            axis_sign: [ -1.0, -1.0, +1.0 ]
             mag_cov: 100.0
             b_mag_init_cov: 1.0e6
-            b_mag_proc_cov: 0.001
+            b_mag_proc_cov: 1.0e-5  # was 0.001; lowered so b_mag locks once it has absorbed the bias instead of wandering and dragging rot
             innovation_gate_sigma: 3.0
             mag_timeout: 0.25
 

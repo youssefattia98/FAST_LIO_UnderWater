@@ -43,7 +43,6 @@
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
@@ -273,7 +272,18 @@ void lasermap_fov_segment()
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
+// Auto-detect LiDAR/sonar rate from the first kLidarRateSamples timestamps,
+// then lock lidar_timeout = 4 * detected_period. 4x absorbs sonar jitter
+// (sweep variation, dropouts) generously - empirically a single sonar gap
+// that exceeds lidar_timeout triggers IMU-only mode, after which sonar
+// re-engagement causes large catch-up corrections and attitude loss. Better
+// to wait longer for sonar than to coast on IMU alone. No config knob needed.
+static constexpr int kLidarRateSamples = 10;
+static int    lidar_rate_samples_ = 0;
+static double lidar_rate_first_stamp_ = 0.0;
+static bool   lidar_rate_locked_ = false;
+
+void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 {
     mtx_buffer.lock();
     scan_count ++;
@@ -287,6 +297,24 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
         is_first_lidar = false;
     }
 
+    if (!lidar_rate_locked_)
+    {
+        if (lidar_rate_samples_ == 0) {
+            lidar_rate_first_stamp_ = cur_time;
+        }
+        lidar_rate_samples_++;
+        if (lidar_rate_samples_ >= kLidarRateSamples)
+        {
+            const double dt_mean = (cur_time - lidar_rate_first_stamp_) /
+                                   double(lidar_rate_samples_ - 1);
+            if (dt_mean > 1e-4)
+            {
+                lidar_timeout = std::max(0.05, 4.0 * dt_mean);
+            }
+            lidar_rate_locked_ = true;
+        }
+    }
+
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
@@ -296,6 +324,15 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
+
+// Auto-detect IMU rate from the first kImuRateSamples timestamps. 20 samples
+// is small enough to lock BEFORE the IMU init reference is logged so the
+// startup summary shows the actual detected rate, but large enough to average
+// out per-sample jitter. No config knob needed.
+static constexpr int kImuRateSamples = 20;
+static int    imu_rate_samples_ = 0;
+static double imu_rate_first_stamp_ = 0.0;
+static bool   imu_rate_locked_ = false;
 
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
@@ -316,6 +353,24 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     }
 
     last_timestamp_imu = timestamp;
+
+    if (!imu_rate_locked_)
+    {
+        if (imu_rate_samples_ == 0) {
+            imu_rate_first_stamp_ = timestamp;
+        }
+        imu_rate_samples_++;
+        if (imu_rate_samples_ >= kImuRateSamples)
+        {
+            const double dt_mean = (timestamp - imu_rate_first_stamp_) /
+                                   double(imu_rate_samples_ - 1);
+            if (dt_mean > 1e-5)
+            {
+                imu_rate_hz = 1.0 / dt_mean;
+            }
+            imu_rate_locked_ = true;
+        }
+    }
 
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
@@ -833,8 +888,8 @@ public:
                              {1.0, 0.0, 0.0,
                               0.0, 1.0, 0.0,
                               0.0, 0.0, 1.0});
-        this->declare_parameter<double>("common.imu_rate_hz", 100.0);
-        this->declare_parameter<double>("common.lidar_timeout", 0.25);
+        // imu_rate_hz and lidar_timeout are auto-detected at runtime from the
+        // first ~50 IMU and ~10 LiDAR samples, so they are not config params.
         this->declare_parameter<double>("common.gravity_m_s2", G_m_s2);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
@@ -886,8 +941,7 @@ public:
                             {1.0, 0.0, 0.0,
                              0.0, 1.0, 0.0,
                              0.0, 0.0, 1.0});
-        this->get_parameter_or<double>("common.imu_rate_hz", imu_rate_hz, 100.0);
-        this->get_parameter_or<double>("common.lidar_timeout", lidar_timeout, 0.25);
+        // imu_rate_hz / lidar_timeout: auto-detected, not read from config.
         this->get_parameter_or<double>("common.gravity_m_s2", gravity_m_s2, G_m_s2);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
@@ -923,11 +977,6 @@ public:
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
         aux_fusion_.load_parameters(*this);
-        if (imu_rate_hz <= 0.0)
-        {
-            RCLCPP_WARN(this->get_logger(), "common.imu_rate_hz must be positive. Falling back to 100 Hz.");
-            imu_rate_hz = 100.0;
-        }
         if (gravity_m_s2 <= 0.0)
         {
             RCLCPP_WARN(this->get_logger(), "common.gravity_m_s2 must be positive. Falling back to %.2f m/s^2.", G_m_s2);
@@ -1029,34 +1078,29 @@ public:
             RCLCPP_WARN(this->get_logger(),
                         "common.world_to_camera_init_R must have 9 values. Using identity rotation.");
         }
-        // EKF state lives directly in the World frame: hand world_to_camera_init
-        // to ImuProcess so IMU_init starts state.pos / state.rot at those values
-        // and rotates gravity into World. Defaults (zero/identity) preserve
-        // original camera_init-origin behavior.
-        V3D world_init_T_vec(world_to_camera_init_T[0],
-                             world_to_camera_init_T[1],
-                             world_to_camera_init_T[2]);
-        p_imu->set_world_init_pose(world_init_T_vec, world_to_camera_init_rot);
+        // The IEKF state runs in the camera_init frame (origin = body-at-start,
+        // gravity-aligned), as the original FAST-LIO is designed for. We do NOT
+        // hand world_to_camera_init to ImuProcess: putting the EKF state into the
+        // externally-provided World frame (whose z-axis is tilted from gravity)
+        // breaks the filter's frame assumptions and diverges. The World frame is
+        // exposed purely as an output TF below.
 
-        // Now that the EKF runs in World, the static frame "camera_init" is just
-        // an alias for World. Publish the World -> camera_init TF as identity so
-        // the camera_init points and odometry overlay World directly (no double
-        // application of world_to_camera_init).
+        // Publish the static World -> camera_init transform so RViz / ground
+        // truth overlay the camera_init-frame odometry and map in World.
+        Eigen::Quaterniond world_to_camera_init_quat(world_to_camera_init_rot);
+        world_to_camera_init_quat.normalize();
         geometry_msgs::msg::TransformStamped world_to_camera_init;
         world_to_camera_init.header.stamp = this->get_clock()->now();
         world_to_camera_init.header.frame_id = world_frame;
         world_to_camera_init.child_frame_id = "camera_init";
-        world_to_camera_init.transform.translation.x = 0.0;
-        world_to_camera_init.transform.translation.y = 0.0;
-        world_to_camera_init.transform.translation.z = 0.0;
-        world_to_camera_init.transform.rotation.x = 0.0;
-        world_to_camera_init.transform.rotation.y = 0.0;
-        world_to_camera_init.transform.rotation.z = 0.0;
-        world_to_camera_init.transform.rotation.w = 1.0;
+        world_to_camera_init.transform.translation.x = world_to_camera_init_T[0];
+        world_to_camera_init.transform.translation.y = world_to_camera_init_T[1];
+        world_to_camera_init.transform.translation.z = world_to_camera_init_T[2];
+        world_to_camera_init.transform.rotation.x = world_to_camera_init_quat.x();
+        world_to_camera_init.transform.rotation.y = world_to_camera_init_quat.y();
+        world_to_camera_init.transform.rotation.z = world_to_camera_init_quat.z();
+        world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
-
-        // EKF state is in World now; camera_init's z offset in World is zero.
-        aux_fusion_.set_camera_init_z_in_world(0.0);
 
         //------------------------------------------------------------------------------------------------------
         // Drive processing from wall time so rosbag replay can drain buffered
@@ -1132,32 +1176,38 @@ private:
                 return;
             }
 
-            // Seed IMUpose with the frame-start anchor BEFORE the interleaved aux
-            // fusion runs. PartialPropagate appends per-aux entries; UndistortPcl
-            // later continues appending for IMU samples beyond the last aux event.
-            // Without this, PartialPropagate would advance the EKF past frame start
-            // and UndistortPcl would seed the anchor from a mid-frame state ->
-            // corrupted motion compensation for early-frame points (the a1f8b56 bug).
+            // Seed IMUpose with the frame-start anchor BEFORE UndistortPcl runs.
+            // No PartialPropagate is called in this flow, so IMUpose is only
+            // appended to by UndistortPcl's pure-IMU forward loop -> trajectory
+            // is smooth, identical to the original FAST-LIO undistortion input.
             p_imu->begin_undistortion_frame(Measures, kf);
 
-            // Time-ordered aux fusion: each DVL/pressure/mag measurement is
-            // evaluated against the EKF state at its OWN timestamp. The
-            // propagator lambda advances IMU state by integrating IMU samples
-            // up to the requested time; subsequent calls continue from where
-            // the previous call left off.
-            auto aux_summary = aux_fusion_.process_interval_interleaved(
-                process_begin_time, Measures.lidar_end_time, Measures.imu, kf,
-                [&](double t_evt) {
-                    p_imu->PartialPropagate(t_evt, kf, Measures.imu);
-                });
-            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
-
-            // Finish IMU propagation to lidar_end_time and run point
-            // undistortion. Process picks up at last_lidar_end_time_ which
-            // PartialPropagate has advanced to the most recent aux event time
-            // (or the original frame begin if no aux fired this frame).
+            // Pure-IMU propagation + point undistortion against a smooth IMUpose
+            // trajectory. Aux corrections deliberately do NOT happen here; injecting
+            // them mid-frame produces a discontinuous IMUpose that shears the cloud
+            // and shows up as a velocity-coupled apparent pitch.
             p_imu->Process(Measures, kf, feats_undistort);
             last_processed_time = Measures.lidar_end_time;
+
+            // Apply aux (DVL / pressure / mag) at the frame-end state, AFTER
+            // pure-IMU propagation + undistortion but BEFORE the LiDAR iEKF
+            // update. The LiDAR update then refines from the aux-corrected
+            // state - empirically gives lower vel<->pitch coupling than
+            // either interleaved aux (corrupts undistortion) or aux-after-LiDAR
+            // (pitch correlation jumps from 0.22 to 0.58 in tests).
+            auto aux_summary = aux_fusion_.process_interval(
+                process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
+            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+
+            // Per-IMU-sample accel-as-gravity attitude observation. Gates
+            // (omega + residual) inside the function reject motion/transient
+            // samples, so only quasi-static samples actually pull rot/ba.
+            // Hardcoded thresholds - no config knobs.
+            for (const auto &imu_msg : Measures.imu)
+            {
+                aux_fusion_.apply_accel_gravity_update(*imu_msg, kf);
+            }
+
             update_state_outputs();
 
             if (imu_only_measure)
@@ -1310,10 +1360,7 @@ int main(int argc, char** argv)
 
     signal(SIGINT, SigHandle);
 
-    auto node = std::make_shared<LaserMappingNode>();
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
-    executor.add_node(node);
-    executor.spin();
+    rclcpp::spin(std::make_shared<LaserMappingNode>());
 
     if (rclcpp::ok())
         rclcpp::shutdown();

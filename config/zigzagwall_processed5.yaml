@@ -23,8 +23,6 @@
                 0.0182,  0.0025,  0.9998
                 ]
 
-            imu_rate_hz: 200.0
-            lidar_timeout: 0.25
             gravity_m_s2: 9.8
 
         preprocess:
@@ -32,8 +30,8 @@
 
         mapping:
             noiseless_imu: false
-            obs_manager_sonar_timeout: 0.0
-            obs_manager_ramp_time: 0.0
+            obs_manager_sonar_timeout: 1.0
+            obs_manager_ramp_time: 2.0
             obs_manager_freeze_cov: 1.0e-10
             imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
 
@@ -72,7 +70,6 @@
             enable: true
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
-            surface_pressure: 103967.0
             pressure_timeout: 0.25
             pressure_cov: 1.0e8
             bias_init_cov: 1.0e4
@@ -85,10 +82,10 @@
             soft_iron_matrix: [ 1., 0., 0.,
                                 0., 1., 0.,
                                 0., 0., 1. ]
-            axis_sign: [ -1.0, -1.0, -1.0 ]
+            axis_sign: [ -1.0, -1.0, +1.0 ]
             mag_cov: 100.0
             b_mag_init_cov: 1.0e6
-            b_mag_proc_cov: 0.001
+            b_mag_proc_cov: 1.0e-5
             innovation_gate_sigma: 3.0
             mag_timeout: 0.25
 
