@@ -508,6 +508,8 @@ bool sync_imu_only_packages(MeasureGroup &meas)
 }
 
 int process_increments = 0;
+PointVector g_PointToAdd;  // Global to track points added to map
+
 void map_incremental()
 {
     PointVector PointToAdd;
@@ -555,10 +557,38 @@ void map_incremental()
     ikdtree.Add_Points(PointNoNeedDownsample, false); 
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
+    
+    // Track points added to map for saving
+    g_PointToAdd = PointToAdd;
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+
+void accumulate_map_data()
+{
+    /*** Only save points that actually go into the map (downsampled) ***/
+    if (!pcd_save_en || g_PointToAdd.empty()) return;
+    
+    // Add only the downsampled points that went into the tree
+    for (const auto& pt : g_PointToAdd)
+    {
+        pcl_wait_save->push_back(pt);
+    }
+
+    static int scan_wait_num = 0;
+    scan_wait_num++;
+    if (pcl_wait_save->size() > 0 && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval)
+    {
+        pcd_index++;
+        string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
+        pcl::PCDWriter pcd_writer;
+        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+        pcl_wait_save->clear();
+        scan_wait_num = 0;
+    }
+}
+
 void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
 {
     if(scan_pub_en)
@@ -582,37 +612,6 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
         pubLaserCloudFull->publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
-
-    /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. noted that pcd save will influence the real-time performences **/
-    /*
-    if (pcd_save_en)
-    {
-        int size = feats_undistort->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
-
-        for (int i = 0; i < size; i++)
-        {
-            RGBpointBodyToWorld(&feats_undistort->points[i], \
-                                &laserCloudWorld->points[i]);
-        }
-        *pcl_wait_save += *laserCloudWorld;
-
-        static int scan_wait_num = 0;
-        scan_wait_num ++;
-        if (pcl_wait_save->size() > 0 && pcd_save_interval > 0  && scan_wait_num >= pcd_save_interval)
-        {
-            pcd_index ++;
-            string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
-            pcl::PCDWriter pcd_writer;
-            pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
-            pcl_wait_save->clear();
-            scan_wait_num = 0;
-        }
-    }
-    */
 }
 
 void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
@@ -1312,6 +1311,9 @@ private:
             map_incremental();
             t5 = omp_get_wtime();
             
+            /******* Accumulate map data in background (independent of publish flags) *******/
+            accumulate_map_data();
+            
             /******* Publish points *******/
             if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
         }
@@ -1320,17 +1322,36 @@ private:
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
     {
         RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
-        if (pcd_save_en)
-        {
-            save_to_pcd();
-            res->success = true;
-            res->message = "Map saved.";
-        }
-        else
+        if (!pcd_save_en)
         {
             res->success = false;
             res->message = "Map save disabled.";
+            RCLCPP_WARN(this->get_logger(), "PCD save is disabled; enable 'pcd_save.pcd_save_en' to save.");
+            return;
         }
+
+        pcl::PCDWriter pcd_writer;
+        if (pcl_wait_pub && pcl_wait_pub->size() > 0)
+        {
+            RCLCPP_INFO(this->get_logger(), "Writing %zu points from pcl_wait_pub to %s", pcl_wait_pub->size(), map_file_path.c_str());
+            pcd_writer.writeBinary(map_file_path, *pcl_wait_pub);
+            res->success = true;
+            res->message = "Map saved (pcl_wait_pub).";
+            return;
+        }
+
+        if (pcl_wait_save && pcl_wait_save->size() > 0)
+        {
+            RCLCPP_INFO(this->get_logger(), "Writing %zu points from pcl_wait_save to %s", pcl_wait_save->size(), map_file_path.c_str());
+            pcd_writer.writeBinary(map_file_path, *pcl_wait_save);
+            res->success = true;
+            res->message = "Map saved (pcl_wait_save).";
+            return;
+        }
+
+        RCLCPP_WARN(this->get_logger(), "No map data available to save (both pcl_wait_pub and pcl_wait_save are empty).");
+        res->success = false;
+        res->message = "No map data to save.";
     }
 
 private:
