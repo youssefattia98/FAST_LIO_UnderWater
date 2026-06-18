@@ -1120,24 +1120,22 @@ private:
                 return;
             }
 
-            // Time-ordered aux fusion: each DVL/pressure/mag measurement is
-            // evaluated against the EKF state at its OWN timestamp. The
-            // propagator lambda advances IMU state by integrating IMU samples
-            // up to the requested time; subsequent calls continue from where
-            // the previous call left off.
-            auto aux_summary = aux_fusion_.process_interval_interleaved(
-                process_begin_time, Measures.lidar_end_time, Measures.imu, kf,
-                [&](double t_evt) {
-                    p_imu->PartialPropagate(t_evt, kf, Measures.imu);
-                });
-            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
-
-            // Finish IMU propagation to lidar_end_time and run point
-            // undistortion. Process picks up at last_lidar_end_time_ which
-            // PartialPropagate has advanced to the most recent aux event time
-            // (or the original frame begin if no aux fired this frame).
+            // Keep auxiliary updates out of scan undistortion. Interleaving
+            // DVL/pressure/mag inside the LiDAR frame evaluates each aux sample
+            // at its exact timestamp, but it also lets those corrections change
+            // the state trajectory that UndistortPcl uses to de-skew one scan.
+            // In simulation this sheared the cloud badly. The frame-end order
+            // below uses a smooth IMU-only trajectory for undistortion, then
+            // applies aux corrections before the LiDAR iEKF update. Tradeoff:
+            // real bags lose sub-frame aux timing, so map quality can shift a
+            // bit and should be tuned with this ordering in mind.
             p_imu->Process(Measures, kf, feats_undistort);
             last_processed_time = Measures.lidar_end_time;
+
+            auto aux_summary = aux_fusion_.process_interval(
+                process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
+            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+
             update_state_outputs();
 
             if (imu_only_measure)
