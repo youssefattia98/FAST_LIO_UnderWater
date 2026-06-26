@@ -7,7 +7,7 @@
         # Voxel leaf size in meters for downsampling points inserted into the map/ikd-tree.
         filter_size_map: 0.3
         cube_side_length: 60.0
-        map_file_path: "./test.pcd"
+        map_file_path: "/home/attia/ros2_ws/bags/SLAMoutput/CLEAN_ON.pcd"
 
         common:
             lid_topic:  "/sonar_point_cloud"
@@ -17,8 +17,7 @@
             world_to_camera_init_R: [ 1.0, 0.0, 0.0,
                                       0.0, 1.0, 0.0,
                                       0.0, 0.0, 1.0 ]
-            imu_rate_hz: 100.0
-            lidar_timeout: 0.25
+
             gravity_m_s2: 9.8100004196167
 
         preprocess:
@@ -43,6 +42,9 @@
             extrinsic_R: [ 1., 0., 0.,
                            0., 1., 0.,
                            0., 0., 1. ]
+            velocity_cov: 5.0e-5
+            innovation_gate_sigma: 0.0
+            bias_init_cov: 1.0e-8
             dvl_timeout: 0.25
 
         pressure:
@@ -50,6 +52,22 @@
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             pressure_timeout: 0.25
+            pressure_cov: 1.0e8
+            innovation_gate_sigma: 3.0
+
+        magnetometer:
+            enable: false
+            topic: "/auv/imu/magnetic_field"
+            earth_field_imu: [ -279.57, 148.45, 513.70 ]
+            hard_iron_offset: [ -0.30, -19.96, 86.70 ]
+            soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
+                                 0.000000, -1.257623, 0.000000,
+                                 0.000000,  0.000000, -1.000000 ]
+            mag_cov: 100.0
+            b_mag_init_cov: 1.0e6
+            b_mag_proc_cov: 0.001
+            innovation_gate_sigma: 3.0
+            mag_timeout: 0.25
 
         publish:
             path_en:  false

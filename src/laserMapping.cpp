@@ -43,6 +43,7 @@
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
@@ -95,6 +96,7 @@ V3D imu_gyro_scale(1.0, 1.0, 1.0);  // per-axis multiplicative correction for ra
 double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
 double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4, init_b_mag_cov = 1e6;
 bool noiseless_imu = false;
+bool aux_after_lidar_update = false;
 ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -505,26 +507,40 @@ PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
 void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
 {
-    if(scan_pub_en)
+    if(scan_pub_en || pcd_save_en)
     {
-        PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
-        int size = laserCloudFullRes->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
-
-        for (int i = 0; i < size; i++)
+        if (pcd_save_en)
         {
-            RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
-                                &laserCloudWorld->points[i]);
+            const int save_size = feats_down_body->points.size();
+            PointCloudXYZI::Ptr compact_cloud_world(new PointCloudXYZI(save_size, 1));
+            for (int i = 0; i < save_size; i++)
+            {
+                RGBpointBodyToWorld(&feats_down_body->points[i],
+                                    &compact_cloud_world->points[i]);
+            }
+            *pcl_wait_pub += *compact_cloud_world;
         }
 
-        sensor_msgs::msg::PointCloud2 laserCloudmsg;
-        pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
-        // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = "camera_init";
-        pubLaserCloudFull->publish(laserCloudmsg);
-        publish_count -= PUBFRAME_PERIOD;
+        if(scan_pub_en)
+        {
+            PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+            int size = laserCloudFullRes->points.size();
+            PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
+
+            for (int i = 0; i < size; i++)
+            {
+                RGBpointBodyToWorld(&laserCloudFullRes->points[i],
+                                    &laserCloudWorld->points[i]);
+            }
+
+            sensor_msgs::msg::PointCloud2 laserCloudmsg;
+            pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
+            // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+            laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+            laserCloudmsg.header.frame_id = "camera_init";
+            pubLaserCloudFull->publish(laserCloudmsg);
+            publish_count -= PUBFRAME_PERIOD;
+        }
     }
 
     /**************** save map ****************/
@@ -849,6 +865,7 @@ public:
         this->declare_parameter<double>("mapping.init_b_acc_cov", 0.001);
         this->declare_parameter<double>("mapping.init_grav_cov", 0.00001);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
+        this->declare_parameter<bool>("mapping.aux_after_lidar_update", false);
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         ObservabilityManager::declare_parameters(*this);
         this->declare_parameter<double>("mapping.laser_point_cov", LASER_POINT_COV_DEFAULT);
@@ -902,6 +919,7 @@ public:
         this->get_parameter_or<double>("mapping.init_b_acc_cov",init_b_acc_cov,0.001);
         this->get_parameter_or<double>("mapping.init_grav_cov",init_grav_cov,0.00001);
         this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
+        this->get_parameter_or<bool>("mapping.aux_after_lidar_update", aux_after_lidar_update, false);
         {
             vector<double> scale_vec = {1.0, 1.0, 1.0};
             this->get_parameter_or<vector<double>>("mapping.imu_gyro_scale", scale_vec, {1.0, 1.0, 1.0});
@@ -966,6 +984,20 @@ public:
         memset(point_selected_surf, true, sizeof(point_selected_surf));
         memset(res_last, -1000.0f, sizeof(res_last));
 
+        if (extrinT.size() != 3)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "mapping.extrinsic_T must have 3 values. Using zero translation.");
+            extrinT = {0.0, 0.0, 0.0};
+        }
+        if (extrinR.size() != 9)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "mapping.extrinsic_R must have 9 values. Using identity rotation.");
+            extrinR = {1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0};
+        }
         Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
         Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
@@ -987,6 +1019,11 @@ public:
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** ROS subscribe initialization ***/
+        sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        processing_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::SubscriptionOptions sensor_options;
+        sensor_options.callback_group = sensor_callback_group_;
+
         if (lid_topic.empty())
         {
             RCLCPP_WARN(this->get_logger(),
@@ -994,12 +1031,14 @@ public:
         }
         else
         {
+            auto lidar_qos = rclcpp::QoS(rclcpp::KeepLast(200000));
+            lidar_qos.best_effort();
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+                lid_topic, lidar_qos, standard_pcl_cbk, sensor_options);
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk);
-        aux_fusion_.create_subscriptions(*this);
+            imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk, sensor_options);
+        aux_fusion_.create_subscriptions(*this, sensor_callback_group_);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -1049,9 +1088,12 @@ public:
 
         //------------------------------------------------------------------------------------------------------
         // Drive processing from wall time so rosbag replay can drain buffered
-        // IMU/LiDAR messages even after simulated /clock stops publishing.
+        // messages even after simulated /clock stops publishing. Sensor callbacks
+        // are isolated in their own callback group and only fill mutex-protected
+        // buffers; the EKF state remains owned by this processing callback.
         timer_ = this->create_wall_timer(std::chrono::milliseconds(1),
-                                         std::bind(&LaserMappingNode::timer_callback, this));
+                                         std::bind(&LaserMappingNode::timer_callback, this),
+                                         processing_callback_group_);
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -1108,10 +1150,6 @@ private:
                 p_imu->set_gyr_bias_cov(V3D(dyn_bg, dyn_bg, dyn_bg));
                 p_imu->set_acc_bias_cov(V3D(dyn_ba, dyn_ba, dyn_ba));
             }
-            // Run a once-per-frame Process call that handles IMU initialization
-            // and only does meaningful propagation while imu_need_init_ is true.
-            // After init, this call is effectively a no-op (PartialPropagate +
-            // the final Process below do the real work in the correct order).
             if (!p_imu->IsInitialized())
             {
                 p_imu->Process(Measures, kf, feats_undistort);
@@ -1120,22 +1158,22 @@ private:
                 return;
             }
 
-            // Keep auxiliary updates out of scan undistortion. Interleaving
-            // DVL/pressure/mag inside the LiDAR frame evaluates each aux sample
-            // at its exact timestamp, but it also lets those corrections change
-            // the state trajectory that UndistortPcl uses to de-skew one scan.
-            // In simulation this sheared the cloud badly. The frame-end order
-            // below uses a smooth IMU-only trajectory for undistortion, then
-            // applies aux corrections before the LiDAR iEKF update. Tradeoff:
-            // real bags lose sub-frame aux timing, so map quality can shift a
-            // bit and should be tuned with this ordering in mind.
             p_imu->Process(Measures, kf, feats_undistort);
             last_processed_time = Measures.lidar_end_time;
 
-            auto aux_summary = aux_fusion_.process_interval(
-                process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
-            aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
-
+            AuxiliarySensorFusion::UpdateSummary aux_summary;
+            auto apply_aux_updates = [&]() {
+                aux_summary = aux_fusion_.process_interval(
+                    process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
+                aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+            };
+            if (!aux_after_lidar_update || imu_only_measure)
+            {
+                // Default: apply aux after FAST-LIO's pure-IMU deskew and before
+                // the LiDAR IEKF update. This was the best mapping order for the
+                // real bags because it keeps scan motion compensation continuous.
+                apply_aux_updates();
+            }
             update_state_outputs();
 
             if (imu_only_measure)
@@ -1229,6 +1267,16 @@ private:
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             update_state_outputs();
 
+            if (aux_after_lidar_update)
+            {
+                // Experimental architecture: let LiDAR finish the nonlinear
+                // scan-match correction first, then apply DVL/pressure/mag to
+                // the final scan-end state. This prevents DVL velocity updates
+                // from perturbing the LiDAR linearization point.
+                apply_aux_updates();
+                update_state_outputs();
+            }
+
             double t_update_end = omp_get_wtime();
 
             /******* Publish odometry *******/
@@ -1241,7 +1289,7 @@ private:
             t5 = omp_get_wtime();
             
             /******* Publish points *******/
-            if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
+            if (scan_pub_en || pcd_save_en)      publish_frame_world(pubLaserCloudFull_);
         }
     }
 
@@ -1267,6 +1315,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
+    rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr processing_callback_group_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
@@ -1286,7 +1336,10 @@ int main(int argc, char** argv)
 
     signal(SIGINT, SigHandle);
 
-    rclcpp::spin(std::make_shared<LaserMappingNode>());
+    auto node = std::make_shared<LaserMappingNode>();
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
 
     if (rclcpp::ok())
         rclcpp::shutdown();

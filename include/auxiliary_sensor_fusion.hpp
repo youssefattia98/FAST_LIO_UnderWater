@@ -128,13 +128,15 @@ public:
 
         node.declare_parameter<double>("dvl.velocity_cov", 4e-4);
         node.declare_parameter<double>("dvl.innovation_gate_sigma", 5.0);
-        node.declare_parameter<double>("dvl.bias_init_cov", 1e-3);
+        node.declare_parameter<double>("dvl.bias_init_cov", 1e-8);
         node.declare_parameter<double>("pressure.pressure_cov", 1e4);
         node.declare_parameter<double>("pressure.innovation_gate_sigma", 0.0);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
         node.declare_parameter<double>("pressure.gravity", 9.80665);
         node.declare_parameter<double>("pressure.surface_pressure", 101325.0);
         node.declare_parameter<double>("pressure.surface_z", 0.0);
+        node.declare_parameter<bool>("pressure.use_attitude_lever_arm", false);
+        node.declare_parameter<bool>("aux.pressure_before_dvl", false);
 
         node.declare_parameter<bool>("magnetometer.enable", false);
         node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
@@ -158,7 +160,7 @@ public:
         node.get_parameter_or<double>("dvl.dvl_timeout", dvl_timeout_, 0.25);
         node.get_parameter_or<double>("dvl.velocity_cov", dvl_velocity_cov_, 4e-4);
         node.get_parameter_or<double>("dvl.innovation_gate_sigma", dvl_innovation_gate_sigma_, 5.0);
-        node.get_parameter_or<double>("dvl.bias_init_cov", dvl_b_init_cov_, 1e-3);
+        node.get_parameter_or<double>("dvl.bias_init_cov", dvl_b_init_cov_, 1e-8);
 
         node.get_parameter_or<bool>("pressure.enable", pressure_enable_, false);
         node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
@@ -169,6 +171,8 @@ public:
         node.get_parameter_or<double>("pressure.gravity", pressure_gravity_, 9.80665);
         node.get_parameter_or<double>("pressure.surface_pressure", pressure_surface_pressure_, 101325.0);
         node.get_parameter_or<double>("pressure.surface_z", pressure_surface_z_, 0.0);
+        node.get_parameter_or<bool>("pressure.use_attitude_lever_arm", pressure_use_attitude_lever_arm_, false);
+        node.get_parameter_or<bool>("aux.pressure_before_dvl", pressure_before_dvl_, false);
 
         std::vector<double> dvl_T;
         std::vector<double> dvl_R;
@@ -260,25 +264,31 @@ public:
         mag_cov_ = std::max(1e-6, mag_cov_);
     }
 
-    void create_subscriptions(rclcpp::Node &node)
+    void create_subscriptions(rclcpp::Node &node,
+                              const rclcpp::CallbackGroup::SharedPtr &callback_group = nullptr)
     {
         auto qos = rclcpp::QoS(rclcpp::KeepLast(200000));
         qos.best_effort();
+        rclcpp::SubscriptionOptions options;
+        options.callback_group = callback_group;
 
         if (dvl_enable_)
         {
             sub_dvl_ = node.create_subscription<DvlMsg>(
-                dvl_topic_, qos, std::bind(&AuxiliarySensorFusion::dvl_callback, this, std::placeholders::_1));
+                dvl_topic_, qos, std::bind(&AuxiliarySensorFusion::dvl_callback, this, std::placeholders::_1),
+                options);
         }
         if (pressure_enable_)
         {
             sub_pressure_ = node.create_subscription<PressureMsg>(
-                pressure_topic_, qos, std::bind(&AuxiliarySensorFusion::pressure_callback, this, std::placeholders::_1));
+                pressure_topic_, qos, std::bind(&AuxiliarySensorFusion::pressure_callback, this, std::placeholders::_1),
+                options);
         }
         if (mag_enable_)
         {
             sub_mag_ = node.create_subscription<MagMsg>(
-                mag_topic_, qos, std::bind(&AuxiliarySensorFusion::mag_callback, this, std::placeholders::_1));
+                mag_topic_, qos, std::bind(&AuxiliarySensorFusion::mag_callback, this, std::placeholders::_1),
+                options);
         }
     }
 
@@ -330,7 +340,10 @@ public:
         for (const auto &ev : events)
         {
             // Advance EKF state to the measurement's own timestamp.
-            propagate_to(ev.t);
+            if (!propagate_to(ev.t))
+            {
+                continue;
+            }
 
             // Body angular velocity at the measurement time. We pick the IMU
             // sample closest to ev.t; gives a closer omega than always using
@@ -403,7 +416,7 @@ public:
         UpdateSummary summary;
         const V3D omega_body = latest_body_omega(imu_msgs, kf.get_x());
 
-        if (dvl_enable_)
+        auto process_dvl = [&]()
         {
             const auto messages = take_dvl_measurements(begin_time, end_time);
             for (const auto &msg : messages)
@@ -426,9 +439,9 @@ public:
                 summary.dvl_rejected += accepted ? 0 : 1;
                 summary.dvl_updated = accepted || summary.dvl_updated;
             }
-        }
+        };
 
-        if (pressure_enable_)
+        auto process_pressure = [&]()
         {
             const auto messages = take_pressure_measurements(begin_time, end_time);
             if (!messages.empty())
@@ -443,6 +456,17 @@ public:
                 summary.pressure_accepted = summary.pressure_updated ? 1 : 0;
                 summary.pressure_rejected = summary.pressure_updated ? 0 : 1;
             }
+        };
+
+        if (pressure_before_dvl_)
+        {
+            if (pressure_enable_) process_pressure();
+            if (dvl_enable_) process_dvl();
+        }
+        else
+        {
+            if (dvl_enable_) process_dvl();
+            if (pressure_enable_) process_pressure();
         }
 
         if (mag_enable_)
@@ -604,27 +628,63 @@ private:
         return dvl_measurement(msg) - dvl_prediction(state, omega_body);
     }
 
+    double pressure_sensor_z_ci(const state_ikfom &state) const
+    {
+        V3D pressure_offset_ci = V3D::Zero();
+        if (pressure_use_attitude_lever_arm_)
+        {
+            pressure_offset_ci = state.rot.toRotationMatrix() * pressure_T_;
+        }
+        else
+        {
+            pressure_offset_ci.z() = pressure_T_.z();
+        }
+        return state.pos[2] + pressure_offset_ci.z();
+    }
+
     double pressure_raw_depth(const state_ikfom &state) const
     {
-        // state.pos is in camera_init coordinates.
-        // pressure_surface_z_ is the water-surface z in WORLD coordinates (usually 0.0).
-        // The surface in camera_init coordinates is: surface_z_world - camera_init_z_in_world_.
-        // This correctly handles world_to_camera_init_T.z != 0 (e.g., robot starts underwater).
-        const V3D sensor_ci = V3D(state.pos[0], state.pos[1], state.pos[2]) +
-                              state.rot.toRotationMatrix() * pressure_T_;
+        // state.pos is in camera_init coordinates. pressure_surface_z_ is the
+        // water-surface z in WORLD coordinates, so subtract camera_init's world
+        // z to express the surface in camera_init.
         const double surface_z_ci = pressure_surface_z_ - camera_init_z_in_world_;
-        return surface_z_ci - sensor_ci.z();
+        return surface_z_ci - pressure_sensor_z_ci(state);
     }
 
     double pressure_prediction(const state_ikfom &state) const
     {
-        const double depth = std::max(0.0, pressure_raw_depth(state));
-        return pressure_surface_pressure_ + pressure_scale() * depth + state.b_pressure[0];
+        const double relative_depth = pressure_reference_sensor_z_ci_ - pressure_sensor_z_ci(state);
+        return pressure_surface_pressure_ + pressure_scale() * relative_depth + state.b_pressure[0];
     }
 
     double pressure_residual(const PressureMsg &msg, const state_ikfom &state) const
     {
         return msg.fluid_pressure - pressure_prediction(state);
+    }
+
+    bool finalize_pressure_reference_if_needed(const state_ikfom &state)
+    {
+        if (pressure_ref_finalized_)
+        {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pressure_ref_finalized_)
+        {
+            return true;
+        }
+        if (pressure_init_samples_collected_ < kPressureReferenceSamples)
+        {
+            return false;
+        }
+
+        const double mean_pressure =
+            pressure_init_sum_ / static_cast<double>(pressure_init_samples_collected_);
+        pressure_reference_sensor_z_ci_ = pressure_sensor_z_ci(state);
+        pressure_surface_pressure_ = mean_pressure - state.b_pressure[0];
+        pressure_ref_finalized_ = true;
+        return true;
     }
 
     bool apply_dvl_update(const DvlMsg &msg, const V3D &omega_body, Ekf &kf)
@@ -637,7 +697,10 @@ private:
         const M3D R_wb = state.rot.toRotationMatrix();
         const V3D vel_body = R_wb.transpose() * V3D(state.vel[0], state.vel[1], state.vel[2]);
         H.block<3, 3>(0, 12) = dvl_R_.transpose() * R_wb.transpose();
-        H.block<3, 3>(0, 3) = dvl_R_.transpose() * skew(vel_body);
+        // Residual is measured_dvl - predicted_dvl. Controlled sim tests showed
+        // this negative attitude block is required; the opposite sign excites
+        // turn-induced roll/yaw drift instead of reducing the DVL residual.
+        H.block<3, 3>(0, 3) = -dvl_R_.transpose() * skew(vel_body);
         H.block<3, 3>(0, 15) = dvl_R_.transpose() * skew(dvl_T_);
         H.block<3, 3>(0, 23) = M3D::Identity();
 
@@ -663,8 +726,7 @@ private:
     bool apply_pressure_update(const PressureMsg &msg, Ekf &kf)
     {
         const state_ikfom state = kf.get_x();
-        const double measured_depth = (msg.fluid_pressure - pressure_surface_pressure_) / pressure_scale();
-        if (pressure_raw_depth(state) <= 0.0 && measured_depth <= 0.0)
+        if (!finalize_pressure_reference_if_needed(state))
         {
             return false;
         }
@@ -674,8 +736,11 @@ private:
 
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
         H(0, 2) = -pressure_scale();
-        H.block<1, 3>(0, 3) = pressure_scale() *
-                               (Eigen::RowVector3d::UnitZ() * state.rot.toRotationMatrix() * skew(pressure_T_));
+        if (pressure_use_attitude_lever_arm_)
+        {
+            H.block<1, 3>(0, 3) = pressure_scale() *
+                                   (Eigen::RowVector3d::UnitZ() * state.rot.toRotationMatrix() * skew(pressure_T_));
+        }
         H(0, 26) = 1.0;
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Zero(1, 1);
@@ -688,7 +753,62 @@ private:
                 return false;
         }
 
-        return apply_linear_update(residual, H, R, kf);
+        if (pressure_use_attitude_lever_arm_)
+        {
+            return apply_linear_update(residual, H, R, kf);
+        }
+        return apply_pressure_depth_update(residual, H, R, kf);
+    }
+
+    bool apply_pressure_depth_update(const Eigen::VectorXd &residual,
+                                     const Eigen::MatrixXd &H,
+                                     const Eigen::MatrixXd &R,
+                                     Ekf &kf)
+    {
+        if (residual.size() != 1 || H.rows() != 1 || H.cols() != state_ikfom::DOF ||
+            R.rows() != 1 || R.cols() != 1 || !finite_vector(residual) ||
+            !H.allFinite() || !R.allFinite())
+        {
+            return false;
+        }
+
+        typename Ekf::cov P = kf.get_P();
+        Eigen::MatrixXd S = H * P * H.transpose() + R;
+        Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
+        if (ldlt.info() != Eigen::Success)
+        {
+            return false;
+        }
+
+        Eigen::MatrixXd K = P * H.transpose() * ldlt.solve(Eigen::MatrixXd::Identity(1, 1));
+        for (int row = 0; row < K.rows(); ++row)
+        {
+            if (row != 2 && row != 26)
+            {
+                K.row(row).setZero();
+            }
+        }
+
+        const Eigen::VectorXd dx_dyn = K * residual;
+        if (!finite_vector(dx_dyn))
+        {
+            return false;
+        }
+
+        typename Ekf::vectorized_state dx = Ekf::vectorized_state::Zero();
+        dx = dx_dyn;
+
+        state_ikfom state = kf.get_x();
+        state.boxplus(dx);
+
+        const typename Ekf::cov I_state = Ekf::cov::Identity();
+        typename Ekf::cov KH = K * H;
+        typename Ekf::cov P_new = (I_state - KH) * P * (I_state - KH).transpose() + K * R * K.transpose();
+        P_new = 0.5 * (P_new + P_new.transpose()).eval();
+
+        kf.change_x(state);
+        kf.change_P(P_new);
+        return true;
     }
 
     bool apply_linear_update(const Eigen::VectorXd &residual,
@@ -798,8 +918,16 @@ private:
         if (timestamp < last_timestamp_pressure_)
         {
             pressure_buffer_.clear();
+            pressure_init_sum_ = 0.0;
+            pressure_init_samples_collected_ = 0;
+            pressure_ref_finalized_ = false;
         }
         last_timestamp_pressure_ = timestamp;
+        if (!pressure_ref_finalized_ && pressure_init_samples_collected_ < kPressureReferenceSamples)
+        {
+            pressure_init_sum_ += msg->fluid_pressure;
+            pressure_init_samples_collected_++;
+        }
         pressure_buffer_.push_back(msg);
     }
 
@@ -888,6 +1016,7 @@ private:
     bool dvl_enable_ = false;
     bool pressure_enable_ = false;
     bool mag_enable_ = false;
+    bool pressure_before_dvl_ = false;
     std::string dvl_topic_ = "/auv/dvl";
     std::string pressure_topic_ = "/auv/pressure/scaled2";
     std::string mag_topic_ = "/auv/imu/magnetic_field";
@@ -896,7 +1025,7 @@ private:
     double mag_timeout_ = 0.5;
     double dvl_velocity_cov_ = 4e-4;
     double dvl_innovation_gate_sigma_ = 5.0;
-    double dvl_b_init_cov_ = 1e-3;
+    double dvl_b_init_cov_ = 1e-8;
     double pressure_cov_ = 1e4;
     double pressure_innovation_gate_sigma_ = 0.0;
     double camera_init_z_in_world_ = 0.0;
@@ -904,6 +1033,12 @@ private:
     double pressure_gravity_ = 9.80665;
     double pressure_surface_pressure_ = 101325.0;
     double pressure_surface_z_ = 0.0;
+    bool pressure_use_attitude_lever_arm_ = false;
+    double pressure_reference_sensor_z_ci_ = 0.0;
+    static constexpr int kPressureReferenceSamples = 20;
+    double pressure_init_sum_ = 0.0;
+    int pressure_init_samples_collected_ = 0;
+    bool pressure_ref_finalized_ = false;
     double mag_cov_ = 1849.0;
     double mag_b_init_cov_ = 1e6;
     double mag_b_proc_cov_ = 0.001;

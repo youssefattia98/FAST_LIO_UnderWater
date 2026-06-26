@@ -7,75 +7,58 @@
         # Voxel leaf size in meters for downsampling points inserted into the map/ikd-tree.
         filter_size_map: 0.3
         cube_side_length: 60.0
-        map_file_path: "./test.pcd"
+        map_file_path: "/home/attia/ros2_ws/bags/SLAMoutput/NOISY_OFF.pcd"
 
         common:
-            lid_topic:  "/sonar_point_cloud"               
+            lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
-            
+            world_to_camera_init_T: [ 0.0, 0.0, 0.0 ]
+            world_to_camera_init_R: [ 1.0, 0.0, 0.0,
+                                      0.0, 1.0, 0.0,
+                                      0.0, 0.0, 1.0 ]
 
-            # backAndforth_CSSN3_processed
-            world_to_camera_init_T: [ -5.140, -3.843, -0.330 ]
-            world_to_camera_init_R: [ 0.469503040, -0.882815819,  0.014252208,
-                                    0.882753813,  0.469024500, -0.027599339,
-                                    0.017680498,  0.025539164,  0.999517459 ]
-            imu_rate_hz: 200.0
-            lidar_timeout: 0.25
-            gravity_m_s2: 9.8
+            gravity_m_s2: 9.8100004196167
 
         preprocess:
             blind: 0.2
 
         mapping:
-            noiseless_imu: false
-            obs_manager_sonar_timeout: 0.0
-            obs_manager_ramp_time: 0.0
-            obs_manager_freeze_cov: 1.0e-10
-            imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
-
-
-            b_acc_cov: 0.0001
-            b_gyr_cov: 0.0001
-            init_b_acc_cov: 0.001
-            init_b_gyr_cov: 0.0001
-            init_grav_cov: 0.00001
-
-
+            noiseless_imu: true
+            b_acc_cov: 0.2
+            b_gyr_cov: 0.000001
             acc_cov: 0.1
-            gyr_cov: 0.00000001
-            laser_point_cov: 1e-5
+            gyr_cov: 0.000001
+            laser_point_cov: 0.1
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
-            extrinsic_R: [ 0.994521895, 0.0, 0.104528463,
-                0.0,         1.0, 0.0,
-                -0.104528463, 0.0, 0.994521895 ]
+            extrinsic_R: [ 0.965925826, 0.0, 0.258819045,
+                            0.0,         1.0, 0.0,
+                            -0.258819045, 0.0, 0.965925826 ]
 
         dvl:
-            enable: true
+            enable: false
             topic: "/auv/dvl"
             extrinsic_T: [ -0.079, -0.09691, -0.25938 ]
             extrinsic_R: [ 1., 0., 0.,
                            0., 1., 0.,
                            0., 0., 1. ]
             dvl_timeout: 0.55
-            velocity_cov: 5.0e-5
+            velocity_cov: 1.0e-4
             innovation_gate_sigma: 0.0
-            # Keep DVL bias fixed near zero in no-sonar mode so velocity cannot be hidden in b_dvl.
-            bias_init_cov: 1.0e-10
+            bias_init_cov: 1.0e-8
 
         pressure:
-            enable: true
+            enable: false
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
-            surface_pressure: 111506.0
             pressure_timeout: 0.25
-            pressure_cov: 1.0e8
-            innovation_gate_sigma: 3.0
+            pressure_cov: 1.0e-10
+            innovation_gate_sigma: 0.0
 
         magnetometer:
-            enable: true
+            enable: false
             topic: "/auv/imu/magnetic_field"
             earth_field_imu: [ -279.57, 148.45, 513.70 ]
             hard_iron_offset: [ -0.30, -19.96, 86.70 ]
@@ -95,5 +78,5 @@
             scan_bodyframe_pub_en: true
 
         pcd_save:
-            pcd_save_en: false
+            pcd_save_en: true
             interval: -1
