@@ -35,6 +35,7 @@
 #include <omp.h>
 #include <mutex>
 #include <math.h>
+#include <cmath>
 #include <thread>
 #include <csignal>
 #include <chrono>
@@ -70,7 +71,8 @@
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV_DEFAULT (0.001)
 #define PUBFRAME_PERIOD     (20)
-double LASER_POINT_COV = LASER_POINT_COV_DEFAULT;
+double LASER_POINT_COV_XY = LASER_POINT_COV_DEFAULT;
+double LASER_POINT_COV_Z = LASER_POINT_COV_DEFAULT;
 
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
@@ -96,7 +98,6 @@ V3D imu_gyro_scale(1.0, 1.0, 1.0);  // per-axis multiplicative correction for ra
 double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
 double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4, init_b_mag_cov = 1e6;
 bool noiseless_imu = false;
-bool aux_after_lidar_update = false;
 ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -823,6 +824,16 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
+
+        // The point-to-plane residual constrains motion along the map normal:
+        // horizontal/seabed normals mainly constrain z, vertical-wall normals
+        // mainly constrain xy. Whiten each row so LiDAR z can be tuned
+        // independently from LiDAR xy without changing IKFoM's scalar-R API.
+        const double nz2 = std::clamp(static_cast<double>(norm_p.z) * static_cast<double>(norm_p.z), 0.0, 1.0);
+        const double point_cov = std::max(1e-12, LASER_POINT_COV_XY * (1.0 - nz2) + LASER_POINT_COV_Z * nz2);
+        const double inv_sigma = 1.0 / std::sqrt(point_cov);
+        ekfom_data.h_x.block<1, 12>(i, 0) *= inv_sigma;
+        ekfom_data.h(i) *= inv_sigma;
     }
     solve_time += omp_get_wtime() - solve_start_;
 }
@@ -865,7 +876,6 @@ public:
         this->declare_parameter<double>("mapping.init_b_acc_cov", 0.001);
         this->declare_parameter<double>("mapping.init_grav_cov", 0.00001);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
-        this->declare_parameter<bool>("mapping.aux_after_lidar_update", false);
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         ObservabilityManager::declare_parameters(*this);
         this->declare_parameter<double>("mapping.laser_point_cov", LASER_POINT_COV_DEFAULT);
@@ -919,7 +929,6 @@ public:
         this->get_parameter_or<double>("mapping.init_b_acc_cov",init_b_acc_cov,0.001);
         this->get_parameter_or<double>("mapping.init_grav_cov",init_grav_cov,0.00001);
         this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
-        this->get_parameter_or<bool>("mapping.aux_after_lidar_update", aux_after_lidar_update, false);
         {
             vector<double> scale_vec = {1.0, 1.0, 1.0};
             this->get_parameter_or<vector<double>>("mapping.imu_gyro_scale", scale_vec, {1.0, 1.0, 1.0});
@@ -928,7 +937,14 @@ public:
             else
                 RCLCPP_WARN(this->get_logger(), "mapping.imu_gyro_scale must have 3 values. Using [1,1,1].");
         }
-        this->get_parameter_or<double>("mapping.laser_point_cov",LASER_POINT_COV,double(LASER_POINT_COV_DEFAULT));
+        double legacy_laser_point_cov = LASER_POINT_COV_DEFAULT;
+        this->get_parameter_or<double>("mapping.laser_point_cov", legacy_laser_point_cov, double(LASER_POINT_COV_DEFAULT));
+        this->declare_parameter<double>("mapping.laser_point_cov_xy", legacy_laser_point_cov);
+        this->declare_parameter<double>("mapping.laser_point_cov_z", legacy_laser_point_cov);
+        this->get_parameter_or<double>("mapping.laser_point_cov_xy", LASER_POINT_COV_XY, legacy_laser_point_cov);
+        this->get_parameter_or<double>("mapping.laser_point_cov_z", LASER_POINT_COV_Z, legacy_laser_point_cov);
+        LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
+        LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
@@ -1162,22 +1178,22 @@ private:
             last_processed_time = Measures.lidar_end_time;
 
             AuxiliarySensorFusion::UpdateSummary aux_summary;
-            auto apply_aux_updates = [&]() {
+            auto apply_aux_updates = [&](bool allow_dvl_attitude_update) {
+                // DVL body-frame velocity does not provide an absolute heading
+                // reference by itself. During intentional IMU-only/no-LiDAR
+                // intervals, keep DVL velocity/bias fusion active but prevent
+                // its attitude Jacobian from injecting yaw.
                 aux_summary = aux_fusion_.process_interval(
-                    process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
+                    process_begin_time, Measures.lidar_end_time, Measures.imu, kf,
+                    allow_dvl_attitude_update);
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
             };
-            if (!aux_after_lidar_update || imu_only_measure)
-            {
-                // Default: apply aux after FAST-LIO's pure-IMU deskew and before
-                // the LiDAR IEKF update. This was the best mapping order for the
-                // real bags because it keeps scan motion compensation continuous.
-                apply_aux_updates();
-            }
             update_state_outputs();
 
             if (imu_only_measure)
             {
+                apply_aux_updates(false);
+                update_state_outputs();
                 if (lid_topic.empty())
                 {
                     // Intentional no-lidar mode. Startup already reported this once.
@@ -1205,8 +1221,10 @@ private:
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
+                apply_aux_updates(false);
+                update_state_outputs();
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
-                g_publish_mode = "no_points";
+                g_publish_mode = aux_summary.updated() ? "aux_only" : "no_points";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
@@ -1235,6 +1253,8 @@ private:
                     }
                     ikdtree.Build(feats_down_world->points);
                 }
+                apply_aux_updates(false);
+                update_state_outputs();
                 g_publish_mode = "kdtree_init";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
@@ -1245,8 +1265,10 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
+                apply_aux_updates(false);
+                update_state_outputs();
                 RCLCPP_WARN(this->get_logger(), "Too few points, publish IMU-only odometry for this scan.\n");
-                g_publish_mode = "few_points";
+                g_publish_mode = aux_summary.updated() ? "aux_only" : "few_points";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
@@ -1264,18 +1286,15 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            kf.update_iterated_dyn_share_modified(1.0, solve_H_time);
             update_state_outputs();
 
-            if (aux_after_lidar_update)
-            {
-                // Experimental architecture: let LiDAR finish the nonlinear
-                // scan-match correction first, then apply DVL/pressure/mag to
-                // the final scan-end state. This prevents DVL velocity updates
-                // from perturbing the LiDAR linearization point.
-                apply_aux_updates();
-                update_state_outputs();
-            }
+            // Let LiDAR finish the nonlinear scan-match correction first, then
+            // apply DVL/pressure/mag to the final scan-end state. This keeps the
+            // auxiliary sensors from moving the LiDAR linearization point during
+            // the iterated point-to-plane solve.
+            apply_aux_updates(true);
+            update_state_outputs();
 
             double t_update_end = omp_get_wtime();
 

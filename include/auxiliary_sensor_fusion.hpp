@@ -304,7 +304,8 @@ public:
                                                double end_time,
                                                const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
                                                Ekf &kf,
-                                               PropagatorFn &&propagate_to)
+                                               PropagatorFn &&propagate_to,
+                                               bool allow_dvl_attitude_update = true)
     {
         UpdateSummary summary;
 
@@ -368,7 +369,7 @@ public:
                     summary.dvl_meas_sum += measurement;
                     summary.dvl_pred_sum += prediction;
                     summary.dvl_body_vel_sum += body_velocity;
-                    const bool accepted = apply_dvl_update(msg, omega_body, kf);
+                    const bool accepted = apply_dvl_update(msg, omega_body, kf, allow_dvl_attitude_update);
                     summary.dvl_accepted += accepted ? 1 : 0;
                     summary.dvl_rejected += accepted ? 0 : 1;
                     summary.dvl_updated = accepted || summary.dvl_updated;
@@ -411,7 +412,8 @@ public:
     UpdateSummary process_interval(double begin_time,
                                    double end_time,
                                    const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
-                                   Ekf &kf)
+                                   Ekf &kf,
+                                   bool allow_dvl_attitude_update = true)
     {
         UpdateSummary summary;
         const V3D omega_body = latest_body_omega(imu_msgs, kf.get_x());
@@ -434,7 +436,7 @@ public:
                 summary.dvl_meas_sum += measurement;
                 summary.dvl_pred_sum += prediction;
                 summary.dvl_body_vel_sum += body_velocity;
-                const bool accepted = apply_dvl_update(*msg, omega_body, kf);
+                const bool accepted = apply_dvl_update(*msg, omega_body, kf, allow_dvl_attitude_update);
                 summary.dvl_accepted += accepted ? 1 : 0;
                 summary.dvl_rejected += accepted ? 0 : 1;
                 summary.dvl_updated = accepted || summary.dvl_updated;
@@ -687,7 +689,7 @@ private:
         return true;
     }
 
-    bool apply_dvl_update(const DvlMsg &msg, const V3D &omega_body, Ekf &kf)
+    bool apply_dvl_update(const DvlMsg &msg, const V3D &omega_body, Ekf &kf, bool allow_attitude_update)
     {
         const state_ikfom state = kf.get_x();
         const V3D residual = dvl_residual(msg, state, omega_body);
@@ -700,7 +702,10 @@ private:
         // Residual is measured_dvl - predicted_dvl. Controlled sim tests showed
         // this negative attitude block is required; the opposite sign excites
         // turn-induced roll/yaw drift instead of reducing the DVL residual.
-        H.block<3, 3>(0, 3) = -dvl_R_.transpose() * skew(vel_body);
+        if (allow_attitude_update)
+        {
+            H.block<3, 3>(0, 3) = -dvl_R_.transpose() * skew(vel_body);
+        }
         H.block<3, 3>(0, 15) = dvl_R_.transpose() * skew(dvl_T_);
         H.block<3, 3>(0, 23) = M3D::Identity();
 
@@ -748,9 +753,17 @@ private:
 
         if (pressure_innovation_gate_sigma_ > 0.0)
         {
-            const double sigma_pres = std::sqrt(R(0, 0));
-            if (std::abs(residual(0)) > pressure_innovation_gate_sigma_ * sigma_pres)
+            const typename Ekf::cov P = kf.get_P();
+            const Eigen::MatrixXd S = H * P * H.transpose() + R;
+            if (!S.allFinite() || S(0, 0) <= 0.0)
+            {
                 return false;
+            }
+            const double sigma_pres = std::sqrt(S(0, 0));
+            if (std::abs(residual(0)) > pressure_innovation_gate_sigma_ * sigma_pres)
+            {
+                return false;
+            }
         }
 
         if (pressure_use_attitude_lever_arm_)

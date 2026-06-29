@@ -45,7 +45,8 @@
 
             acc_cov: 0.1
             gyr_cov: 1e-6
-            laser_point_cov: 1e-5
+            laser_point_cov_xy: 1e-5
+            laser_point_cov_z: 1e-5
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]

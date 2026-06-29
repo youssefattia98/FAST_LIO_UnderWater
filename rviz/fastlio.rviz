@@ -74,8 +74,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 0.5226176977157593
-        Min Value: -1.521555781364441
+        Max Value: -5.289588928222656
+        Min Value: -10.940340042114258
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -111,11 +111,11 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        BROV_low:
+        ENU:
           Value: true
         World:
           Value: true
-        barometer_link:
+        base_link:
           Value: true
         body:
           Value: true
@@ -123,11 +123,11 @@ Visualization Manager:
           Value: false
         dvl_link:
           Value: true
-        goal_frame:
+        locator_link:
           Value: true
-        imu_link:
+        pressure_link:
           Value: true
-        three_d_sonar_link:
+        sonar_frame:
           Value: true
       Marker Scale: 3
       Name: TF
@@ -135,21 +135,21 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
+        ENU:
+          {}
         World:
-          BROV_low:
-            barometer_link:
-              {}
+          base_link:
             dvl_link:
               {}
-            imu_link:
+            locator_link:
               {}
-            three_d_sonar_link:
+            pressure_link:
+              {}
+            sonar_frame:
               {}
           camera_init:
             body:
               {}
-          goal_frame:
-            {}
       Update Interval: 0
       Value: true
   Enabled: true
@@ -198,25 +198,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 59.65806198120117
+      Distance: 16.74041748046875
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 17.591875076293945
-        Y: -0.6559138298034668
-        Z: 3.613206386566162
+        X: -40.818931579589844
+        Y: -45.82343292236328
+        Z: 4.123445987701416
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.519796371459961
+      Pitch: 1.4997963905334473
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.2703745365142822
+      Yaw: 2.130375623703003
     Saved: ~
 Window Geometry:
   Displays:

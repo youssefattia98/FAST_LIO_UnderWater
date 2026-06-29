@@ -37,7 +37,8 @@
 
             acc_cov: 0.1
             gyr_cov: 0.000001
-            laser_point_cov: 0.1
+            laser_point_cov_xy: 0.1
+            laser_point_cov_z: 0.2
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
@@ -62,8 +63,9 @@
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             pressure_timeout: 0.25
-            pressure_cov: 1.0e-10
-            innovation_gate_sigma: 3.0
+            fluid_density: 1025.0
+            pressure_cov: 1.0e4
+            innovation_gate_sigma: 0.0
 
         magnetometer:
             enable: true

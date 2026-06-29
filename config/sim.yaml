@@ -10,7 +10,7 @@
         map_file_path: "/home/attia/ros2_ws/bags/SLAMoutput/CLEAN_ON.pcd"
 
         common:
-            lid_topic:  "/sonar_point_cloud"
+            lid_topic:  "/sonar_point_clous"
             imu_topic:  "/auv/imu/data_raw"
             world_frame: "World"
             world_to_camera_init_T: [ 0.0, 0.0, 0.0 ]
@@ -27,7 +27,8 @@
             noiseless_imu: true
             acc_cov: 0.001
             gyr_cov: 0.000001
-            laser_point_cov: 0.0001
+            laser_point_cov_xy: 0.0001
+            laser_point_cov_z: 0.0001
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]

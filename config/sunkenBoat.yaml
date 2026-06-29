@@ -16,7 +16,6 @@
             
 
             # sunkenBoat
-    
             world_to_camera_init_T: [ -44.37502272860865, -54.60079722615101, -7.555725864138332 ]
             world_to_camera_init_R: [
                             0.3869, -0.9216,  0.0330,
@@ -38,7 +37,7 @@
             imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
 
 
-            b_acc_cov: 0.0001
+            b_acc_cov: 0.001
             b_gyr_cov: 0.0001
             init_b_acc_cov: 0.001
             init_b_gyr_cov: 0.0001
@@ -46,8 +45,9 @@
 
 
             acc_cov: 0.1
-            gyr_cov: 1e-6
-            laser_point_cov: 1e-5
+            gyr_cov: 0.000001
+            laser_point_cov_xy: 0.1
+            laser_point_cov_z: 0.2
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
@@ -98,5 +98,5 @@
             scan_bodyframe_pub_en: true
 
         pcd_save:
-            pcd_save_en: false
+            pcd_save_en: true
             interval: -1
