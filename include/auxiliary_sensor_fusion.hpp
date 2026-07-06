@@ -129,6 +129,7 @@ public:
         node.declare_parameter<double>("dvl.velocity_cov", 4e-4);
         node.declare_parameter<double>("dvl.innovation_gate_sigma", 5.0);
         node.declare_parameter<double>("dvl.bias_init_cov", 1e-8);
+        node.declare_parameter<bool>("dvl.attitude_update_en", true);
         node.declare_parameter<double>("pressure.pressure_cov", 1e4);
         node.declare_parameter<double>("pressure.innovation_gate_sigma", 0.0);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
@@ -161,6 +162,7 @@ public:
         node.get_parameter_or<double>("dvl.velocity_cov", dvl_velocity_cov_, 4e-4);
         node.get_parameter_or<double>("dvl.innovation_gate_sigma", dvl_innovation_gate_sigma_, 5.0);
         node.get_parameter_or<double>("dvl.bias_init_cov", dvl_b_init_cov_, 1e-8);
+        node.get_parameter_or<bool>("dvl.attitude_update_en", dvl_attitude_update_en_, true);
 
         node.get_parameter_or<bool>("pressure.enable", pressure_enable_, false);
         node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
@@ -369,7 +371,8 @@ public:
                     summary.dvl_meas_sum += measurement;
                     summary.dvl_pred_sum += prediction;
                     summary.dvl_body_vel_sum += body_velocity;
-                    const bool accepted = apply_dvl_update(msg, omega_body, kf, allow_dvl_attitude_update);
+                    const bool accepted = apply_dvl_update(
+                        msg, omega_body, kf, allow_dvl_attitude_update && dvl_attitude_update_en_);
                     summary.dvl_accepted += accepted ? 1 : 0;
                     summary.dvl_rejected += accepted ? 0 : 1;
                     summary.dvl_updated = accepted || summary.dvl_updated;
@@ -436,7 +439,8 @@ public:
                 summary.dvl_meas_sum += measurement;
                 summary.dvl_pred_sum += prediction;
                 summary.dvl_body_vel_sum += body_velocity;
-                const bool accepted = apply_dvl_update(*msg, omega_body, kf, allow_dvl_attitude_update);
+                const bool accepted = apply_dvl_update(
+                    *msg, omega_body, kf, allow_dvl_attitude_update && dvl_attitude_update_en_);
                 summary.dvl_accepted += accepted ? 1 : 0;
                 summary.dvl_rejected += accepted ? 0 : 1;
                 summary.dvl_updated = accepted || summary.dvl_updated;
@@ -1039,6 +1043,7 @@ private:
     double dvl_velocity_cov_ = 4e-4;
     double dvl_innovation_gate_sigma_ = 5.0;
     double dvl_b_init_cov_ = 1e-8;
+    bool dvl_attitude_update_en_ = true;
     double pressure_cov_ = 1e4;
     double pressure_innovation_gate_sigma_ = 0.0;
     double camera_init_z_in_world_ = 0.0;

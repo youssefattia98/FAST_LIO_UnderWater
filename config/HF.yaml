@@ -75,7 +75,7 @@
             soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
                                  0.000000, -1.257623, 0.000000,
                                  0.000000,  0.000000, -1.000000 ]
-            mag_cov: 100.0
+            mag_cov: 0.1
             b_mag_init_cov: 1.0e6
             b_mag_proc_cov: 0.001
             innovation_gate_sigma: 3.0

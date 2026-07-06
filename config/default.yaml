@@ -66,6 +66,7 @@
             innovation_gate_sigma: 0.0
             # Keep DVL bias fixed near zero in no-sonar mode so velocity cannot be hidden in b_dvl.
             bias_init_cov: 1.0e-10
+            attitude_update_en: false
 
         pressure:
             enable: true
