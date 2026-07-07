@@ -81,7 +81,6 @@ int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delet
 bool   pcd_save_en = false, path_en = true;
 /**************************/
 
-float res_last[100000] = {0.0};
 float DET_RANGE = 300.0f;
 const float MOV_THRESHOLD = 1.5f;
 
@@ -91,13 +90,14 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic, world_frame;
 
-double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 V3D imu_gyro_scale(1.0, 1.0, 1.0);  // per-axis multiplicative correction for raw gyro (e.g. 1/0.74 for a known scale error)
 double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
 double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4, init_b_mag_cov = 1e6;
 bool noiseless_imu = false;
+double imu_orientation_cov = 3.0461742e-6;  // (0.1 deg)^2
+double imu_orientation_gate_sigma = 0.0;
 ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -153,6 +153,9 @@ geometry_msgs::msg::PoseStamped msg_body_pose;
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
+AuxiliarySensorFusion *g_joint_aux_fusion = nullptr;
+AuxiliarySensorFusion::JointMeasurementSet g_joint_aux_measurements;
+bool g_joint_aux_update_active = false;
 
 void SigHandle(int sig)
 {
@@ -671,6 +674,62 @@ void update_state_outputs()
 
 const char *g_publish_mode = "init";
 
+bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg)
+{
+    if (!imu_msg)
+    {
+        return false;
+    }
+
+    if (imu_msg->orientation_covariance[0] < 0.0)
+    {
+        return false;
+    }
+
+    const auto &q_msg = imu_msg->orientation;
+    Eigen::Quaterniond q_meas(q_msg.w, q_msg.x, q_msg.y, q_msg.z);
+    if (!std::isfinite(q_meas.w()) || !std::isfinite(q_meas.x()) ||
+        !std::isfinite(q_meas.y()) || !std::isfinite(q_meas.z()) ||
+        q_meas.norm() < 1e-6)
+    {
+        return false;
+    }
+    q_meas.normalize();
+
+    state_ikfom state = kf.get_x();
+    const M3D R_err = state.rot.toRotationMatrix().transpose() * q_meas.toRotationMatrix();
+    const V3D residual = Log(R_err);
+
+    typename esekfom::esekf<state_ikfom, 15, input_ikfom>::cov P = kf.get_P();
+    Eigen::Matrix<double, 3, state_ikfom::DOF> H =
+        Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
+    H.block<3, 3>(0, 3).setIdentity();
+    const double cov = std::max(1e-12, imu_orientation_cov);
+    const M3D R = M3D::Identity() * cov;
+    const M3D S = H * P * H.transpose() + R;
+    if (imu_orientation_gate_sigma > 0.0)
+    {
+        const double nis = residual.transpose() * S.ldlt().solve(residual);
+        if (nis > imu_orientation_gate_sigma * imu_orientation_gate_sigma * 3.0)
+        {
+            return false;
+        }
+    }
+
+    Eigen::Matrix<double, state_ikfom::DOF, 3> K = P * H.transpose() * S.inverse();
+    Eigen::Matrix<double, state_ikfom::DOF, 1> dx = K * residual;
+    state.boxplus(dx);
+    kf.change_x(state);
+
+    const auto I = esekfom::esekf<state_ikfom, 15, input_ikfom>::cov::Identity();
+    const auto KH = K * H;
+    esekfom::esekf<state_ikfom, 15, input_ikfom>::cov P_new =
+        ((I - KH) * P * (I - KH).transpose() + K * R * K.transpose()).eval();
+    P_new = ((P_new + P_new.transpose()) * 0.5).eval();
+    kf.change_P(P_new);
+    return true;
+}
+
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
     odomAftMapped.header.frame_id = "camera_init";
@@ -726,7 +785,6 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double match_start = omp_get_wtime();
     laserCloudOri->clear(); 
     corr_normvect->clear(); 
-    total_residual = 0.0; 
 
     /** closest surface search and residual computation **/
     #ifdef MP_EN
@@ -773,7 +831,6 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
                 normvec->points[i].y = pabcd(1);
                 normvec->points[i].z = pabcd(2);
                 normvec->points[i].intensity = pd2;
-                res_last[i] = abs(pd2);
             }
         }
     }
@@ -786,24 +843,23 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         {
             laserCloudOri->points[effct_feat_num] = feats_down_body->points[i];
             corr_normvect->points[effct_feat_num] = normvec->points[i];
-            total_residual += res_last[i];
             effct_feat_num ++;
         }
     }
-
-    if (effct_feat_num < 1)
-    {
-        ekfom_data.valid = false;
-        return;
-    }
-
-    res_mean_last = total_residual / effct_feat_num;
     match_time  += omp_get_wtime() - match_start;
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12);
-    ekfom_data.h.resize(effct_feat_num);
+    const int max_joint_aux_rows =
+        (g_joint_aux_update_active && g_joint_aux_fusion) ? g_joint_aux_measurements.max_rows() : 0;
+    const int max_rows = effct_feat_num + max_joint_aux_rows;
+    if (max_rows < 1)
+    {
+        ekfom_data.valid = false;
+        return;
+    }
+    ekfom_data.h_x = MatrixXd::Zero(max_rows, state_ikfom::DOF);
+    ekfom_data.h = Eigen::VectorXd::Zero(max_rows);
 
     for (int i = 0; i < effct_feat_num; i++)
     {
@@ -835,6 +891,20 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         ekfom_data.h_x.block<1, 12>(i, 0) *= inv_sigma;
         ekfom_data.h(i) *= inv_sigma;
     }
+
+    int total_rows = effct_feat_num;
+    if (g_joint_aux_update_active && g_joint_aux_fusion)
+    {
+        total_rows = g_joint_aux_fusion->append_joint_measurement_rows(
+            g_joint_aux_measurements, s, ekfom_data.h_x, ekfom_data.h, total_rows);
+    }
+    if (total_rows < 1)
+    {
+        ekfom_data.valid = false;
+        return;
+    }
+    ekfom_data.h_x.conservativeResize(total_rows, Eigen::NoChange);
+    ekfom_data.h.conservativeResize(total_rows);
     solve_time += omp_get_wtime() - solve_start_;
 }
 
@@ -875,6 +945,8 @@ public:
         this->declare_parameter<double>("mapping.init_b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.init_b_acc_cov", 0.001);
         this->declare_parameter<double>("mapping.init_grav_cov", 0.00001);
+        this->declare_parameter<double>("mapping.imu_orientation_cov", 3.0461742e-6);
+        this->declare_parameter<double>("mapping.imu_orientation_gate_sigma", 0.0);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         ObservabilityManager::declare_parameters(*this);
@@ -928,6 +1000,8 @@ public:
         this->get_parameter_or<double>("mapping.init_b_gyr_cov",init_b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.init_b_acc_cov",init_b_acc_cov,0.001);
         this->get_parameter_or<double>("mapping.init_grav_cov",init_grav_cov,0.00001);
+        this->get_parameter_or<double>("mapping.imu_orientation_cov", imu_orientation_cov, 3.0461742e-6);
+        this->get_parameter_or<double>("mapping.imu_orientation_gate_sigma", imu_orientation_gate_sigma, 0.0);
         this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
         {
             vector<double> scale_vec = {1.0, 1.0, 1.0};
@@ -945,6 +1019,8 @@ public:
         this->get_parameter_or<double>("mapping.laser_point_cov_z", LASER_POINT_COV_Z, legacy_laser_point_cov);
         LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
         LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
+        imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
+        imu_orientation_gate_sigma = std::max(0.0, imu_orientation_gate_sigma);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
@@ -956,6 +1032,7 @@ public:
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
         aux_fusion_.load_parameters(*this);
+        g_joint_aux_fusion = &aux_fusion_;
         if (imu_rate_hz <= 0.0)
         {
             RCLCPP_WARN(this->get_logger(), "common.imu_rate_hz must be positive. Falling back to 100 Hz.");
@@ -977,8 +1054,9 @@ public:
             init_grav_cov = 1e-10;
         }
         // else: init_b_acc_cov / init_b_gyr_cov / init_grav_cov already loaded from YAML above.
-        init_b_dvl_cov = aux_fusion_.dvl_b_init_cov();
-        init_b_pressure_cov = 1e4;
+        const double disabled_aux_cov = 1e-12;
+        init_b_dvl_cov = aux_fusion_.dvl_enabled() ? aux_fusion_.dvl_b_init_cov() : disabled_aux_cov;
+        init_b_pressure_cov = aux_fusion_.pressure_enabled() ? 1e4 : disabled_aux_cov;
 
         path.header.stamp = this->get_clock()->now();
         path.header.frame_id ="camera_init";
@@ -994,11 +1072,9 @@ public:
         _featsArray.reset(new PointCloudXYZI());
 
         memset(point_selected_surf, true, sizeof(point_selected_surf));
-        memset(res_last, -1000.0f, sizeof(res_last));
         downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
         downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
         memset(point_selected_surf, true, sizeof(point_selected_surf));
-        memset(res_last, -1000.0f, sizeof(res_last));
 
         if (extrinT.size() != 3)
         {
@@ -1027,8 +1103,9 @@ public:
                                init_grav_cov);
         p_imu->set_initial_aux_cov(V3D(init_b_dvl_cov, init_b_dvl_cov, init_b_dvl_cov),
                                    init_b_pressure_cov);
-        init_b_mag_cov = aux_fusion_.mag_b_init_cov();
-        p_imu->set_initial_mag_cov(init_b_mag_cov, aux_fusion_.mag_b_proc_cov());
+        init_b_mag_cov = aux_fusion_.mag_enabled() ? aux_fusion_.mag_b_init_cov() : disabled_aux_cov;
+        const double b_mag_proc_cov = aux_fusion_.mag_enabled() ? aux_fusion_.mag_b_proc_cov() : disabled_aux_cov;
+        p_imu->set_initial_mag_cov(init_b_mag_cov, b_mag_proc_cov);
         obs_manager.load_parameters(*this, b_gyr_cov, b_acc_cov);
 
         fill(epsi, epsi + state_ikfom::DOF, 0.001);
@@ -1116,10 +1193,6 @@ public:
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
 
-    ~LaserMappingNode()
-    {
-    }
-
 private:
     void timer_callback()
     {
@@ -1174,25 +1247,32 @@ private:
                 return;
             }
 
-            p_imu->Process(Measures, kf, feats_undistort);
-            last_processed_time = Measures.lidar_end_time;
-
             AuxiliarySensorFusion::UpdateSummary aux_summary;
-            auto apply_aux_updates = [&](bool allow_dvl_attitude_update) {
-                // DVL body-frame velocity does not provide an absolute heading
-                // reference by itself. During intentional IMU-only/no-LiDAR
-                // intervals, keep DVL velocity/bias fusion active but prevent
-                // its attitude Jacobian from injecting yaw.
+            auto apply_aux_updates = [&]() {
                 aux_summary = aux_fusion_.process_interval(
-                    process_begin_time, Measures.lidar_end_time, Measures.imu, kf,
-                    allow_dvl_attitude_update);
+                    process_begin_time, Measures.lidar_end_time, Measures.imu, kf);
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
             };
-            update_state_outputs();
 
             if (imu_only_measure)
             {
-                apply_aux_updates(false);
+                auto propagate_to = [&](double target_time) {
+                    return p_imu->PartialPropagate(target_time, kf, Measures.imu);
+                };
+                // With no scan correction, aux measurements are part of the
+                // propagation prior itself. Fuse them at their own timestamps;
+                // batching early magnetometer samples at the packet end can
+                // inject a false startup heading when the vehicle is moving.
+                aux_summary = aux_fusion_.process_interval_interleaved(
+                    process_begin_time, Measures.lidar_end_time, Measures.imu, kf,
+                    propagate_to);
+                p_imu->PartialPropagate(Measures.lidar_end_time, kf, Measures.imu);
+                if (!Measures.imu.empty())
+                {
+                    apply_imu_orientation_update(Measures.imu.back());
+                }
+                last_processed_time = Measures.lidar_end_time;
+                aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
                 update_state_outputs();
                 if (lid_topic.empty())
                 {
@@ -1219,9 +1299,17 @@ private:
                 return;
             }
 
+            p_imu->Process(Measures, kf, feats_undistort);
+            last_processed_time = Measures.lidar_end_time;
+            if (!Measures.imu.empty())
+            {
+                apply_imu_orientation_update(Measures.imu.back());
+            }
+            update_state_outputs();
+
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                apply_aux_updates(false);
+                apply_aux_updates();
                 update_state_outputs();
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "no_points";
@@ -1253,7 +1341,7 @@ private:
                     }
                     ikdtree.Build(feats_down_world->points);
                 }
-                apply_aux_updates(false);
+                apply_aux_updates();
                 update_state_outputs();
                 g_publish_mode = "kdtree_init";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
@@ -1265,7 +1353,7 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                apply_aux_updates(false);
+                apply_aux_updates();
                 update_state_outputs();
                 RCLCPP_WARN(this->get_logger(), "Too few points, publish IMU-only odometry for this scan.\n");
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "few_points";
@@ -1286,14 +1374,14 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            state_ikfom state_before_lidar = kf.get_x();
+            g_joint_aux_measurements = aux_fusion_.take_joint_measurements(
+                process_begin_time, Measures.lidar_end_time, Measures.imu);
+            aux_summary = aux_fusion_.summarize_joint_measurements(
+                g_joint_aux_measurements, state_before_lidar);
+            g_joint_aux_update_active = true;
             kf.update_iterated_dyn_share_modified(1.0, solve_H_time);
-            update_state_outputs();
-
-            // Let LiDAR finish the nonlinear scan-match correction first, then
-            // apply DVL/pressure/mag to the final scan-end state. This keeps the
-            // auxiliary sensors from moving the LiDAR linearization point during
-            // the iterated point-to-plane solve.
-            apply_aux_updates(true);
+            g_joint_aux_update_active = false;
             update_state_outputs();
 
             double t_update_end = omp_get_wtime();

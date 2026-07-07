@@ -20,6 +20,8 @@
             world_to_camera_init_R: [ 1.0, 0.0, 0.0,
                                       0.0, 1.0, 0.0,
                                       0.0, 0.0, 1.0 ]
+            imu_rate_hz: 200.0
+            lidar_timeout: 0.25
             gravity_m_s2: 9.81
 
         preprocess:
@@ -27,16 +29,22 @@
 
         mapping:
             noiseless_imu: false
+            obs_manager_sonar_timeout: 0.0
+            obs_manager_ramp_time: 0.0
+            obs_manager_freeze_cov: 1.0e-10
+            imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
 
             b_acc_cov: 0.2
             b_gyr_cov: 0.00000000000000000001
-            # init_b_acc_cov: 0.001
-            # init_b_gyr_cov: 0.0001
-            # init_grav_cov: 0.00001
+            init_b_acc_cov: 0.001
+            init_b_gyr_cov: 0.0001
+            init_grav_cov: 0.00001
 
 
             acc_cov: 0.0000000000000001
             gyr_cov: 0.000001
+            imu_orientation_cov: 3.0461742e-6
+            imu_orientation_gate_sigma: 0.0
             laser_point_cov_xy: 0.225
             laser_point_cov_z: 0.225
             fov_degree:    40.0
@@ -62,10 +70,14 @@
             enable: true
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
+            surface_pressure: 101325.0
             pressure_timeout: 0.25
             fluid_density: 1025.0
+            gravity: 9.80665
             pressure_cov: 1.0e4
             innovation_gate_sigma: 0.0
+            surface_z: 0.0
+            use_attitude_lever_arm: false
 
         magnetometer:
             enable: true

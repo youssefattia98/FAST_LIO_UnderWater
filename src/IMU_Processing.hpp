@@ -441,6 +441,10 @@ bool ImuProcess::PartialPropagate(double target_time,
 {
   // Skip when EKF is not ready or target is in the past relative to current state.
   if (imu_need_init_) return true;
+  if (last_lidar_end_time_ < 0.0 && last_imu_)
+  {
+    last_lidar_end_time_ = rclcpp::Time(last_imu_->header.stamp).seconds();
+  }
   if (last_lidar_end_time_ < 0.0) return true;
   if (target_time <= last_lidar_end_time_ + 1e-9) return true;
 
@@ -507,6 +511,18 @@ bool ImuProcess::PartialPropagate(double target_time,
     angvel_last = angvel_avr - st.bg;
     acc_s_last = st.rot * (acc_avr - st.ba);
     for (int i = 0; i < 3; ++i) acc_s_last[i] += st.grav[i];
+  }
+
+  for (const auto &imu : imu_msgs)
+  {
+    if (rclcpp::Time(imu->header.stamp).seconds() <= last_lidar_end_time_ + 1e-9)
+    {
+      last_imu_ = imu;
+    }
+    else
+    {
+      break;
+    }
   }
 
   return last_lidar_end_time_ >= target_time - 1e-9;
