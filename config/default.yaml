@@ -72,12 +72,11 @@
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             surface_pressure: 101325.0
             pressure_timeout: 0.25
-            fluid_density: 1025.0
+            fluid_density: 1028.0
             gravity: 9.80665
-            pressure_cov: 1.0e4
+            pressure_cov: 1.0e-4
             innovation_gate_sigma: 0.0
             surface_z: 0.0
-            use_attitude_lever_arm: false
 
         magnetometer:
             enable: true
@@ -100,5 +99,5 @@
             scan_bodyframe_pub_en: true
 
         pcd_save:
-            pcd_save_en: false
+            pcd_save_en: true
             interval: -1

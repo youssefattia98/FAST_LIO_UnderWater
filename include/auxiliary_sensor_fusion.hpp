@@ -153,7 +153,6 @@ public:
         node.declare_parameter<double>("pressure.gravity", 9.80665);
         node.declare_parameter<double>("pressure.surface_pressure", 101325.0);
         node.declare_parameter<double>("pressure.surface_z", 0.0);
-        node.declare_parameter<bool>("pressure.use_attitude_lever_arm", false);
 
         node.declare_parameter<bool>("magnetometer.enable", false);
         node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
@@ -188,7 +187,6 @@ public:
         node.get_parameter_or<double>("pressure.gravity", pressure_gravity_, 9.80665);
         node.get_parameter_or<double>("pressure.surface_pressure", pressure_surface_pressure_, 101325.0);
         node.get_parameter_or<double>("pressure.surface_z", pressure_surface_z_, 0.0);
-        node.get_parameter_or<bool>("pressure.use_attitude_lever_arm", pressure_use_attitude_lever_arm_, false);
 
         std::vector<double> dvl_T;
         std::vector<double> dvl_R;
@@ -461,13 +459,7 @@ public:
                 std::abs(residual) <= pressure_innovation_gate_sigma_ * std::sqrt(cov))
             {
                 Eigen::MatrixXd H_pressure = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
-                H_pressure(0, 2) = -pressure_scale();
-                if (pressure_use_attitude_lever_arm_)
-                {
-                    H_pressure.block<1, 3>(0, 3) =
-                        pressure_scale() *
-                        (Eigen::RowVector3d::UnitZ() * state.rot.toRotationMatrix() * skew(pressure_T_));
-                }
+                H_pressure.block<1, 3>(0, 0) = -pressure_scale() * world_z_axis_in_camera_init();
                 H_pressure(0, 26) = 1.0;
                 const double inv_sigma = 1.0 / std::sqrt(cov);
                 H.row(row) = H_pressure.row(0) * inv_sigma;
@@ -737,10 +729,14 @@ public:
     double mag_b_init_cov() const { return mag_b_init_cov_; }
     double mag_b_proc_cov() const { return mag_b_proc_cov_; }
 
-    // Set the camera_init frame's z-coordinate in the world frame so the pressure
-    // depth model works correctly when world_to_camera_init_T.z != 0.
-    // Call this after loading world_to_camera_init_T from config.
-    void set_camera_init_z_in_world(double z) { camera_init_z_in_world_ = z; }
+    // Pressure measures depth along the world vertical axis, while the FAST-LIO
+    // state is expressed in camera_init. Store the static camera_init pose so the
+    // pressure model can project local sensor position onto world z.
+    void set_camera_init_pose_in_world(const V3D &t, const M3D &R)
+    {
+        camera_init_T_in_world_ = t;
+        camera_init_R_in_world_ = R;
+    }
 
     // The IEKF state lives in the camera_init frame, which equals the body frame at t=0
     // (state.rot = Identity at startup). B_reference must therefore be expressed in
@@ -837,32 +833,27 @@ private:
         return dvl_measurement(msg) - dvl_prediction(state, omega_body);
     }
 
-    double pressure_sensor_z_ci(const state_ikfom &state) const
+    Eigen::RowVector3d world_z_axis_in_camera_init() const
+    {
+        return camera_init_R_in_world_.row(2);
+    }
+
+    double pressure_sensor_z_world(const state_ikfom &state) const
     {
         V3D pressure_offset_ci = V3D::Zero();
-        if (pressure_use_attitude_lever_arm_)
-        {
-            pressure_offset_ci = state.rot.toRotationMatrix() * pressure_T_;
-        }
-        else
-        {
-            pressure_offset_ci.z() = pressure_T_.z();
-        }
-        return state.pos[2] + pressure_offset_ci.z();
+        pressure_offset_ci.z() = pressure_T_.z();
+        const V3D sensor_ci = state.pos + pressure_offset_ci;
+        return camera_init_T_in_world_.z() + world_z_axis_in_camera_init().dot(sensor_ci);
     }
 
     double pressure_raw_depth(const state_ikfom &state) const
     {
-        // state.pos is in camera_init coordinates. pressure_surface_z_ is the
-        // water-surface z in WORLD coordinates, so subtract camera_init's world
-        // z to express the surface in camera_init.
-        const double surface_z_ci = pressure_surface_z_ - camera_init_z_in_world_;
-        return surface_z_ci - pressure_sensor_z_ci(state);
+        return pressure_surface_z_ - pressure_sensor_z_world(state);
     }
 
     double pressure_prediction(const state_ikfom &state) const
     {
-        const double relative_depth = pressure_reference_sensor_z_ci_ - pressure_sensor_z_ci(state);
+        const double relative_depth = pressure_reference_sensor_z_world_ - pressure_sensor_z_world(state);
         return pressure_surface_pressure_ + pressure_scale() * relative_depth + state.b_pressure[0];
     }
 
@@ -890,7 +881,7 @@ private:
 
         const double mean_pressure =
             pressure_init_sum_ / static_cast<double>(pressure_init_samples_collected_);
-        pressure_reference_sensor_z_ci_ = pressure_sensor_z_ci(state);
+        pressure_reference_sensor_z_world_ = pressure_sensor_z_world(state);
         pressure_surface_pressure_ = mean_pressure - state.b_pressure[0];
         pressure_ref_finalized_ = true;
         return true;
@@ -938,12 +929,7 @@ private:
         residual(0) = pressure_residual(msg, state);
 
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
-        H(0, 2) = -pressure_scale();
-        if (pressure_use_attitude_lever_arm_)
-        {
-            H.block<1, 3>(0, 3) = pressure_scale() *
-                                   (Eigen::RowVector3d::UnitZ() * state.rot.toRotationMatrix() * skew(pressure_T_));
-        }
+        H.block<1, 3>(0, 0) = -pressure_scale() * world_z_axis_in_camera_init();
         H(0, 26) = 1.0;
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Zero(1, 1);
@@ -964,10 +950,6 @@ private:
             }
         }
 
-        if (pressure_use_attitude_lever_arm_)
-        {
-            return apply_linear_update(residual, H, R, kf);
-        }
         return apply_pressure_depth_update(residual, H, R, kf);
     }
 
@@ -994,7 +976,7 @@ private:
         Eigen::MatrixXd K = P * H.transpose() * ldlt.solve(Eigen::MatrixXd::Identity(1, 1));
         for (int row = 0; row < K.rows(); ++row)
         {
-            if (row != 2 && row != 26)
+            if (row > 2 && row != 26)
             {
                 K.row(row).setZero();
             }
@@ -1335,13 +1317,13 @@ private:
     double dvl_b_init_cov_ = 1e-8;
     double pressure_cov_ = 1e4;
     double pressure_innovation_gate_sigma_ = 0.0;
-    double camera_init_z_in_world_ = 0.0;
+    V3D camera_init_T_in_world_ = V3D::Zero();
+    M3D camera_init_R_in_world_ = M3D::Identity();
     double pressure_fluid_density_ = 1025.0;
     double pressure_gravity_ = 9.80665;
     double pressure_surface_pressure_ = 101325.0;
     double pressure_surface_z_ = 0.0;
-    bool pressure_use_attitude_lever_arm_ = false;
-    double pressure_reference_sensor_z_ci_ = 0.0;
+    double pressure_reference_sensor_z_world_ = 0.0;
     static constexpr int kPressureReferenceSamples = 20;
     double pressure_init_sum_ = 0.0;
     int pressure_init_samples_collected_ = 0;

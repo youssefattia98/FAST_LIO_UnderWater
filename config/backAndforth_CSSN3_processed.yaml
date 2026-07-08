@@ -77,7 +77,6 @@
             pressure_cov: 1.0e4
             innovation_gate_sigma: 0.0
             surface_z: 0.0
-            use_attitude_lever_arm: false
 
         magnetometer:
             enable: true

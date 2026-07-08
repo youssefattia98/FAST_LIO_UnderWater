@@ -1171,9 +1171,11 @@ public:
         world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
 
-        // Inform the pressure model where camera_init sits in the world z-axis so
-        // depth calculations remain correct when world_to_camera_init_T.z != 0.
-        aux_fusion_.set_camera_init_z_in_world(world_to_camera_init_T[2]);
+        // Inform the pressure model how camera_init sits in World, so pressure
+        // constrains true World-vertical depth rather than tilted local z.
+        aux_fusion_.set_camera_init_pose_in_world(
+            V3D(world_to_camera_init_T[0], world_to_camera_init_T[1], world_to_camera_init_T[2]),
+            world_to_camera_init_rot);
 
         // The IEKF state frame is camera_init, equal to body at startup. The
         // configured magnetic reference is already in that frame, not global World.
