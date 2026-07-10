@@ -98,6 +98,10 @@ double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4, init_b_mag_cov = 1e6;
 bool noiseless_imu = false;
 double imu_orientation_cov = 3.0461742e-6;  // (0.1 deg)^2
 double imu_orientation_gate_sigma = 0.0;
+bool imu_orientation_ref_ready = false;
+Eigen::Quaterniond imu_orientation_ref = Eigen::Quaterniond::Identity();
+double accel_attitude_cov = 1.2184697e-3;  // (2 deg)^2
+double accel_attitude_norm_gate = 2.0;
 ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -695,9 +699,17 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
         return false;
     }
     q_meas.normalize();
+    if (!imu_orientation_ref_ready)
+    {
+        imu_orientation_ref = q_meas;
+        imu_orientation_ref_ready = true;
+        return false;
+    }
 
     state_ikfom state = kf.get_x();
-    const M3D R_err = state.rot.toRotationMatrix().transpose() * q_meas.toRotationMatrix();
+    Eigen::Quaterniond q_rel = imu_orientation_ref.conjugate() * q_meas;
+    q_rel.normalize();
+    const M3D R_err = state.rot.toRotationMatrix().transpose() * q_rel.toRotationMatrix();
     const V3D residual = Log(R_err);
 
     typename esekfom::esekf<state_ikfom, 15, input_ikfom>::cov P = kf.get_P();
@@ -718,6 +730,80 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
 
     Eigen::Matrix<double, state_ikfom::DOF, 3> K = P * H.transpose() * S.inverse();
     Eigen::Matrix<double, state_ikfom::DOF, 1> dx = K * residual;
+    state.boxplus(dx);
+    kf.change_x(state);
+
+    const auto I = esekfom::esekf<state_ikfom, 15, input_ikfom>::cov::Identity();
+    const auto KH = K * H;
+    esekfom::esekf<state_ikfom, 15, input_ikfom>::cov P_new =
+        ((I - KH) * P * (I - KH).transpose() + K * R * K.transpose()).eval();
+    P_new = ((P_new + P_new.transpose()) * 0.5).eval();
+    kf.change_P(P_new);
+    return true;
+}
+
+bool apply_accel_attitude_update(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg)
+{
+    if (!imu_msg)
+    {
+        return false;
+    }
+
+    state_ikfom state = kf.get_x();
+    V3D acc_meas(imu_msg->linear_acceleration.x,
+                 imu_msg->linear_acceleration.y,
+                 imu_msg->linear_acceleration.z);
+    acc_meas -= V3D(state.ba[0], state.ba[1], state.ba[2]);
+    const double acc_norm = acc_meas.norm();
+    if (!std::isfinite(acc_norm) || acc_norm < 1e-6)
+    {
+        return false;
+    }
+    if (std::abs(acc_norm - gravity_m_s2) > accel_attitude_norm_gate)
+    {
+        return false;
+    }
+
+    const V3D measured = acc_meas / acc_norm;
+    V3D grav_world(state.grav[0], state.grav[1], state.grav[2]);
+    if (grav_world.norm() < 1e-6)
+    {
+        grav_world = V3D(0.0, 0.0, -gravity_m_s2);
+    }
+    const V3D predicted = state.rot.toRotationMatrix().transpose() * (-grav_world.normalized());
+    if (!measured.allFinite() || !predicted.allFinite())
+    {
+        return false;
+    }
+
+    Eigen::Quaterniond q_pred_to_meas = Eigen::Quaterniond::FromTwoVectors(predicted, measured);
+    q_pred_to_meas.normalize();
+    V3D residual = -Log(q_pred_to_meas.toRotationMatrix());
+    residual -= predicted * residual.dot(predicted);
+    if (!residual.allFinite())
+    {
+        return false;
+    }
+
+    typename esekfom::esekf<state_ikfom, 15, input_ikfom>::cov P = kf.get_P();
+    Eigen::Matrix<double, 3, state_ikfom::DOF> H =
+        Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
+    H.block<3, 3>(0, 3).setIdentity();
+    const double cov = std::max(1e-8, accel_attitude_cov);
+    const M3D R = M3D::Identity() * cov;
+    const M3D S = H * P * H.transpose() + R;
+    Eigen::LDLT<M3D> ldlt(S);
+    if (ldlt.info() != Eigen::Success)
+    {
+        return false;
+    }
+    Eigen::Matrix<double, state_ikfom::DOF, 3> K =
+        P * H.transpose() * ldlt.solve(M3D::Identity());
+    Eigen::Matrix<double, state_ikfom::DOF, 1> dx = K * residual;
+    if (!dx.allFinite())
+    {
+        return false;
+    }
     state.boxplus(dx);
     kf.change_x(state);
 
@@ -947,6 +1033,8 @@ public:
         this->declare_parameter<double>("mapping.init_grav_cov", 0.00001);
         this->declare_parameter<double>("mapping.imu_orientation_cov", 3.0461742e-6);
         this->declare_parameter<double>("mapping.imu_orientation_gate_sigma", 0.0);
+        this->declare_parameter<double>("mapping.accel_attitude_cov", 1.2184697e-3);
+        this->declare_parameter<double>("mapping.accel_attitude_norm_gate", 2.0);
         this->declare_parameter<bool>("mapping.noiseless_imu", false);
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         ObservabilityManager::declare_parameters(*this);
@@ -1002,6 +1090,8 @@ public:
         this->get_parameter_or<double>("mapping.init_grav_cov",init_grav_cov,0.00001);
         this->get_parameter_or<double>("mapping.imu_orientation_cov", imu_orientation_cov, 3.0461742e-6);
         this->get_parameter_or<double>("mapping.imu_orientation_gate_sigma", imu_orientation_gate_sigma, 0.0);
+        this->get_parameter_or<double>("mapping.accel_attitude_cov", accel_attitude_cov, 1.2184697e-3);
+        this->get_parameter_or<double>("mapping.accel_attitude_norm_gate", accel_attitude_norm_gate, 2.0);
         this->get_parameter_or<bool>("mapping.noiseless_imu",noiseless_imu,false);
         {
             vector<double> scale_vec = {1.0, 1.0, 1.0};
@@ -1021,6 +1111,8 @@ public:
         LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
         imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
         imu_orientation_gate_sigma = std::max(0.0, imu_orientation_gate_sigma);
+        accel_attitude_cov = std::max(1e-8, accel_attitude_cov);
+        accel_attitude_norm_gate = std::max(0.0, accel_attitude_norm_gate);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
@@ -1272,6 +1364,7 @@ private:
                 if (!Measures.imu.empty())
                 {
                     apply_imu_orientation_update(Measures.imu.back());
+                    apply_accel_attitude_update(Measures.imu.back());
                 }
                 last_processed_time = Measures.lidar_end_time;
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
@@ -1306,6 +1399,7 @@ private:
             if (!Measures.imu.empty())
             {
                 apply_imu_orientation_update(Measures.imu.back());
+                apply_accel_attitude_update(Measures.imu.back());
             }
             update_state_outputs();
 

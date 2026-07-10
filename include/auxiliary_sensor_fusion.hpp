@@ -4,9 +4,12 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
@@ -167,6 +170,7 @@ public:
         node.declare_parameter<double>("magnetometer.b_mag_proc_cov", 0.001);
         node.declare_parameter<double>("magnetometer.innovation_gate_sigma", 3.0);
         node.declare_parameter<double>("magnetometer.mag_timeout", 0.5);
+        node.declare_parameter<std::string>("magnetometer.debug_csv_path", "");
     }
 
     void load_parameters(rclcpp::Node &node)
@@ -237,6 +241,7 @@ public:
         node.get_parameter_or<double>("magnetometer.b_mag_proc_cov", mag_b_proc_cov_, 0.001);
         node.get_parameter_or<double>("magnetometer.innovation_gate_sigma", mag_innovation_gate_sigma_, 3.0);
         node.get_parameter_or<double>("magnetometer.mag_timeout", mag_timeout_, 0.5);
+        node.get_parameter_or<std::string>("magnetometer.debug_csv_path", mag_debug_csv_path_, "");
 
         std::vector<double> earth_field, hard_iron, soft_iron;
         node.get_parameter_or<std::vector<double>>("magnetometer.earth_field_imu", earth_field, {0., 0., 0.});
@@ -459,7 +464,10 @@ public:
                 std::abs(residual) <= pressure_innovation_gate_sigma_ * std::sqrt(cov))
             {
                 Eigen::MatrixXd H_pressure = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
-                H_pressure.block<1, 3>(0, 0) = -pressure_scale() * world_z_axis_in_camera_init();
+                // Pressure measures World-z depth, but it must not correct
+                // horizontal x/y. Use the World-z prediction and let the EKF
+                // correct only local depth.
+                H_pressure(0, 2) = -pressure_scale() * world_z_axis_in_camera_init().z();
                 H_pressure(0, 26) = 1.0;
                 const double inv_sigma = 1.0 / std::sqrt(cov);
                 H.row(row) = H_pressure.row(0) * inv_sigma;
@@ -929,7 +937,9 @@ private:
         residual(0) = pressure_residual(msg, state);
 
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
-        H.block<1, 3>(0, 0) = -pressure_scale() * world_z_axis_in_camera_init();
+        // Pressure measures World-z depth, but it must not correct horizontal
+        // x/y. Use the World-z prediction and let the EKF correct only local depth.
+        H(0, 2) = -pressure_scale() * world_z_axis_in_camera_init().z();
         H(0, 26) = 1.0;
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Zero(1, 1);
@@ -976,7 +986,7 @@ private:
         Eigen::MatrixXd K = P * H.transpose() * ldlt.solve(Eigen::MatrixXd::Identity(1, 1));
         for (int row = 0; row < K.rows(); ++row)
         {
-            if (row > 2 && row != 26)
+            if (row != 2 && row != 26)
             {
                 K.row(row).setZero();
             }
@@ -1237,8 +1247,11 @@ private:
         const V3D predicted = state.rot.toRotationMatrix().transpose() * mag_earth_field_world_;
         const double meas_h2 = measured.x() * measured.x() + measured.y() * measured.y();
         const double pred_h2 = predicted.x() * predicted.x() + predicted.y() * predicted.y();
+        const double yaw_before = yaw_from_state(state);
         if (meas_h2 <= 1e-18 || pred_h2 <= 1e-18)
         {
+            write_mag_debug_row(msg, state, measured, predicted, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                false, "horizontal_field_too_small", yaw_before, yaw_before);
             return false;
         }
 
@@ -1250,6 +1263,8 @@ private:
         if (mag_innovation_gate_sigma_ > 0.0 &&
             std::abs(residual) > mag_innovation_gate_sigma_ * std::sqrt(angle_cov))
         {
+            write_mag_debug_row(msg, state, measured, predicted, residual, angle_cov, 0.0, 0.0, 0.0,
+                                false, "innovation_gate", yaw_before, yaw_before);
             return false;
         }
 
@@ -1262,6 +1277,8 @@ private:
 
         if (!finite_vector(r) || !H.allFinite() || !R.allFinite())
         {
+            write_mag_debug_row(msg, state, measured, predicted, residual, angle_cov, 0.0, 0.0, 0.0,
+                                false, "nonfinite_measurement", yaw_before, yaw_before);
             return false;
         }
         typename Ekf::cov P = kf.get_P();
@@ -1269,6 +1286,8 @@ private:
         Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
         if (ldlt.info() != Eigen::Success)
         {
+            write_mag_debug_row(msg, state, measured, predicted, residual, angle_cov, S(0, 0), 0.0, 0.0,
+                                false, "ldlt_failed", yaw_before, yaw_before);
             return false;
         }
 
@@ -1284,6 +1303,8 @@ private:
         const Eigen::VectorXd dx_dyn = K * r;
         if (!finite_vector(dx_dyn))
         {
+            write_mag_debug_row(msg, state, measured, predicted, residual, angle_cov, S(0, 0), K(5, 0), 0.0,
+                                false, "nonfinite_dx", yaw_before, yaw_before);
             return false;
         }
 
@@ -1292,6 +1313,7 @@ private:
 
         state_ikfom yaw_updated_state = kf.get_x();
         yaw_updated_state.boxplus(dx);
+        const double yaw_after = yaw_from_state(yaw_updated_state);
 
         const typename Ekf::cov I_state = Ekf::cov::Identity();
         typename Ekf::cov KH = K * H;
@@ -1300,7 +1322,71 @@ private:
 
         kf.change_x(yaw_updated_state);
         kf.change_P(P_new);
+        write_mag_debug_row(msg, state, measured, predicted, residual, angle_cov, S(0, 0), K(5, 0), dx_dyn(5),
+                            true, "accepted", yaw_before, yaw_after);
         return true;
+    }
+
+    double yaw_from_state(const state_ikfom &state) const
+    {
+        const M3D R = state.rot.toRotationMatrix();
+        return std::atan2(R(1, 0), R(0, 0));
+    }
+
+    void write_mag_debug_row(const MagMsg &msg,
+                             const state_ikfom &state,
+                             const V3D &measured,
+                             const V3D &predicted,
+                             double residual,
+                             double angle_cov,
+                             double innovation_cov,
+                             double k_yaw,
+                             double dx_yaw,
+                             bool accepted,
+                             const char *reason,
+                             double yaw_before,
+                             double yaw_after)
+    {
+        if (mag_debug_csv_path_.empty())
+        {
+            return;
+        }
+        if (!mag_debug_csv_.is_open())
+        {
+            mag_debug_csv_.open(mag_debug_csv_path_, std::ios::out | std::ios::trunc);
+            if (!mag_debug_csv_.is_open())
+            {
+                mag_debug_csv_path_.clear();
+                return;
+            }
+            mag_debug_csv_ << "stamp,accepted,reason,residual_rad,residual_deg,angle_cov,S,k_yaw,dx_yaw_rad,dx_yaw_deg,"
+                              "yaw_before_rad,yaw_before_deg,yaw_after_rad,yaw_after_deg,"
+                              "meas_x,meas_y,meas_z,pred_x,pred_y,pred_z,bmag_x,bmag_y,bmag_z\n";
+        }
+        mag_debug_csv_ << std::setprecision(12)
+                       << get_time_sec(msg.header.stamp) << ','
+                       << (accepted ? 1 : 0) << ','
+                       << reason << ','
+                       << residual << ','
+                       << residual * 180.0 / M_PI << ','
+                       << angle_cov << ','
+                       << innovation_cov << ','
+                       << k_yaw << ','
+                       << dx_yaw << ','
+                       << dx_yaw * 180.0 / M_PI << ','
+                       << yaw_before << ','
+                       << yaw_before * 180.0 / M_PI << ','
+                       << yaw_after << ','
+                       << yaw_after * 180.0 / M_PI << ','
+                       << measured.x() << ','
+                       << measured.y() << ','
+                       << measured.z() << ','
+                       << predicted.x() << ','
+                       << predicted.y() << ','
+                       << predicted.z() << ','
+                       << state.b_mag[0] << ','
+                       << state.b_mag[1] << ','
+                       << state.b_mag[2] << '\n';
     }
 
     bool dvl_enable_ = false;
@@ -1343,6 +1429,8 @@ private:
     V3D mag_earth_field_world_ = V3D::Zero();  // set by apply_initial_rotation()
     V3D mag_hard_iron_ = V3D::Zero();
     M3D mag_soft_iron_ = M3D::Identity();
+    std::string mag_debug_csv_path_;
+    std::ofstream mag_debug_csv_;
 
     mutable std::mutex mutex_;
     std::deque<DvlMsg::ConstSharedPtr> dvl_buffer_;

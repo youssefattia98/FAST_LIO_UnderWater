@@ -16,11 +16,13 @@
             
 
             # pillars_LF_2_processed/
-            world_to_camera_init_T: [13.5140, -68.0855, -3.5146]
-            world_to_camera_init_R: [ 0.5060,  0.8625,  0.0070,
-                                    -0.8624,  0.5059,  0.0173,
-                                    0.0114, -0.0148,  0.9998
-                                ]
+            world_to_camera_init_T: [ 18.64484601173051,
+                        -69.78822449188986,
+                        -5.18412338770762 ]
+
+            world_to_camera_init_R: [  0.75916001,  0.65039857, -0.02564704,
+                                    -0.65056677,  0.75944568,  0.00226569,
+                                    0.02095114,  0.01496510,  0.99966849 ]
             imu_rate_hz: 200.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.8
@@ -75,9 +77,9 @@
             extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
             surface_pressure: 111506.0
             pressure_timeout: 0.25
-            fluid_density: 1025.0
+            fluid_density: 1028.0
             gravity: 9.80665
-            pressure_cov: 1.0e8
+            pressure_cov: 1.0e-4
             innovation_gate_sigma: 3.0
             surface_z: 0.0
 
