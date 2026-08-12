@@ -12,3 +12,5 @@ config/lidar_debug.yaml
 AIContext/*.md
 .claude/*
 plotter.py
+__pycache__/
+*.pyc
