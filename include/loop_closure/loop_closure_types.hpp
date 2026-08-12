@@ -136,6 +136,7 @@ struct LoopEvaluation
     double loop_translation_error_after = 0.0;
     double loop_rotation_error_before_rad = 0.0;
     double loop_rotation_error_after_rad = 0.0;
+    double initial_nis = 0.0;
     double optimization_time_ms = 0.0;
 };
 

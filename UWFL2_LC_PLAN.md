@@ -513,18 +513,18 @@ python3 "$UWFL2_SRC/tools/compare_lc_runs.py" \
 - Results: The loop committed exactly once with zero rejected commits and zero invalid odometry covariance. Finite-difference transport error stayed below the test tolerance and protected covariance/state blocks remained unchanged. Disabled mode retained identical poses, timestamps, message counts, and map hash.
 - Blockers: None.
 - Timing: Shadow rebuild 32.16 ms and re-registration 7.98 ms run in the backend; commit is a pointer swap plus one scan insertion at the front-end boundary.
-- Commit: pending, message `feat: atomically commit loop-corrected state and map`
+- Commit: `7f8ea2a` (`feat: atomically commit loop-corrected state and map`).
 
 ## Checkpoint 6: Automatic STD Detection And False-Loop Rejection
 
 ### Work
 
-- [ ] Port the ROS-independent LTA-OM STD subset with attribution: voxel planes, binary descriptors, triangle descriptors, candidate retrieval, RANSAC/fine matching, and geometric verification.
-- [ ] Exclude unused ROS 1 UI, bag, Ceres BA/ICP, and patched-GTSAM code unless a measured need is documented.
-- [ ] Tune sonar STD parameters from recorded descriptor/keypoint/overlap distributions.
-- [ ] Add the transactional graph checks and high-leverage-loop policy.
-- [ ] Add loop statistics: proposed, descriptor-rejected, geometry-rejected, graph-rejected, registration-rejected, accepted, stale, and superseded.
-- [ ] Test true revisits, non-revisit segments, reversed traversal, sparse scans, flat seabed, parallel walls, and synthetic false candidates.
+- [x] Port the ROS-independent LTA-OM STD subset with attribution: voxel planes, binary descriptors, triangle descriptors, candidate retrieval, RANSAC/fine matching, and geometric verification.
+- [x] Exclude unused ROS 1 UI, bag, Ceres BA/ICP, and patched-GTSAM code unless a measured need is documented.
+- [x] Tune sonar STD parameters from recorded descriptor/keypoint/overlap distributions.
+- [x] Add the transactional graph checks and high-leverage-loop policy.
+- [x] Add loop statistics: proposed, descriptor-rejected, geometry-rejected, graph-rejected, registration-rejected, accepted, stale, and superseded.
+- [x] Test true revisits, non-revisit segments, reversed traversal, sparse scans, flat seabed, parallel walls, and synthetic false candidates.
 
 ### Commands
 
@@ -557,12 +557,12 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
-- Blockers: TODO
-- Timing: STD stages, graph, rebuild, registration, queue age, peak RAM.
-- Commit: TODO, suggested message `feat: add asynchronous STD loop closure and rejection`
+- Decisions: Keep detection opt-in and backend-only; use full-SE(3) SVD/RANSAC plus 3D overlap, two-hit confirmation, pose-distance shortlist, odometry-consistency and NIS gates, then the existing graph/rebuild/re-registration/atomic-swap transaction. The conservative default rejects corrections that are not statistically necessary.
+- Commands run: isolated build; 24-test suite; exact disabled regression; full sim3 x5 replay; 180 s real back-and-forth x5 replay. Artifacts: `/tmp/uwfl2_lc_cp6_disabled_smoke`, `/tmp/uwfl2_lc_cp6_auto_sim3_safe`, and `/tmp/uwfl2_lc_cp6_auto_real_180s`.
+- Results: Build and all 24 tests pass. Disabled mode is exactly equal to Checkpoint 5 in pose, timestamps, message counts, and map hash. Simulation processed 357/357 keyframes with zero drops; four confirmed candidates were rejected by NIS, preventing false correction in repetitive harbor geometry. A less-conservative validation run proved the complete automatic path, including accepted graph loop, shadow rebuild, re-registration, and atomic commit. Real data processed 47/47 keyframes with zero proposals in the tested segment and no invalid covariance or timestamp.
+- Blockers: No code blocker. The supplied sim3 and tested real segment do not contain a statistically necessary loop under the final conservative gate; a drifted closed-loop bag is needed to validate a beneficial automatic correction before production enablement.
+- Timing: Sim descriptor/search/verification mean 0.33/4.4/20.0 ms, p95 0.60/13.5/50.9 ms; no backend drops. Real mean 0.24/0.48/4.0 ms, p95 0.55/1.20/21.8 ms. Validation rebuild/re-registration were about 74/14 ms in backend threads.
+- Commit: this checkpoint commit, `feat: add asynchronous STD loop closure and rejection`.
 
 ## Checkpoint 7: Baseline Versus UWFL2-LC Evaluation
 

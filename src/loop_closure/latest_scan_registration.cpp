@@ -288,14 +288,54 @@ RegistrationResult LatestScanRegistrar::register_scan(
         {
             return reject("non_finite_registration_increment");
         }
-        estimate.translation += increment.head<3>();
-        estimate.rotation =
-            (estimate.rotation * exp_so3(increment.tail<3>())).normalized();
         final_information = information;
         final_squared_error = squared_error;
         result.iterations = iteration + 1;
-        if (increment.head<3>().norm() <= config_.convergence_translation_m &&
-            increment.tail<3>().norm() <= config_.convergence_rotation_rad)
+
+        Pose3d accepted_pose = estimate;
+        double accepted_scale = 0.0;
+        double best_mean_squared_error =
+            squared_error / static_cast<double>(matches.residuals.size());
+        for (const double scale : {1.0, 0.5, 0.25, 0.125})
+        {
+            Pose3d candidate = estimate;
+            candidate.translation += scale * increment.head<3>();
+            candidate.rotation =
+                (candidate.rotation * exp_so3(scale * increment.tail<3>()))
+                    .normalized();
+            const CorrespondenceSet candidate_matches =
+                correspondences(scan, candidate, shadow_map, config_);
+            if (candidate_matches.residuals.size() <
+                config_.minimum_effective_points)
+            {
+                continue;
+            }
+            double candidate_squared_error = 0.0;
+            for (const double residual : candidate_matches.residuals)
+            {
+                candidate_squared_error += residual * residual;
+            }
+            const double candidate_mean_squared_error =
+                candidate_squared_error /
+                static_cast<double>(candidate_matches.residuals.size());
+            if (candidate_mean_squared_error + 1e-12 < best_mean_squared_error)
+            {
+                accepted_pose = candidate;
+                accepted_scale = scale;
+                break;
+            }
+        }
+        if (accepted_scale == 0.0)
+        {
+            // The graph-propagated pose is already a local point-to-plane minimum.
+            result.converged = true;
+            break;
+        }
+        estimate = accepted_pose;
+        if (accepted_scale * increment.head<3>().norm() <=
+                config_.convergence_translation_m &&
+            accepted_scale * increment.tail<3>().norm() <=
+                config_.convergence_rotation_rad)
         {
             result.converged = true;
             break;
@@ -314,6 +354,36 @@ RegistrationResult LatestScanRegistrar::register_scan(
     if (result.final_effective_points < config_.minimum_effective_points)
     {
         return reject("too_few_final_correspondences");
+    }
+    final_information.setZero();
+    final_squared_error = 0.0;
+    for (std::size_t index = 0; index < final_matches.residuals.size(); ++index)
+    {
+        final_information.noalias() +=
+            final_matches.jacobians[index].transpose() *
+            final_matches.jacobians[index];
+        final_squared_error += final_matches.residuals[index] *
+                               final_matches.residuals[index];
+    }
+    final_information =
+        0.5 * (final_information + final_information.transpose());
+    Eigen::SelfAdjointEigenSolver<Matrix6d> final_eigen_solver(final_information);
+    if (final_eigen_solver.info() != Eigen::Success)
+    {
+        return reject("final_information_eigendecomposition_failed");
+    }
+    result.information_min_eigenvalue =
+        final_eigen_solver.eigenvalues().minCoeff();
+    result.information_condition =
+        result.information_min_eigenvalue > 0.0
+            ? final_eigen_solver.eigenvalues().maxCoeff() /
+                  result.information_min_eigenvalue
+            : std::numeric_limits<double>::infinity();
+    if (result.information_min_eigenvalue <
+            config_.minimum_information_eigenvalue ||
+        result.information_condition > config_.maximum_information_condition)
+    {
+        return reject("underconstrained_final_full_se3_geometry");
     }
     const double residual_tolerance = 1e-8;
     if (result.final_residual_mean_m >
@@ -336,6 +406,10 @@ RegistrationResult LatestScanRegistrar::register_scan(
     double sigma_squared = final_squared_error / degrees_of_freedom;
     sigma_squared = std::max(sigma_squared, 1e-10);
     Eigen::LDLT<Matrix6d> final_decomposition(final_information);
+    if (final_decomposition.info() != Eigen::Success)
+    {
+        return reject("final_normal_equation_factorization_failed");
+    }
     result.covariance = sigma_squared *
                         final_decomposition.solve(Matrix6d::Identity());
     result.covariance = 0.5 *

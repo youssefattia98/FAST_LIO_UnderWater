@@ -143,7 +143,9 @@ TEST(FullSe3PoseGraph, AddsPriorAndConsecutiveOdometryFactors)
 
 TEST(FullSe3PoseGraph, TransactionalLoopReducesFullSe3Residual)
 {
-    lc::FullSe3PoseGraph graph;
+    lc::PoseGraphConfig config;
+    config.loop_maximum_initial_nis = 1e6;
+    lc::FullSe3PoseGraph graph(config);
     for (std::uint64_t id = 0; id < 8; ++id)
     {
         const double fraction = static_cast<double>(id) / 7.0;
@@ -174,6 +176,25 @@ TEST(FullSe3PoseGraph, TransactionalLoopReducesFullSe3Residual)
     EXPECT_LT(lc::rotation_distance_rad(snapshot.optimized_poses.back(),
                                         lc::Pose3d{}),
               lc::rotation_distance_rad(snapshot.raw_poses.back(), lc::Pose3d{}));
+}
+
+TEST(FullSe3PoseGraph, RejectsStatisticallyInconsistentLoop)
+{
+    lc::FullSe3PoseGraph graph;
+    for (std::uint64_t id = 0; id < 8; ++id)
+    {
+        ASSERT_EQ(graph.append_keyframe(keyframe(
+                      id, pose({static_cast<double>(id), 0.0, 0.0},
+                               Eigen::Vector3d::UnitZ(), 0.0))),
+                  id + 1);
+    }
+    lc::LoopConstraint loop;
+    loop.from_id = 0;
+    loop.to_id = 7;
+    loop.T_from_to = pose({6.4, 0.0, 0.0}, Eigen::Vector3d::UnitZ(), 0.0);
+    loop.covariance = lc::Matrix6d::Identity() * 1e-6;
+    EXPECT_EQ(graph.try_add_loop(loop).reason, "initial_loop_nis_too_large");
+    EXPECT_EQ(graph.snapshot().loop_factor_count, 0U);
 }
 
 TEST(FullSe3PoseGraph, RejectedLoopLeavesCommittedGraphUnchanged)

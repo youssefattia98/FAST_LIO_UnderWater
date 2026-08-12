@@ -20,6 +20,11 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
         throw std::invalid_argument(
             "LoopClosureManager must only be constructed when enabled");
     }
+    if (config_.automatic_detection_enabled)
+    {
+        std_detector_ = std::make_unique<StableTriangleDetector>(
+            config_.std_detection);
+    }
     if (!config_.diagnostics_directory.empty())
     {
         std::filesystem::create_directories(config_.diagnostics_directory);
@@ -29,7 +34,8 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
         loop_diagnostics_
             << "from_id,to_id,accepted,reason,graph_version,graph_error_before,"
                "graph_error_after,translation_error_before,translation_error_after,"
-               "rotation_error_before_rad,rotation_error_after_rad,optimization_time_ms\n";
+               "rotation_error_before_rad,rotation_error_after_rad,initial_nis,"
+               "optimization_time_ms\n";
         shadow_diagnostics_.open(
             config_.diagnostics_directory / "shadow_rebuilds.csv");
         shadow_diagnostics_
@@ -43,6 +49,11 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
                "valid,converged,reason,initial_effective,final_effective,"
                "initial_mean_m,initial_p95_m,final_mean_m,final_p95_m,"
                "information_min_eigenvalue,information_condition,iterations,time_ms\n";
+        std_diagnostics_.open(config_.diagnostics_directory / "std_detections.csv");
+        std_diagnostics_
+            << "source_id,target_id,proposed,confirmed,reason,keypoints,triangles,"
+               "matches,ransac_inliers,overlap,descriptor_ms,search_ms,verification_ms,"
+               "graph_accepted,graph_reason\n";
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
     shadow_worker_ = std::thread(&LoopClosureManager::run_shadow_builder, this);
@@ -78,11 +89,11 @@ void LoopClosureManager::notify_active_tree_generation(std::uint64_t generation)
 LoopClosureManager::~LoopClosureManager()
 {
     queue_.close();
-    shadow_queue_.close();
     if (worker_.joinable())
     {
         worker_.join();
     }
+    shadow_queue_.close();
     if (shadow_worker_.joinable())
     {
         shadow_worker_.join();
@@ -196,6 +207,47 @@ void LoopClosureManager::run()
             }
             ++processed_;
             write_diagnostic(*keyframe, version, elapsed_ms);
+
+            if (std_detector_)
+            {
+                const StdDetectionResult detection = std_detector_->process(*keyframe);
+                ++std_processed_;
+                if (detection.proposed)
+                {
+                    ++std_proposed_;
+                }
+                if (detection.reason == "descriptor_rejected")
+                {
+                    ++std_descriptor_rejected_;
+                }
+                else if (detection.reason == "geometry_rejected")
+                {
+                    ++std_geometry_rejected_;
+                }
+                else if (detection.reason == "awaiting_confirmation")
+                {
+                    ++std_awaiting_confirmation_;
+                }
+
+                if (detection.loop)
+                {
+                    const LoopEvaluation evaluation = inject_loop(*detection.loop);
+                    if (evaluation.accepted)
+                    {
+                        ++std_accepted_;
+                    }
+                    else
+                    {
+                        ++std_graph_rejected_;
+                    }
+                    write_std_diagnostic(detection, &evaluation);
+                }
+                else
+                {
+                    write_std_diagnostic(detection, nullptr);
+                }
+                write_summary();
+            }
         }
         catch (const std::exception &)
         {
@@ -252,6 +304,17 @@ void LoopClosureManager::write_summary() const
             << "  \"graph_loop_factors\": " << graph.loop_factor_count << ",\n"
             << "  \"loops_accepted\": " << final_stats.loops_accepted << ",\n"
             << "  \"loops_rejected\": " << final_stats.loops_rejected << ",\n"
+            << "  \"std_processed\": " << final_stats.std_processed << ",\n"
+            << "  \"std_proposed\": " << final_stats.std_proposed << ",\n"
+            << "  \"std_descriptor_rejected\": "
+            << final_stats.std_descriptor_rejected << ",\n"
+            << "  \"std_geometry_rejected\": "
+            << final_stats.std_geometry_rejected << ",\n"
+            << "  \"std_awaiting_confirmation\": "
+            << final_stats.std_awaiting_confirmation << ",\n"
+            << "  \"std_graph_rejected\": " << final_stats.std_graph_rejected
+            << ",\n"
+            << "  \"std_accepted\": " << final_stats.std_accepted << ",\n"
             << "  \"shadow_builds_started\": " << final_stats.shadow_builds_started << ",\n"
             << "  \"shadow_builds_ready\": " << final_stats.shadow_builds_ready << ",\n"
             << "  \"shadow_builds_failed\": " << final_stats.shadow_builds_failed << ",\n"
@@ -307,6 +370,29 @@ void LoopClosureManager::write_registration_diagnostic(
     registration_diagnostics_.flush();
 }
 
+void LoopClosureManager::write_std_diagnostic(
+    const StdDetectionResult &result,
+    const LoopEvaluation *evaluation)
+{
+    if (!std_diagnostics_)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    std_diagnostics_ << result.source_id << ',' << result.target_id << ','
+                     << (result.proposed ? 1 : 0) << ','
+                     << (result.confirmed ? 1 : 0) << ','
+                     << std::quoted(result.reason) << ',' << result.keypoints << ','
+                     << result.triangles << ',' << result.descriptor_matches << ','
+                     << result.ransac_inliers << ',' << std::setprecision(17)
+                     << result.overlap << ',' << result.descriptor_time_ms << ','
+                     << result.search_time_ms << ',' << result.verification_time_ms
+                     << ',' << (evaluation && evaluation->accepted ? 1 : 0) << ','
+                     << std::quoted(evaluation ? evaluation->reason : "not_submitted")
+                     << '\n';
+    std_diagnostics_.flush();
+}
+
 void LoopClosureManager::write_shadow_diagnostic(
     const ShadowMapResult &result,
     const std::string &status)
@@ -347,6 +433,7 @@ void LoopClosureManager::write_loop_diagnostic(
                       << evaluation.loop_translation_error_after << ','
                       << evaluation.loop_rotation_error_before_rad << ','
                       << evaluation.loop_rotation_error_after_rad << ','
+                      << evaluation.initial_nis << ','
                       << evaluation.optimization_time_ms << '\n';
     loop_diagnostics_.flush();
 }
@@ -375,6 +462,13 @@ LoopClosureStats LoopClosureManager::stats() const
     result.corrections_rejected = corrections_rejected_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
     result.graph_time_ms_max = graph_time_ms_max_.load();
+    result.std_processed = std_processed_.load();
+    result.std_proposed = std_proposed_.load();
+    result.std_descriptor_rejected = std_descriptor_rejected_.load();
+    result.std_geometry_rejected = std_geometry_rejected_.load();
+    result.std_awaiting_confirmation = std_awaiting_confirmation_.load();
+    result.std_graph_rejected = std_graph_rejected_.load();
+    result.std_accepted = std_accepted_.load();
     return result;
 }
 

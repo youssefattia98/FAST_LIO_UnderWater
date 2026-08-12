@@ -16,6 +16,7 @@
 #include "loop_closure/loop_closure_types.hpp"
 #include "loop_closure/pose_graph.hpp"
 #include "loop_closure/shadow_map.hpp"
+#include "loop_closure/std_detector.hpp"
 
 namespace uwfl2::loop_closure
 {
@@ -28,6 +29,7 @@ struct LoopClosureConfig
     PoseGraphConfig pose_graph;
     ShadowMapConfig shadow_map;
     RegistrationConfig registration;
+    StdConfig std_detection;
     std::size_t queue_capacity = 8;
     std::filesystem::path diagnostics_directory;
 };
@@ -55,6 +57,13 @@ struct LoopClosureStats
     std::uint64_t corrections_rejected = 0;
     double graph_time_ms_sum = 0.0;
     double graph_time_ms_max = 0.0;
+    std::uint64_t std_processed = 0;
+    std::uint64_t std_proposed = 0;
+    std::uint64_t std_descriptor_rejected = 0;
+    std::uint64_t std_geometry_rejected = 0;
+    std::uint64_t std_awaiting_confirmation = 0;
+    std::uint64_t std_graph_rejected = 0;
+    std::uint64_t std_accepted = 0;
 };
 
 struct PendingCorrection
@@ -187,6 +196,8 @@ private:
     void write_shadow_diagnostic(const ShadowMapResult &result,
                                  const std::string &status);
     void write_registration_diagnostic(const RegistrationResult &result);
+    void write_std_diagnostic(const StdDetectionResult &result,
+                              const LoopEvaluation *evaluation);
 
     LoopClosureConfig config_;
     KeyframeSelector selector_;
@@ -195,12 +206,14 @@ private:
     FullSe3PoseGraph pose_graph_;
     ShadowMapBuilder shadow_map_builder_;
     LatestScanRegistrar registrar_;
+    std::unique_ptr<StableTriangleDetector> std_detector_;
     std::thread worker_;
     std::thread shadow_worker_;
     std::ofstream diagnostics_;
     std::ofstream loop_diagnostics_;
     std::ofstream shadow_diagnostics_;
     std::ofstream registration_diagnostics_;
+    std::ofstream std_diagnostics_;
     mutable std::mutex diagnostics_mutex_;
     mutable std::mutex shadow_result_mutex_;
     std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
@@ -229,6 +242,13 @@ private:
     std::atomic<std::uint64_t> corrections_rejected_{0};
     std::atomic<double> graph_time_ms_sum_{0.0};
     std::atomic<double> graph_time_ms_max_{0.0};
+    std::atomic<std::uint64_t> std_processed_{0};
+    std::atomic<std::uint64_t> std_proposed_{0};
+    std::atomic<std::uint64_t> std_descriptor_rejected_{0};
+    std::atomic<std::uint64_t> std_geometry_rejected_{0};
+    std::atomic<std::uint64_t> std_awaiting_confirmation_{0};
+    std::atomic<std::uint64_t> std_graph_rejected_{0};
+    std::atomic<std::uint64_t> std_accepted_{0};
 };
 
 }  // namespace uwfl2::loop_closure

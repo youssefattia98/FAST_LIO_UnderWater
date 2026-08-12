@@ -1136,6 +1136,13 @@ public:
         this->declare_parameter<double>("loop_closure.registration_plane_threshold_m", 0.12);
         this->declare_parameter<double>("loop_closure.registration_maximum_translation_m", 2.0);
         this->declare_parameter<double>("loop_closure.registration_maximum_rotation_deg", 15.0);
+        this->declare_parameter<int>("loop_closure.std_minimum_keyframe_separation", 20);
+        this->declare_parameter<double>("loop_closure.std_voxel_size_m", 0.6);
+        this->declare_parameter<int>("loop_closure.std_minimum_triangle_matches", 5);
+        this->declare_parameter<int>("loop_closure.std_minimum_ransac_inliers", 5);
+        this->declare_parameter<double>("loop_closure.std_overlap_minimum", 0.20);
+        this->declare_parameter<double>("loop_closure.std_overlap_distance_m", 0.35);
+        this->declare_parameter<int>("loop_closure.std_required_confirmations", 2);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1305,6 +1312,10 @@ public:
         int corrected_map_maximum_input_points = 3000000;
         int registration_maximum_iterations = 12;
         int registration_minimum_effective_points = 30;
+        int std_minimum_keyframe_separation = 20;
+        int std_minimum_triangle_matches = 5;
+        int std_minimum_ransac_inliers = 5;
+        int std_required_confirmations = 2;
         double registration_maximum_rotation_deg = 15.0;
         string diagnostics_directory;
         this->get_parameter_or<double>("loop_closure.keyframe_translation_m",
@@ -1356,6 +1367,20 @@ public:
                                        loop_config.registration.maximum_registration_translation_m, 2.0);
         this->get_parameter_or<double>("loop_closure.registration_maximum_rotation_deg",
                                        registration_maximum_rotation_deg, 15.0);
+        this->get_parameter_or<int>("loop_closure.std_minimum_keyframe_separation",
+                                    std_minimum_keyframe_separation, 20);
+        this->get_parameter_or<double>("loop_closure.std_voxel_size_m",
+                                       loop_config.std_detection.voxel_size_m, 0.6);
+        this->get_parameter_or<int>("loop_closure.std_minimum_triangle_matches",
+                                    std_minimum_triangle_matches, 5);
+        this->get_parameter_or<int>("loop_closure.std_minimum_ransac_inliers",
+                                    std_minimum_ransac_inliers, 5);
+        this->get_parameter_or<double>("loop_closure.std_overlap_minimum",
+                                       loop_config.std_detection.geometric_overlap_minimum, 0.20);
+        this->get_parameter_or<double>("loop_closure.std_overlap_distance_m",
+                                       loop_config.std_detection.geometric_overlap_distance_m, 0.35);
+        this->get_parameter_or<int>("loop_closure.std_required_confirmations",
+                                    std_required_confirmations, 2);
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =
@@ -1368,6 +1393,13 @@ public:
             std::max(0.0, loop_maximum_initial_rotation_error_deg) * PI_M / 180.0;
         loop_config.pose_graph.loop_maximum_pose_correction_rotation_rad =
             std::max(0.0, loop_maximum_pose_correction_rotation_deg) * PI_M / 180.0;
+        loop_config.std_detection.maximum_pose_distance_m =
+            1.5 * std::max(0.0,
+                loop_config.pose_graph.loop_maximum_initial_translation_error_m);
+        loop_config.std_detection.maximum_prior_translation_error_m =
+            loop_config.pose_graph.loop_maximum_initial_translation_error_m;
+        loop_config.std_detection.maximum_prior_rotation_rad =
+            loop_config.pose_graph.loop_maximum_initial_rotation_error_rad;
         loop_config.shadow_map.voxel_size_m = filter_size_map_min;
         loop_config.shadow_map.maximum_keyframes = static_cast<std::size_t>(
             std::max(1, corrected_map_maximum_keyframes));
@@ -1379,6 +1411,14 @@ public:
             std::max(6, registration_minimum_effective_points));
         loop_config.registration.maximum_registration_rotation_rad =
             std::max(0.0, registration_maximum_rotation_deg) * PI_M / 180.0;
+        loop_config.std_detection.minimum_keyframe_separation =
+            static_cast<std::size_t>(std::max(1, std_minimum_keyframe_separation));
+        loop_config.std_detection.minimum_triangle_matches =
+            static_cast<std::size_t>(std::max(1, std_minimum_triangle_matches));
+        loop_config.std_detection.minimum_ransac_inliers =
+            static_cast<std::size_t>(std::max(1, std_minimum_ransac_inliers));
+        loop_config.std_detection.required_consistent_detections =
+            static_cast<std::size_t>(std::max(1, std_required_confirmations));
         loop_config.diagnostics_directory = diagnostics_directory;
         if (loop_config.enabled)
         {

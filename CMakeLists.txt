@@ -106,6 +106,7 @@ add_library(uwfl2_loop_closure
   src/loop_closure/latest_scan_registration.cpp
   src/loop_closure/pose_graph.cpp
   src/loop_closure/shadow_map.cpp
+  src/loop_closure/std_detector.cpp
 )
 target_include_directories(uwfl2_loop_closure PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -141,6 +142,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_loop_closure_core test/test_loop_closure_core.cpp)
   target_include_directories(test_loop_closure_core PRIVATE include)
   target_link_libraries(test_loop_closure_core uwfl2_loop_closure)
+
+  ament_add_gtest(test_std_detector test/test_std_detector.cpp)
+  target_include_directories(test_std_detector PRIVATE include)
+  target_link_libraries(test_std_detector uwfl2_loop_closure)
 endif()
 
 # ---------------- Install --------------- #

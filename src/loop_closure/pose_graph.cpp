@@ -228,6 +228,28 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
     {
         return reject("initial_loop_residual_too_large");
     }
+    const gtsam::Pose3 predicted =
+        estimate_.at<gtsam::Pose3>(from_key).between(
+            estimate_.at<gtsam::Pose3>(to_key));
+    const gtsam::Vector6 innovation =
+        gtsam::Pose3::Logmap(measurement.between(predicted));
+    const Matrix6d innovation_covariance = force_positive_definite(
+        constraint.covariance + sanitized_odometry_covariance(
+            from_iterator->pose_covariance, to_iterator->pose_covariance,
+            config_),
+        config_);
+    const Eigen::LDLT<Matrix6d> innovation_solver(innovation_covariance);
+    if (innovation_solver.info() != Eigen::Success)
+    {
+        return reject("loop_innovation_factorization_failed");
+    }
+    result.initial_nis = innovation.dot(innovation_solver.solve(innovation));
+    if (!constraint.test_override &&
+        (!std::isfinite(result.initial_nis) ||
+         result.initial_nis > config_.loop_maximum_initial_nis))
+    {
+        return reject("initial_loop_nis_too_large");
+    }
 
     try
     {
