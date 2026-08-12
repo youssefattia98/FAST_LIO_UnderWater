@@ -307,6 +307,98 @@ def resource_metrics(path: Path) -> dict[str, Any]:
     }
 
 
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with path.open() as stream:
+        return list(csv.DictReader(stream))
+
+
+def numeric_column(
+    rows: list[dict[str, str]], column: str, *, status: str | None = None
+) -> dict[str, Any]:
+    values = []
+    for row in rows:
+        if status is not None and row.get("status") != status:
+            continue
+        try:
+            values.append(float(row[column]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return distribution(values)
+
+
+def timing_metrics(run: Path) -> dict[str, Any]:
+    front_end = csv_rows(run / "front_end_timing.csv")
+    keyframes = csv_rows(run / "keyframes.csv")
+    loops = csv_rows(run / "loops.csv")
+    shadow = csv_rows(run / "shadow_rebuilds.csv")
+    registrations = csv_rows(run / "reregistrations.csv")
+    commits = csv_rows(run / "atomic_commits.csv")
+    detections = csv_rows(run / "std_detections.csv")
+    shadow_total = []
+    for row in shadow:
+        try:
+            shadow_total.append(
+                float(row["reconstruction_time_ms"])
+                + float(row["downsample_time_ms"])
+                + float(row["tree_build_time_ms"])
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {
+        "front_end_scan_ms": numeric_column(front_end, "elapsed_ms"),
+        "front_end_lidar_update_ms": numeric_column(
+            front_end, "elapsed_ms", status="lidar_update"
+        ),
+        "graph_append_ms": numeric_column(keyframes, "graph_time_ms"),
+        "graph_loop_optimization_ms": numeric_column(loops, "optimization_time_ms"),
+        "graph_loop_initial_nis": numeric_column(loops, "initial_nis"),
+        "shadow_rebuild_ms": distribution(shadow_total),
+        "registration_ms": numeric_column(registrations, "time_ms"),
+        "atomic_commit_ms": numeric_column(commits, "elapsed_ms"),
+        "std_descriptor_ms": numeric_column(detections, "descriptor_ms"),
+        "std_search_ms": numeric_column(detections, "search_ms"),
+        "std_verification_ms": numeric_column(detections, "verification_ms"),
+    }
+
+
+def input_delivery_metrics(run: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    summary = read_json(run / "front_end_summary.json")
+    bag = Path(manifest.get("bag", ""))
+    if not bag.exists() or not (bag / "metadata.yaml").exists():
+        return {"front_end_summary": summary}
+    source = metadata_metrics(bag / "metadata.yaml")
+    runtime = yaml.safe_load((run / "runtime_config.yaml").read_text())
+    params = runtime.get("/**", {}).get("ros__parameters", {})
+    lidar_topic = params.get("common", {}).get("lid_topic", "")
+    imu_topic = params.get("common", {}).get("imu_topic", "")
+    topics = source.get("topic_counts", {})
+    lidar_expected = int(topics.get(lidar_topic, 0)) if lidar_topic else 0
+    imu_expected = int(topics.get(imu_topic, 0)) if imu_topic else 0
+    lidar_received = int(summary.get("lidar_callbacks_received", 0))
+    imu_received = int(summary.get("imu_callbacks_received", 0))
+    return {
+        "source_topic_counts": {
+            "lidar_topic": lidar_topic,
+            "lidar_expected": lidar_expected,
+            "imu_topic": imu_topic,
+            "imu_expected": imu_expected,
+        },
+        "callback_delivery": {
+            "lidar_received": lidar_received,
+            "lidar_missing": max(0, lidar_expected - lidar_received),
+            "imu_received": imu_received,
+            "imu_missing": max(0, imu_expected - imu_received),
+        },
+        "front_end_summary": summary,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", required=True, type=Path)
@@ -332,11 +424,15 @@ def main() -> int:
             "rate": manifest.get("rate"),
             "clock_mode": manifest.get("clock_mode"),
             "wall_duration_s": manifest.get("wall_duration_s"),
+            "bag": manifest.get("bag"),
         },
         "output_bag": metadata_metrics(output_bag / "metadata.yaml"),
         "trajectory": trajectory_metrics(read_trajectories(output_bag)),
         "resources": resource_metrics(run / "resource_samples.csv"),
         "map": manifest.get("map", {}),
+        "timing": timing_metrics(run),
+        "delivery": input_delivery_metrics(run, manifest),
+        "loop_closure": read_json(run / "loop_closure_summary.json"),
     }
     monitor_path = run / "monitor_summary.json"
     if monitor_path.exists():

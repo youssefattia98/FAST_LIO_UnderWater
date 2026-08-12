@@ -628,12 +628,20 @@ python3 "$UWFL2_SRC/tools/compare_lc_runs.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
+- Decisions: Added benchmark-only front-end, callback-delivery, backend-stage,
+  queue-supersession, and atomic-commit counters. They are enabled only when a
+  diagnostics directory is supplied and do not change estimator decisions.
+- Commands run: `colcon test --packages-select fast_lio`; matched 30 s sim3
+  disabled replay at x5; strict `compare_lc_runs.py` regression against the
+  Checkpoint 6 disabled replay.
+- Results: 24/24 tests passed. The instrumentation smoke was bit-exact: zero
+  pose/rotation/timestamp differences, identical map SHA-256 and output counts.
+  It received 149 sonar and 1690 IMU callbacks with zero timestamp rollback,
+  buffer-clear, or stale-scan events. Scan latency was 3.37 ms mean and 4.48 ms
+  p95.
 - Blockers: current development host is x86_64, not a Jetson Orin Nano. Final Jetson acceptance cannot be marked complete until the same x1 runs are executed on that target.
-- Timing: TODO
-- Commit: TODO, suggested message `test: compare UWFL2 baseline and loop closure`
+- Timing: Full x1 simulation and real-bag results remain pending.
+- Commit: instrumentation commit precedes the final evaluation commit.
 
 ## Stop Conditions
 

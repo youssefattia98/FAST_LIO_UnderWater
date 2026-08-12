@@ -54,6 +54,10 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
             << "source_id,target_id,proposed,confirmed,reason,keypoints,triangles,"
                "matches,ransac_inliers,overlap,descriptor_ms,search_ms,verification_ms,"
                "graph_accepted,graph_reason\n";
+        commit_diagnostics_.open(
+            config_.diagnostics_directory / "atomic_commits.csv");
+        commit_diagnostics_
+            << "committed,reason,elapsed_ms,graph_version,active_tree_generation\n";
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
     shadow_worker_ = std::thread(&LoopClosureManager::run_shadow_builder, this);
@@ -319,6 +323,8 @@ void LoopClosureManager::write_summary() const
             << "  \"shadow_builds_ready\": " << final_stats.shadow_builds_ready << ",\n"
             << "  \"shadow_builds_failed\": " << final_stats.shadow_builds_failed << ",\n"
             << "  \"shadow_builds_stale\": " << final_stats.shadow_builds_stale << ",\n"
+            << "  \"shadow_builds_superseded\": "
+            << final_stats.shadow_builds_superseded << ",\n"
             << "  \"shadow_build_time_ms_sum\": " << final_stats.shadow_build_time_ms_sum << ",\n"
             << "  \"shadow_build_time_ms_max\": " << final_stats.shadow_build_time_ms_max << ",\n"
             << "  \"registrations_ready\": " << final_stats.registrations_ready << ",\n"
@@ -327,6 +333,8 @@ void LoopClosureManager::write_summary() const
             << "  \"registration_time_ms_max\": " << final_stats.registration_time_ms_max << ",\n"
             << "  \"corrections_committed\": " << final_stats.corrections_committed << ",\n"
             << "  \"corrections_rejected\": " << final_stats.corrections_rejected << ",\n"
+            << "  \"commit_time_ms_sum\": " << final_stats.commit_time_ms_sum << ",\n"
+            << "  \"commit_time_ms_max\": " << final_stats.commit_time_ms_max << ",\n"
             << "  \"graph_time_ms_sum\": " << final_stats.graph_time_ms_sum
             << ",\n"
             << "  \"graph_time_ms_max\": " << final_stats.graph_time_ms_max
@@ -452,6 +460,7 @@ LoopClosureStats LoopClosureManager::stats() const
     result.shadow_builds_ready = shadow_builds_ready_.load();
     result.shadow_builds_failed = shadow_builds_failed_.load();
     result.shadow_builds_stale = shadow_builds_stale_.load();
+    result.shadow_builds_superseded = shadow_queue_.dropped();
     result.shadow_build_time_ms_sum = shadow_build_time_ms_sum_.load();
     result.shadow_build_time_ms_max = shadow_build_time_ms_max_.load();
     result.registrations_ready = registrations_ready_.load();
@@ -460,6 +469,8 @@ LoopClosureStats LoopClosureManager::stats() const
     result.registration_time_ms_max = registration_time_ms_max_.load();
     result.corrections_committed = corrections_committed_.load();
     result.corrections_rejected = corrections_rejected_.load();
+    result.commit_time_ms_sum = commit_time_ms_sum_.load();
+    result.commit_time_ms_max = commit_time_ms_max_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
     result.graph_time_ms_max = graph_time_ms_max_.load();
     result.std_processed = std_processed_.load();
@@ -494,7 +505,8 @@ LoopClosureManager::take_pending_correction()
     return result;
 }
 
-void LoopClosureManager::notify_correction_result(bool committed)
+void LoopClosureManager::notify_correction_result(
+    bool committed, double elapsed_ms, const std::string &reason)
 {
     if (committed)
     {
@@ -503,6 +515,25 @@ void LoopClosureManager::notify_correction_result(bool committed)
     else
     {
         ++corrections_rejected_;
+    }
+    double sum = commit_time_ms_sum_.load();
+    while (!commit_time_ms_sum_.compare_exchange_weak(sum, sum + elapsed_ms))
+    {
+    }
+    double maximum = commit_time_ms_max_.load();
+    while (maximum < elapsed_ms &&
+           !commit_time_ms_max_.compare_exchange_weak(maximum, elapsed_ms))
+    {
+    }
+    if (commit_diagnostics_)
+    {
+        std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+        commit_diagnostics_ << (committed ? 1 : 0) << ','
+                            << std::quoted(reason) << ','
+                            << std::setprecision(17) << elapsed_ms << ','
+                            << graph_version_.load() << ','
+                            << active_tree_generation_.load() << '\n';
+        commit_diagnostics_.flush();
     }
     write_summary();
 }

@@ -40,6 +40,10 @@
 #include <csignal>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -133,6 +137,14 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+
+std::atomic<std::uint64_t> lidar_callbacks_received{0};
+std::atomic<std::uint64_t> imu_callbacks_received{0};
+std::atomic<std::uint64_t> lidar_timestamp_regressions{0};
+std::atomic<std::uint64_t> imu_timestamp_regressions{0};
+std::atomic<std::uint64_t> lidar_buffer_messages_cleared{0};
+std::atomic<std::uint64_t> imu_buffer_messages_cleared{0};
+std::atomic<std::uint64_t> stale_lidar_scans_discarded{0};
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -294,6 +306,7 @@ void lasermap_fov_segment()
 
 void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
 {
+    ++lidar_callbacks_received;
     const double cur_time = get_time_sec(msg->header.stamp);
     PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
     // Point-cloud conversion is intentionally outside the shared sensor-buffer
@@ -305,6 +318,8 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     scan_count ++;
     if (!is_first_lidar && cur_time < last_timestamp_lidar)
     {
+        ++lidar_timestamp_regressions;
+        lidar_buffer_messages_cleared.fetch_add(lidar_buffer.size());
         lidar_buffer.clear();
     }
     if (is_first_lidar)
@@ -320,6 +335,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
+    ++imu_callbacks_received;
     publish_count ++;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
@@ -333,6 +349,8 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
     if (timestamp < last_timestamp_imu)
     {
+        ++imu_timestamp_regressions;
+        imu_buffer_messages_cleared.fetch_add(imu_buffer.size());
         imu_buffer.clear();
     }
 
@@ -397,6 +415,7 @@ bool sync_packages(MeasureGroup &meas)
     while (!lidar_pushed && !lidar_buffer.empty() && last_processed_time > 0.0 &&
            time_buffer.front() < last_processed_time - 1e-4)
     {
+        ++stale_lidar_scans_discarded;
         lidar_buffer.pop_front();
         time_buffer.pop_front();
     }
@@ -1420,6 +1439,17 @@ public:
         loop_config.std_detection.required_consistent_detections =
             static_cast<std::size_t>(std::max(1, std_required_confirmations));
         loop_config.diagnostics_directory = diagnostics_directory;
+        benchmark_diagnostics_directory_ = diagnostics_directory;
+        if (!benchmark_diagnostics_directory_.empty())
+        {
+            std::filesystem::create_directories(
+                benchmark_diagnostics_directory_);
+            front_end_timing_.open(
+                benchmark_diagnostics_directory_ / "front_end_timing.csv");
+            front_end_timing_
+                << "scan_timestamp,status,elapsed_ms,effective_features,"
+                   "input_points,map_points\n";
+        }
         if (loop_config.enabled)
         {
             loop_closure_ =
@@ -1524,6 +1554,11 @@ public:
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
 
+    ~LaserMappingNode() override
+    {
+        write_front_end_summary();
+    }
+
 private:
     void timer_callback()
     {
@@ -1542,6 +1577,15 @@ private:
 
         if(has_measurement)
         {
+            const double scan_processing_started = omp_get_wtime();
+            const auto finish_scan_timing = [&](const char *status) {
+                if (!imu_only_measure)
+                {
+                    write_front_end_timing(
+                        Measures.lidar_end_time, status,
+                        1000.0 * (omp_get_wtime() - scan_processing_started));
+                }
+            };
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
@@ -1549,6 +1593,7 @@ private:
                 flg_first_scan = false;
                 if (!imu_only_measure)
                 {
+                    finish_scan_timing("first_scan");
                     return;
                 }
             }
@@ -1580,6 +1625,7 @@ private:
                 }
                 last_processed_time = Measures.lidar_end_time;
                 update_state_outputs();
+                finish_scan_timing("imu_initialization");
                 return;
             }
 
@@ -1596,6 +1642,9 @@ private:
                 const auto timed_measurements = aux_fusion_.take_timed_measurements(
                     process_begin_time, Measures.lidar_end_time);
                 const auto late_measurements = aux_fusion_.take_late_measurement_counts();
+                aux_late_dvl_.fetch_add(late_measurements.dvl);
+                aux_late_pressure_.fetch_add(late_measurements.pressure);
+                aux_late_magnetometer_.fetch_add(late_measurements.magnetometer);
                 if (aux_timeline_started_ && late_measurements.total() > 0)
                 {
                     RCLCPP_WARN_THROTTLE(
@@ -1665,6 +1714,7 @@ private:
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "no_points";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                finish_scan_timing("no_points");
                 return;
             }
 
@@ -1701,6 +1751,7 @@ private:
                 }
                 g_publish_mode = "kdtree_init";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                finish_scan_timing("tree_initialization");
                 return;
             }
             int featsFromMapNum = ikdtree->validnum();
@@ -1712,6 +1763,7 @@ private:
                 RCLCPP_WARN(this->get_logger(), "Too few points, publish IMU-only odometry for this scan.\n");
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "few_points";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                finish_scan_timing("few_points");
                 return;
             }
             
@@ -1753,6 +1805,81 @@ private:
             
             /******* Publish points *******/
             if (scan_pub_en || pcd_save_en)      publish_frame_world(pubLaserCloudFull_);
+            finish_scan_timing("lidar_update");
+        }
+    }
+
+    void write_front_end_timing(double timestamp, const char *status,
+                                double elapsed_ms)
+    {
+        if (!front_end_timing_)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(front_end_diagnostics_mutex_);
+        front_end_timing_ << std::setprecision(17) << timestamp << ',' << status
+                          << ',' << elapsed_ms << ',' << effect_feat_num << ','
+                          << feats_down_size << ','
+                          << (ikdtree ? ikdtree->validnum() : 0) << '\n';
+        front_end_timing_.flush();
+        ++timed_scans_;
+    }
+
+    void write_front_end_summary()
+    {
+        if (benchmark_diagnostics_directory_.empty())
+        {
+            return;
+        }
+        std::size_t pending_lidar = 0;
+        std::size_t pending_imu = 0;
+        {
+            std::lock_guard<std::mutex> buffer_lock(mtx_buffer);
+            pending_lidar = lidar_buffer.size();
+            pending_imu = imu_buffer.size();
+        }
+        std::lock_guard<std::mutex> lock(front_end_diagnostics_mutex_);
+        if (front_end_timing_)
+        {
+            front_end_timing_.flush();
+        }
+        const auto output =
+            benchmark_diagnostics_directory_ / "front_end_summary.json";
+        const auto temporary =
+            benchmark_diagnostics_directory_ / "front_end_summary.json.tmp";
+        std::ofstream summary(temporary);
+        summary << "{\n"
+                << "  \"lidar_callbacks_received\": "
+                << lidar_callbacks_received.load() << ",\n"
+                << "  \"imu_callbacks_received\": "
+                << imu_callbacks_received.load() << ",\n"
+                << "  \"lidar_timestamp_regressions\": "
+                << lidar_timestamp_regressions.load() << ",\n"
+                << "  \"imu_timestamp_regressions\": "
+                << imu_timestamp_regressions.load() << ",\n"
+                << "  \"lidar_buffer_messages_cleared\": "
+                << lidar_buffer_messages_cleared.load() << ",\n"
+                << "  \"imu_buffer_messages_cleared\": "
+                << imu_buffer_messages_cleared.load() << ",\n"
+                << "  \"stale_lidar_scans_discarded\": "
+                << stale_lidar_scans_discarded.load() << ",\n"
+                << "  \"aux_late_dvl\": " << aux_late_dvl_.load() << ",\n"
+                << "  \"aux_late_pressure\": "
+                << aux_late_pressure_.load() << ",\n"
+                << "  \"aux_late_magnetometer\": "
+                << aux_late_magnetometer_.load() << ",\n"
+                << "  \"timed_scans\": " << timed_scans_.load() << ",\n"
+                << "  \"pending_lidar_messages\": " << pending_lidar << ",\n"
+                << "  \"pending_imu_messages\": " << pending_imu << "\n"
+                << "}\n";
+        summary.close();
+        std::error_code error;
+        std::filesystem::rename(temporary, output, error);
+        if (error)
+        {
+            std::filesystem::remove(output, error);
+            error.clear();
+            std::filesystem::rename(temporary, output, error);
         }
     }
 
@@ -1770,6 +1897,7 @@ private:
             res->success = false;
             res->message = "Map save disabled.";
         }
+        write_front_end_summary();
     }
 
 private:
@@ -1784,8 +1912,14 @@ private:
         {
             return;
         }
-        const auto reject = [&]() {
-            loop_closure_->notify_correction_result(false);
+        const auto commit_started = std::chrono::steady_clock::now();
+        const auto elapsed_ms = [&]() {
+            return std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - commit_started)
+                .count();
+        };
+        const auto reject = [&](const char *reason) {
+            loop_closure_->notify_correction_result(false, elapsed_ms(), reason);
         };
         if (!candidate->shadow_map || !candidate->registration ||
             !candidate->scan || !candidate->shadow_map->valid ||
@@ -1795,7 +1929,7 @@ private:
             candidate->registration->scan_generation !=
                 candidate->scan->scan_generation)
         {
-            reject();
+            reject("stale_or_invalid_candidate");
             return;
         }
 
@@ -1805,7 +1939,7 @@ private:
             uwfl2::loop_closure::inverse(registration.T_local_vehicle_raw));
         if (!correction.finite())
         {
-            reject();
+            reject("non_finite_correction");
             return;
         }
 
@@ -1833,7 +1967,7 @@ private:
             corrected_state.b_pressure.isApprox(original_state.b_pressure, 0.0);
         if (!protected_states_unchanged)
         {
-            reject();
+            reject("protected_state_changed");
             return;
         }
 
@@ -1850,7 +1984,7 @@ private:
             !corrected_state.rot.toRotationMatrix().allFinite() ||
             !uwfl2::loop_closure::covariance27_is_valid(corrected_covariance))
         {
-            reject();
+            reject("invalid_state_or_covariance");
             return;
         }
 
@@ -1877,7 +2011,7 @@ private:
         }
         if (registered_scan.empty())
         {
-            reject();
+            reject("empty_registered_scan");
             return;
         }
 
@@ -1906,7 +2040,8 @@ private:
             pos_lid = state_point.pos +
                       state_point.rot * state_point.offset_T_L_I;
             position_last = state_point.pos;
-            loop_closure_->notify_correction_result(true);
+            loop_closure_->notify_correction_result(
+                true, elapsed_ms(), "committed");
         }
         catch (...)
         {
@@ -1921,7 +2056,7 @@ private:
             state_point = kf.get_x();
             pos_lid = state_point.pos +
                       state_point.rot * state_point.offset_T_L_I;
-            reject();
+            reject("transaction_exception_rollback");
         }
     }
 
@@ -2046,6 +2181,13 @@ private:
 
     AuxiliarySensorFusion aux_fusion_;
     std::unique_ptr<uwfl2::loop_closure::LoopClosureManager> loop_closure_;
+    std::filesystem::path benchmark_diagnostics_directory_;
+    std::ofstream front_end_timing_;
+    std::mutex front_end_diagnostics_mutex_;
+    std::atomic<std::uint64_t> aux_late_dvl_{0};
+    std::atomic<std::uint64_t> aux_late_pressure_{0};
+    std::atomic<std::uint64_t> aux_late_magnetometer_{0};
+    std::atomic<std::uint64_t> timed_scans_{0};
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;

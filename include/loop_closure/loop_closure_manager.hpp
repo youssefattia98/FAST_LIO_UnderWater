@@ -47,6 +47,7 @@ struct LoopClosureStats
     std::uint64_t shadow_builds_ready = 0;
     std::uint64_t shadow_builds_failed = 0;
     std::uint64_t shadow_builds_stale = 0;
+    std::uint64_t shadow_builds_superseded = 0;
     double shadow_build_time_ms_sum = 0.0;
     double shadow_build_time_ms_max = 0.0;
     std::uint64_t registrations_ready = 0;
@@ -55,6 +56,8 @@ struct LoopClosureStats
     double registration_time_ms_max = 0.0;
     std::uint64_t corrections_committed = 0;
     std::uint64_t corrections_rejected = 0;
+    double commit_time_ms_sum = 0.0;
+    double commit_time_ms_max = 0.0;
     double graph_time_ms_sum = 0.0;
     double graph_time_ms_max = 0.0;
     std::uint64_t std_processed = 0;
@@ -144,7 +147,8 @@ public:
     std::shared_ptr<const ShadowMapResult> shadow_map_snapshot() const;
     std::shared_ptr<const RegistrationResult> registration_snapshot() const;
     std::shared_ptr<const PendingCorrection> take_pending_correction();
-    void notify_correction_result(bool committed);
+    void notify_correction_result(bool committed, double elapsed_ms,
+                                  const std::string &reason);
 
     template <typename PointRange>
     void notify_latest_scan(double timestamp,
@@ -214,6 +218,7 @@ private:
     std::ofstream shadow_diagnostics_;
     std::ofstream registration_diagnostics_;
     std::ofstream std_diagnostics_;
+    std::ofstream commit_diagnostics_;
     mutable std::mutex diagnostics_mutex_;
     mutable std::mutex shadow_result_mutex_;
     std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
@@ -240,6 +245,8 @@ private:
     std::atomic<double> registration_time_ms_max_{0.0};
     std::atomic<std::uint64_t> corrections_committed_{0};
     std::atomic<std::uint64_t> corrections_rejected_{0};
+    std::atomic<double> commit_time_ms_sum_{0.0};
+    std::atomic<double> commit_time_ms_max_{0.0};
     std::atomic<double> graph_time_ms_sum_{0.0};
     std::atomic<double> graph_time_ms_max_{0.0};
     std::atomic<std::uint64_t> std_processed_{0};
