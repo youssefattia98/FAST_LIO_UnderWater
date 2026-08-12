@@ -77,6 +77,7 @@ set(dependencies
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io)
+find_package(GTSAM 4.2 REQUIRED)
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
@@ -90,13 +91,23 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
+add_library(uwfl2_loop_closure
+  src/loop_closure/loop_closure_manager.cpp
+  src/loop_closure/pose_graph.cpp
+)
+target_include_directories(uwfl2_loop_closure PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam)
+
 add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
-target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen uwfl2_loop_closure)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
@@ -113,8 +124,15 @@ endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_loop_closure_core test/test_loop_closure_core.cpp)
+  target_include_directories(test_loop_closure_core PRIVATE include)
+  target_link_libraries(test_loop_closure_core uwfl2_loop_closure)
+endif()
+
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping
+install(TARGETS fastlio_mapping uwfl2_loop_closure
   DESTINATION lib/${PROJECT_NAME}
 )
 

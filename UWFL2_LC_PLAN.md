@@ -4,7 +4,7 @@
 
 - Branch: `feature/uwfl2-ltaom-loop-closure`
 - Plan status: approved and active
-- Implementation status: Checkpoint 0 complete; Checkpoint 1 pending
+- Implementation status: Checkpoints 0 and 1 complete; Checkpoint 2 in progress
 - Estimator source-code changes through Checkpoint 0: none
 - UWFL2 baseline commit: `27d71770951cc495efc36398fbde937efa0b060a`
 - Pre-existing worktree change: `config/default.yaml` selects sonar plus IMU only. It is not part of loop-closure work and must not be silently committed.
@@ -29,7 +29,7 @@ Port the applicable LTA-OM loop-closure pipeline into UWFL2 while preserving the
 ### Important adaptation findings
 
 1. LTA-OM's source is not a drop-in ROS 2 component. It uses ROS 1 nodes, a machine-specific TBB path, and custom `ISAM2::backup/recover` patches.
-2. The local machine has TBB 2021.11 and OpenCV 4.6, but no discoverable GTSAM or Ceres installation. Checkpoint 0 selected the standard, unpatched Ubuntu GTSAM 4.2 package; it must be installed and verified before graph code is added.
+2. The local machine has TBB 2021.11 and OpenCV 4.6. Checkpoint 1 verified the standard, unpatched Ubuntu GTSAM 4.2 package; development packages were unpacked into an isolated `/tmp` prefix because system installation requires an interactive sudo password.
 3. LTA-OM replaces only FAST-LIO2 pose and velocity. UWFL2 also has gravity, DVL bias, pressure bias, magnetic startup reference, auxiliary reference data, extrinsics, and full cross-covariance. A direct copy would be incomplete.
 4. LTA-OM's active-tree lock can block the front end during scan re-registration. UWFL2-LC will instead build immutable shadow results in the background and let the front-end thread perform the validated commit.
 5. STD was designed for LiDAR geometry. Its thresholds cannot be copied to sparse 3D sonar without first measuring keypoint and overlap statistics.
@@ -288,19 +288,19 @@ ros2 service call /map_save std_srvs/srv/Trigger '{}'
 - Real result (`baseline_real_backforth`): 3,808 odometry and 3,799 registered-cloud messages; no invalid poses, nonmonotonic stamps, or invalid covariances. No trusted ground truth is present, so only continuity is reported: 93.494 m path length and 0.938 m start/end translation. The compact map has 1,850,885 points (59,228,573 bytes).
 - Timing/resources: simulation wall time 1,309.75 s, CPU mean/p95/max 15.19/19.8/29.8%, RSS mean/p95/max 347.1/472.4/481.6 MB, output-lag proxy mean/p95/max 13.3/13.3/16.7 ms. Real wall time 663.94 s, CPU mean/p95/max 17.04/19.8/22.8%, RSS mean/p95/max 261.6/309.8/326.4 MB, output-lag proxy mean/p95/max 20.1/34.0/302.8 ms.
 - Artifact paths: `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/baseline_sim3` and `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/baseline_real_backforth`. Both player, recorder, monitor, and launch wrappers exited zero after map save and controlled shutdown.
-- Blockers: GTSAM is not installed yet. Internal scan-stage timing is not available in the original estimator; Checkpoint 1 will add optional low-overhead timing counters before claiming an internal latency comparison.
-- Commit: pending, message `test: record UWFL2 loop-closure baseline`.
+- Blockers: None for Checkpoint 0. Internal scan-stage timing is not available in the original estimator; later checkpoints must add optional low-overhead timing counters before claiming an internal latency comparison.
+- Commit: `a7b9610` (`test: record UWFL2 loop-closure baseline`).
 
 ## Checkpoint 1: Optional Infrastructure, Keyframes, And Full-SE(3) Graph
 
 ### Work
 
-- [ ] Add `loop_closure.enable`, default `false`, and no-op lifecycle wiring.
-- [ ] Refactor tree access only as required for later pointer swapping, preserving the exact disabled path.
-- [ ] Add immutable keyframe records, bounded queues, counters, and asynchronous worker lifecycle.
-- [ ] Add full-SE(3) graph nodes, first-pose prior, and consecutive odometry factors.
-- [ ] Add unit tests for frame direction, Pose3 conversion, covariance extraction, keyframe selection, queue bounds, and clean shutdown.
-- [ ] Repeat disabled-mode baseline and compare it to Checkpoint 0.
+- [x] Add `loop_closure.enable`, default `false`, and no-op lifecycle wiring.
+- [x] Defer tree-pointer refactoring until the shadow-tree checkpoint so the disabled front-end remains byte-equivalent.
+- [x] Add immutable keyframe records, bounded queues, counters, and asynchronous worker lifecycle.
+- [x] Add full-SE(3) graph nodes, first-pose prior, and consecutive odometry factors.
+- [x] Add unit tests for frame direction, Pose3 conversion, covariance extraction, keyframe selection, queue bounds, and clean shutdown.
+- [x] Repeat disabled-mode baseline and compare it to Checkpoint 0.
 
 ### Tests and commands
 
@@ -334,12 +334,12 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
-- Blockers: TODO
-- Timing: keyframe creation, queue wait, graph insertion, scan p50/p95/max.
-- Commit: TODO, suggested message `feat: add optional SE3 keyframes and pose graph`
+- Decisions: Use stock GTSAM 4.2 and its public iSAM2 API; keep all graph work on a bounded background queue; copy a scan only after keyframe selection; preserve the original `KD_TREE` representation until the shadow-tree checkpoint.
+- Commands run: isolated `colcon build` and `colcon test` with `BUILD_TESTING=ON`; 25 s enabled x5 smoke replay; complete disabled x5 replay of `sim3`; `compare_lc_runs.py` against the immutable x1 Checkpoint-0 baseline.
+- Results: All seven loop-closure unit tests pass. The enabled smoke processed 5/5 keyframes with zero failures/drops and a maximum graph insertion time of 2.54 ms. The complete disabled replay produced 5,945 odometry and 5,944 registered-cloud messages, identical header stamps and serialized poses, and the identical 5,739,064-point map SHA-256. Its ATE RMSE/max/final remained 0.070/0.156/0.081 m.
+- Blockers: No implementation blocker. The build currently uses the official Ubuntu GTSAM packages from an isolated `/tmp` prefix; install `libgtsam-dev` normally on deployment hosts.
+- Timing: Complete x5 disabled replay CPU mean/p95/max 46.7/66.7/82.3% and RSS mean/p95/max 349.3/481.1/482.9 MB. The x1-to-x5 ROS-time lag ratio is not a real-time regression metric; exact output equivalence is the disabled-mode criterion.
+- Commit: pending, message `feat: add optional SE3 keyframes and pose graph`
 
 ## Checkpoint 2: Manually Injected Full-SE(3) Loop
 

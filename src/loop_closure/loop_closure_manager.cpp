@@ -1,0 +1,144 @@
+#include "loop_closure/loop_closure_manager.hpp"
+
+#include <algorithm>
+#include <iomanip>
+#include <stdexcept>
+
+namespace uwfl2::loop_closure
+{
+
+LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
+    : config_(std::move(config)),
+      selector_(config_.keyframes),
+      queue_(config_.queue_capacity),
+      pose_graph_(config_.pose_graph)
+{
+    if (!config_.enabled)
+    {
+        throw std::invalid_argument(
+            "LoopClosureManager must only be constructed when enabled");
+    }
+    if (!config_.diagnostics_directory.empty())
+    {
+        std::filesystem::create_directories(config_.diagnostics_directory);
+        diagnostics_.open(config_.diagnostics_directory / "keyframes.csv");
+        diagnostics_ << "id,timestamp,tx,ty,tz,qw,qx,qy,qz,points,graph_version,graph_time_ms\n";
+    }
+    worker_ = std::thread(&LoopClosureManager::run, this);
+}
+
+LoopClosureManager::~LoopClosureManager()
+{
+    queue_.close();
+    if (worker_.joinable())
+    {
+        worker_.join();
+    }
+    write_summary();
+}
+
+void LoopClosureManager::run()
+{
+    while (const std::optional<Keyframe> keyframe = queue_.wait_pop())
+    {
+        const auto started = std::chrono::steady_clock::now();
+        try
+        {
+            const std::uint64_t version = pose_graph_.append_keyframe(*keyframe);
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - started)
+                                          .count();
+            graph_version_.store(version);
+            double sum = graph_time_ms_sum_.load();
+            while (!graph_time_ms_sum_.compare_exchange_weak(sum, sum + elapsed_ms))
+            {
+            }
+            double maximum = graph_time_ms_max_.load();
+            while (maximum < elapsed_ms &&
+                   !graph_time_ms_max_.compare_exchange_weak(maximum, elapsed_ms))
+            {
+            }
+            ++processed_;
+            write_diagnostic(*keyframe, version, elapsed_ms);
+        }
+        catch (const std::exception &)
+        {
+            ++failed_;
+        }
+    }
+}
+
+void LoopClosureManager::write_diagnostic(
+    const Keyframe &keyframe,
+    std::uint64_t version,
+    double graph_time_ms)
+{
+    if (!diagnostics_)
+    {
+        return;
+    }
+    const Pose3d pose = keyframe.T_local_vehicle.normalized();
+    diagnostics_ << keyframe.id << ',' << std::setprecision(17) << keyframe.timestamp
+                 << ',' << pose.translation.x() << ',' << pose.translation.y() << ','
+                 << pose.translation.z() << ',' << pose.rotation.w() << ','
+                 << pose.rotation.x() << ',' << pose.rotation.y() << ','
+                 << pose.rotation.z() << ',' << keyframe.sonar_points->size() << ','
+                 << version << ',' << graph_time_ms << '\n';
+    diagnostics_.flush();
+    write_summary();
+}
+
+void LoopClosureManager::write_summary() const
+{
+    if (config_.diagnostics_directory.empty())
+    {
+        return;
+    }
+    const LoopClosureStats final_stats = stats();
+    const PoseGraphSnapshot graph = graph_snapshot();
+    const auto output = config_.diagnostics_directory / "loop_closure_summary.json";
+    const auto temporary = config_.diagnostics_directory /
+                           "loop_closure_summary.json.tmp";
+    std::ofstream summary(temporary);
+    summary << "{\n"
+            << "  \"submitted\": " << final_stats.submitted << ",\n"
+            << "  \"processed\": " << final_stats.processed << ",\n"
+            << "  \"failed\": " << final_stats.failed << ",\n"
+            << "  \"dropped\": " << final_stats.dropped << ",\n"
+            << "  \"graph_version\": " << final_stats.graph_version << ",\n"
+            << "  \"graph_nodes\": " << graph.node_count << ",\n"
+            << "  \"graph_factors\": " << graph.factor_count << ",\n"
+            << "  \"graph_time_ms_sum\": " << final_stats.graph_time_ms_sum
+            << ",\n"
+            << "  \"graph_time_ms_max\": " << final_stats.graph_time_ms_max
+            << "\n}\n";
+    summary.close();
+    std::error_code error;
+    std::filesystem::rename(temporary, output, error);
+    if (error)
+    {
+        std::filesystem::remove(output, error);
+        error.clear();
+        std::filesystem::rename(temporary, output, error);
+    }
+}
+
+LoopClosureStats LoopClosureManager::stats() const
+{
+    LoopClosureStats result;
+    result.submitted = submitted_.load();
+    result.processed = processed_.load();
+    result.failed = failed_.load();
+    result.dropped = queue_.dropped();
+    result.graph_version = graph_version_.load();
+    result.graph_time_ms_sum = graph_time_ms_sum_.load();
+    result.graph_time_ms_max = graph_time_ms_max_.load();
+    return result;
+}
+
+PoseGraphSnapshot LoopClosureManager::graph_snapshot() const
+{
+    return pose_graph_.snapshot();
+}
+
+}  // namespace uwfl2::loop_closure

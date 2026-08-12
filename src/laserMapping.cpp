@@ -64,6 +64,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "auxiliary_sensor_fusion.hpp"
+#include "loop_closure/loop_closure_manager.hpp"
 #include "observability_manager.hpp"
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -1105,6 +1106,19 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
+        this->declare_parameter<bool>("loop_closure.enable", false);
+        this->declare_parameter<bool>("loop_closure.automatic_detection_enable", false);
+        this->declare_parameter<double>("loop_closure.keyframe_translation_m", 1.0);
+        this->declare_parameter<double>("loop_closure.keyframe_rotation_deg", 10.0);
+        this->declare_parameter<double>("loop_closure.keyframe_minimum_interval_s", 0.5);
+        this->declare_parameter<double>("loop_closure.keyframe_maximum_interval_s", 5.0);
+        this->declare_parameter<int>("loop_closure.keyframe_minimum_points", 20);
+        this->declare_parameter<int>("loop_closure.queue_capacity", 8);
+        this->declare_parameter<string>("loop_closure.diagnostics_directory", "");
+        this->declare_parameter<double>("loop_closure.prior_rotation_sigma_rad", 1e-4);
+        this->declare_parameter<double>("loop_closure.prior_translation_sigma_m", 1e-4);
+        this->declare_parameter<double>("loop_closure.odometry_rotation_variance_floor", 1e-8);
+        this->declare_parameter<double>("loop_closure.odometry_translation_variance_floor", 1e-6);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1259,6 +1273,50 @@ public:
 
         fill(epsi, epsi + state_ikfom::DOF, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+
+        uwfl2::loop_closure::LoopClosureConfig loop_config;
+        this->get_parameter_or<bool>("loop_closure.enable", loop_config.enabled, false);
+        this->get_parameter_or<bool>("loop_closure.automatic_detection_enable",
+                                     loop_config.automatic_detection_enabled, false);
+        double keyframe_rotation_deg = 10.0;
+        int keyframe_minimum_points = 20;
+        int loop_queue_capacity = 8;
+        string diagnostics_directory;
+        this->get_parameter_or<double>("loop_closure.keyframe_translation_m",
+                                       loop_config.keyframes.translation_m, 1.0);
+        this->get_parameter_or<double>("loop_closure.keyframe_rotation_deg",
+                                       keyframe_rotation_deg, 10.0);
+        this->get_parameter_or<double>("loop_closure.keyframe_minimum_interval_s",
+                                       loop_config.keyframes.minimum_interval_s, 0.5);
+        this->get_parameter_or<double>("loop_closure.keyframe_maximum_interval_s",
+                                       loop_config.keyframes.maximum_interval_s, 5.0);
+        this->get_parameter_or<int>("loop_closure.keyframe_minimum_points",
+                                    keyframe_minimum_points, 20);
+        this->get_parameter_or<int>("loop_closure.queue_capacity", loop_queue_capacity, 8);
+        this->get_parameter_or<string>("loop_closure.diagnostics_directory",
+                                       diagnostics_directory, "");
+        this->get_parameter_or<double>("loop_closure.prior_rotation_sigma_rad",
+                                       loop_config.pose_graph.prior_rotation_sigma_rad, 1e-4);
+        this->get_parameter_or<double>("loop_closure.prior_translation_sigma_m",
+                                       loop_config.pose_graph.prior_translation_sigma_m, 1e-4);
+        this->get_parameter_or<double>("loop_closure.odometry_rotation_variance_floor",
+                                       loop_config.pose_graph.odometry_rotation_variance_floor, 1e-8);
+        this->get_parameter_or<double>("loop_closure.odometry_translation_variance_floor",
+                                       loop_config.pose_graph.odometry_translation_variance_floor, 1e-6);
+        loop_config.keyframes.rotation_rad =
+            std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
+        loop_config.keyframes.minimum_points =
+            static_cast<std::size_t>(std::max(1, keyframe_minimum_points));
+        loop_config.queue_capacity =
+            static_cast<std::size_t>(std::max(1, loop_queue_capacity));
+        loop_config.diagnostics_directory = diagnostics_directory;
+        if (loop_config.enabled)
+        {
+            loop_closure_ =
+                std::make_unique<uwfl2::loop_closure::LoopClosureManager>(loop_config);
+            RCLCPP_INFO(this->get_logger(),
+                        "Loop closure enabled: asynchronous full-SE(3) keyframes and pose graph active.");
+        }
 
         /*** ROS subscribe initialization ***/
         sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -1509,6 +1567,7 @@ private:
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
                     ikdtree.Build(feats_down_world->points);
+                    submit_loop_keyframe(Measures.lidar_end_time);
                 }
                 g_publish_mode = "kdtree_init";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
@@ -1552,6 +1611,7 @@ private:
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
+            submit_loop_keyframe(Measures.lidar_end_time);
             map_incremental();
             t5 = omp_get_wtime();
             
@@ -1577,7 +1637,32 @@ private:
     }
 
 private:
+    void submit_loop_keyframe(double timestamp)
+    {
+        if (!loop_closure_ || !feats_down_body)
+        {
+            return;
+        }
+        const auto &state = kf.get_x();
+        uwfl2::loop_closure::Pose3d T_local_vehicle;
+        T_local_vehicle.rotation =
+            Eigen::Quaterniond(state.rot.toRotationMatrix()).normalized();
+        T_local_vehicle.translation = state.pos;
+
+        uwfl2::loop_closure::Pose3d T_vehicle_sonar;
+        T_vehicle_sonar.rotation =
+            Eigen::Quaterniond(state.offset_R_L_I.toRotationMatrix()).normalized();
+        T_vehicle_sonar.translation = state.offset_T_L_I;
+
+        const auto pose_covariance =
+            uwfl2::loop_closure::extract_graph_pose_covariance(kf.get_P());
+        loop_closure_->try_submit(timestamp, T_local_vehicle, pose_covariance,
+                                  T_vehicle_sonar, feats_down_body->points,
+                                  active_tree_generation_);
+    }
+
     AuxiliarySensorFusion aux_fusion_;
+    std::unique_ptr<uwfl2::loop_closure::LoopClosureManager> loop_closure_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
@@ -1593,6 +1678,7 @@ private:
 
     bool effect_pub_en = false, map_pub_en = false;
     bool aux_timeline_started_ = false;
+    std::uint64_t active_tree_generation_ = 0;
     int effect_feat_num = 0;
     double deltaT, deltaR;
     bool flg_EKF_converged, EKF_stop_flg = 0;

@@ -248,6 +248,23 @@ def read_yaml(path: Path) -> Any:
         return yaml.safe_load(stream)
 
 
+def write_runtime_config(args: argparse.Namespace, output: Path) -> Path:
+    document = read_yaml(args.config)
+    try:
+        parameters = document["/**"]["ros__parameters"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"Unsupported ROS parameter YAML layout: {args.config}") from exc
+    loop_parameters = parameters.setdefault("loop_closure", {})
+    if not isinstance(loop_parameters, dict):
+        raise ValueError("loop_closure must be a parameter mapping")
+    loop_parameters["enable"] = args.loop_closure == "true"
+    loop_parameters["automatic_detection_enable"] = args.detection == "true"
+    loop_parameters["diagnostics_directory"] = str(output)
+    runtime_config = output / "runtime_config.yaml"
+    runtime_config.write_text(yaml.safe_dump(document, sort_keys=False))
+    return runtime_config
+
+
 def pcd_point_count(path: Path) -> int | None:
     if not path.exists():
         return None
@@ -325,6 +342,7 @@ def main() -> int:
     logs.mkdir()
     ros_logs.mkdir()
     shutil.copy2(args.config, args.output / "input_config.yaml")
+    runtime_config = write_runtime_config(args, args.output)
 
     env = os.environ.copy()
     env["ROS_DOMAIN_ID"] = str(args.domain_id)
@@ -343,6 +361,8 @@ def main() -> int:
         "bag_metadata_sha256": sha256(args.bag / "metadata.yaml"),
         "config": str(args.config),
         "config_sha256": sha256(args.config),
+        "runtime_config": str(runtime_config),
+        "runtime_config_sha256": sha256(runtime_config),
         "domain_id": args.domain_id,
         "rate": args.rate,
         "duration_limit_s": args.duration,
@@ -418,7 +438,7 @@ def main() -> int:
                 "launch",
                 "fast_lio",
                 "mapping.launch.py",
-                f"config_file:={args.config}",
+                f"config_file:={runtime_config}",
                 "rviz:=false",
                 "use_sim_time:=true",
             ],
