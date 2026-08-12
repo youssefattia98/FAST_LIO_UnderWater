@@ -10,6 +10,7 @@
 #include "loop_closure/loop_closure_manager.hpp"
 #include "loop_closure/loop_closure_types.hpp"
 #include "loop_closure/pose_graph.hpp"
+#include "loop_closure/shadow_map.hpp"
 
 namespace lc = uwfl2::loop_closure;
 
@@ -267,4 +268,128 @@ TEST(LoopClosureManager, DrainsWorkerAndShutsDownCleanly)
     }
     EXPECT_EQ(manager.stats().processed, 1U);
     EXPECT_EQ(manager.graph_snapshot().node_count, 1U);
+}
+
+namespace
+{
+
+lc::PoseGraphSnapshot shadow_graph(const lc::Pose3d &optimized_pose)
+{
+    lc::PoseGraphSnapshot graph;
+    graph.version = 7;
+    graph.ids = {0};
+    graph.timestamps = {1.0};
+    graph.raw_poses = {lc::Pose3d{}};
+    graph.optimized_poses = {optimized_pose};
+    lc::Keyframe frame = keyframe(0, lc::Pose3d{});
+    frame.T_vehicle_sonar = pose({0.2, -0.1, 0.3},
+                                 Eigen::Vector3d::UnitY(), 0.25);
+    frame.tree_generation = 4;
+    auto points = std::make_shared<std::vector<lc::PointXYZI>>();
+    points->push_back({0.0F, 0.0F, 0.0F, 1.0F});
+    points->push_back({1.0F, 0.0F, 0.0F, 2.0F});
+    points->push_back({0.0F, 1.0F, 0.5F, 3.0F});
+    frame.sonar_points = points;
+    graph.keyframes = {frame};
+    graph.node_count = 1;
+    return graph;
+}
+
+}  // namespace
+
+TEST(ShadowMap, ReconstructsKnownFullSe3Transform)
+{
+    const lc::Pose3d corrected = pose({2.0, -1.0, 3.0},
+                                      Eigen::Vector3d(1.0, 2.0, -0.5), 0.6);
+    lc::ShadowMapRequest request{shadow_graph(corrected), 4};
+    lc::ShadowMapConfig config;
+    config.radius_m = 10.0;
+    config.voxel_size_m = 0.01;
+    const auto points = lc::ShadowMapBuilder::reconstruct_and_downsample(
+        request, config);
+    ASSERT_EQ(points.size(), 3U);
+    const lc::Pose3d T_local_sonar = lc::compose(
+        corrected, request.graph.keyframes[0].T_vehicle_sonar);
+    std::vector<Eigen::Vector3d> expected;
+    for (const auto &point : *request.graph.keyframes[0].sonar_points)
+    {
+        expected.push_back(T_local_sonar.rotation *
+                               Eigen::Vector3d(point.x, point.y, point.z) +
+                           T_local_sonar.translation);
+    }
+    for (const auto &point : points)
+    {
+        const Eigen::Vector3d actual(point.x, point.y, point.z);
+        const auto nearest = std::min_element(
+            expected.begin(), expected.end(), [&](const auto &lhs, const auto &rhs) {
+                return (lhs - actual).squaredNorm() < (rhs - actual).squaredNorm();
+            });
+        ASSERT_NE(nearest, expected.end());
+        EXPECT_LT((*nearest - actual).norm(), 1e-5);
+    }
+}
+
+TEST(ShadowMap, VoxelSelectionIsDeterministicAndMatchesCenterRule)
+{
+    auto graph = shadow_graph(lc::Pose3d{});
+    graph.keyframes[0].T_vehicle_sonar = lc::Pose3d{};
+    auto points = std::make_shared<std::vector<lc::PointXYZI>>();
+    points->push_back({0.11F, 0.11F, 0.11F, 1.0F});
+    points->push_back({0.49F, 0.49F, 0.49F, 2.0F});
+    points->push_back({1.1F, 0.0F, 0.0F, 3.0F});
+    graph.keyframes[0].sonar_points = points;
+    lc::ShadowMapRequest request{graph, 4};
+    lc::ShadowMapConfig config;
+    config.radius_m = 10.0;
+    config.voxel_size_m = 1.0;
+    const auto first = lc::ShadowMapBuilder::reconstruct_and_downsample(request, config);
+    std::reverse(points->begin(), points->end());
+    const auto second = lc::ShadowMapBuilder::reconstruct_and_downsample(request, config);
+    ASSERT_EQ(first.size(), 2U);
+    ASSERT_EQ(second.size(), first.size());
+    for (std::size_t index = 0; index < first.size(); ++index)
+    {
+        EXPECT_FLOAT_EQ(first[index].x, second[index].x);
+        EXPECT_FLOAT_EQ(first[index].y, second[index].y);
+        EXPECT_FLOAT_EQ(first[index].z, second[index].z);
+    }
+    EXPECT_FLOAT_EQ(first[0].x, 0.49F);
+}
+
+TEST(ShadowMap, BuildsQueryableIkdTreeAndRejectsStaleGeneration)
+{
+    lc::ShadowMapRequest request{shadow_graph(lc::Pose3d{}), 4};
+    lc::ShadowMapConfig config;
+    config.radius_m = 10.0;
+    config.voxel_size_m = 0.01;
+    const auto result = lc::ShadowMapBuilder(config).build(request);
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.filtered_points, 3U);
+    lc::ShadowPoint query;
+    const lc::Pose3d T_local_sonar = request.graph.keyframes[0].T_vehicle_sonar;
+    query.x = static_cast<float>(T_local_sonar.translation.x());
+    query.y = static_cast<float>(T_local_sonar.translation.y());
+    query.z = static_cast<float>(T_local_sonar.translation.z());
+    lc::ShadowPointVector nearest;
+    std::vector<float> squared_distances;
+    result.tree->Nearest_Search(query, 1, nearest, squared_distances);
+    ASSERT_EQ(nearest.size(), 1U);
+    EXPECT_LT(squared_distances[0], 1e-10F);
+    EXPECT_TRUE(lc::shadow_result_matches_graph_version(
+        result, request.graph.version));
+    EXPECT_FALSE(lc::shadow_result_matches_graph_version(
+        result, request.graph.version + 1));
+}
+
+TEST(ShadowMap, EnforcesInputPointBudget)
+{
+    lc::ShadowMapRequest request{shadow_graph(lc::Pose3d{}), 4};
+    lc::ShadowMapConfig config;
+    config.radius_m = 10.0;
+    config.voxel_size_m = 0.1;
+    config.maximum_input_points = 2;
+    const auto result = lc::ShadowMapBuilder(config).build(request);
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.reason, "Shadow-map input point budget exceeded");
+    EXPECT_FALSE(result.tree);
 }

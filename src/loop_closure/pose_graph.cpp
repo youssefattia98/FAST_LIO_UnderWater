@@ -332,10 +332,12 @@ PoseGraphSnapshot FullSe3PoseGraph::snapshot() const
     result.timestamps.reserve(keyframes_.size());
     result.raw_poses.reserve(keyframes_.size());
     result.optimized_poses.reserve(keyframes_.size());
+    result.keyframes.reserve(keyframes_.size());
     for (const Keyframe &keyframe : keyframes_)
     {
         result.ids.push_back(keyframe.id);
         result.timestamps.push_back(keyframe.timestamp);
+        result.keyframes.push_back(keyframe);
         result.raw_poses.push_back(keyframe.T_local_vehicle);
         result.optimized_poses.push_back(
             from_gtsam(estimate_.at<gtsam::Pose3>(pose_key(keyframe.id))));

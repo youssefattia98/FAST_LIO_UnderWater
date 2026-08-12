@@ -4,7 +4,7 @@
 
 - Branch: `feature/uwfl2-ltaom-loop-closure`
 - Plan status: approved and active
-- Implementation status: Checkpoints 0 and 1 complete; Checkpoint 2 in progress
+- Implementation status: Checkpoints 0--3 complete; Checkpoint 4 in progress
 - Estimator source-code changes through Checkpoint 0: none
 - UWFL2 baseline commit: `27d71770951cc495efc36398fbde937efa0b060a`
 - Pre-existing worktree change: `config/default.yaml` selects sonar plus IMU only. It is not part of loop-closure work and must not be silently committed.
@@ -384,18 +384,18 @@ python3 "$UWFL2_SRC/tools/check_pose_graph.py" \
 - Results: The ROS smoke processed 13/13 keyframes with zero drops/failures. One full-SE(3) loop was accepted; graph error fell from 0.4895 to 0.00183, translation residual from 0.0493 m to 0.000119 m, and rotation residual from 0.0838 deg to 0.0161 deg. Reversed, stale, and non-finite unit constraints are rejected without changing graph version, factors, or optimized poses. Live IKF state and active map remain unchanged in this checkpoint.
 - Blockers: None. A diagnostics mutex self-deadlock found by the first service smoke was fixed and the replay was repeated successfully.
 - Timing: Accepted 13-node loop transaction 0.94 ms; incremental graph insertion maximum 0.93 ms.
-- Commit: pending, message `feat: validate manually injected SE3 loops`
+- Commit: `be06aa7` (`feat: validate manually injected SE3 loops`)
 
 ## Checkpoint 3: Corrected Historical Map And Shadow ikd-Tree
 
 ### Work
 
-- [ ] Reconstruct historical points from immutable local-frame keyframe clouds and optimized poses.
-- [ ] Build a 3D keyframe-position index and load only keyframes inside the configured corrected-map radius.
-- [ ] Match original `filter_size_map` downsampling semantics.
-- [ ] Build a shadow `KD_TREE<PointType>` asynchronously with graph/tree generation tags.
-- [ ] Do not expose or swap the shadow tree yet.
-- [ ] Test identity reconstruction, known full-SE(3) corrections, voxel determinism, stale generation rejection, and bounded memory.
+- [x] Reconstruct historical points from immutable local-frame keyframe clouds and optimized poses.
+- [x] Build a 3D keyframe-position index and load only keyframes inside the configured corrected-map radius.
+- [x] Match original `filter_size_map` downsampling semantics.
+- [x] Build a shadow `KD_TREE<PointType>` asynchronously with graph/tree generation tags.
+- [x] Do not expose or swap the shadow tree yet.
+- [x] Test identity reconstruction, known full-SE(3) corrections, voxel determinism, stale generation rejection, and bounded memory.
 
 ### Commands
 
@@ -421,12 +421,12 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
-- Blockers: TODO
-- Timing: point correction, downsampling, tree build; peak shadow memory.
-- Commit: TODO, suggested message `feat: rebuild corrected map in a shadow ikd-tree`
+- Decisions: Select keyframes with a true 3D position index around the latest optimized pose; reconstruct with `T_local_vehicle T_vehicle_sonar`; reproduce ikd-tree insertion downsampling by retaining the point nearest each voxel center; reject rather than truncate when the configured input-point budget is exceeded. Tree advancement does not invalidate a shadow build because the corrected tree is independent of the old active tree; graph-version advancement does.
+- Commands run: isolated build and 15-test GTest suite; 60 s x5 ROS replay with the Checkpoint-2 manual loop; pose-graph checker; exact output comparison against Checkpoint 2.
+- Results: The ROS replay rebuilt one ready shadow tree from 13 keyframes and 10,964 input points into 3,346 deterministic map points, with zero failed/stale builds. Active-tree odometry, timestamps, and saved-map hash remained exactly identical to Checkpoint 2. Unit tests cover identity/arbitrary full-SE(3) transforms, radius/index behavior, voxel determinism, ikd-tree queries, graph-generation rejection, and point-budget enforcement.
+- Blockers: None.
+- Timing: Reconstruction 0.77 ms, downsampling 0.87 ms, ikd-tree build 29.94 ms, total 31.57 ms; estimated ikd-tree node memory 0.59 MB for this smoke window.
+- Commit: pending, message `feat: rebuild corrected map in a shadow ikd-tree`
 
 ## Checkpoint 4: Latest-Scan Re-Registration
 

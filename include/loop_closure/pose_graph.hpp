@@ -40,6 +40,7 @@ struct PoseGraphSnapshot
     std::vector<double> timestamps;
     std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> raw_poses;
     std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> optimized_poses;
+    std::vector<Keyframe, Eigen::aligned_allocator<Keyframe>> keyframes;
 };
 
 class FullSe3PoseGraph

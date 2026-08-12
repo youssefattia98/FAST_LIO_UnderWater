@@ -76,7 +76,7 @@ set(dependencies
 
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common io)
+find_package(PCL REQUIRED COMPONENTS common io kdtree)
 find_package(GTSAM 4.2 REQUIRED)
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
@@ -93,17 +93,26 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
+add_library(uwfl2_ikdtree include/ikd-Tree/ikd_Tree.cpp)
+target_include_directories(uwfl2_ikdtree PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${PCL_INCLUDE_DIRS}
+)
+target_link_libraries(uwfl2_ikdtree PUBLIC ${PCL_LIBRARIES})
+
 add_library(uwfl2_loop_closure
   src/loop_closure/loop_closure_manager.cpp
   src/loop_closure/pose_graph.cpp
+  src/loop_closure/shadow_map.cpp
 )
 target_include_directories(uwfl2_loop_closure PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam)
+target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam uwfl2_ikdtree ${PCL_LIBRARIES})
 
-add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
+add_executable(fastlio_mapping src/laserMapping.cpp src/preprocess.cpp)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -134,7 +143,7 @@ if(BUILD_TESTING)
 endif()
 
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping uwfl2_loop_closure
+install(TARGETS fastlio_mapping uwfl2_loop_closure uwfl2_ikdtree
   DESTINATION lib/${PROJECT_NAME}
 )
 

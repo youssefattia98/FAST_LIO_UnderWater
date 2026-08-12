@@ -14,6 +14,7 @@
 #include "loop_closure/bounded_queue.hpp"
 #include "loop_closure/loop_closure_types.hpp"
 #include "loop_closure/pose_graph.hpp"
+#include "loop_closure/shadow_map.hpp"
 
 namespace uwfl2::loop_closure
 {
@@ -24,6 +25,7 @@ struct LoopClosureConfig
     bool automatic_detection_enabled = false;
     KeyframeSelectionConfig keyframes;
     PoseGraphConfig pose_graph;
+    ShadowMapConfig shadow_map;
     std::size_t queue_capacity = 8;
     std::filesystem::path diagnostics_directory;
 };
@@ -37,6 +39,12 @@ struct LoopClosureStats
     std::uint64_t graph_version = 0;
     std::uint64_t loops_accepted = 0;
     std::uint64_t loops_rejected = 0;
+    std::uint64_t shadow_builds_started = 0;
+    std::uint64_t shadow_builds_ready = 0;
+    std::uint64_t shadow_builds_failed = 0;
+    std::uint64_t shadow_builds_stale = 0;
+    double shadow_build_time_ms_sum = 0.0;
+    double shadow_build_time_ms_max = 0.0;
     double graph_time_ms_sum = 0.0;
     double graph_time_ms_max = 0.0;
 };
@@ -108,6 +116,8 @@ public:
     LoopClosureStats stats() const;
     PoseGraphSnapshot graph_snapshot() const;
     LoopEvaluation inject_loop(const LoopConstraint &constraint);
+    void notify_active_tree_generation(std::uint64_t generation);
+    std::shared_ptr<const ShadowMapResult> shadow_map_snapshot() const;
 
 private:
     void run();
@@ -116,22 +126,38 @@ private:
     void write_summary() const;
     void write_loop_diagnostic(const LoopConstraint &constraint,
                                const LoopEvaluation &evaluation);
+    void run_shadow_builder();
+    void write_shadow_diagnostic(const ShadowMapResult &result,
+                                 const std::string &status);
 
     LoopClosureConfig config_;
     KeyframeSelector selector_;
     BoundedQueue<Keyframe> queue_;
+    BoundedQueue<ShadowMapRequest> shadow_queue_{1};
     FullSe3PoseGraph pose_graph_;
+    ShadowMapBuilder shadow_map_builder_;
     std::thread worker_;
+    std::thread shadow_worker_;
     std::ofstream diagnostics_;
     std::ofstream loop_diagnostics_;
+    std::ofstream shadow_diagnostics_;
     mutable std::mutex diagnostics_mutex_;
+    mutable std::mutex shadow_result_mutex_;
+    std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
     std::uint64_t next_keyframe_id_ = 0;
     std::atomic<std::uint64_t> submitted_{0};
     std::atomic<std::uint64_t> processed_{0};
     std::atomic<std::uint64_t> failed_{0};
     std::atomic<std::uint64_t> graph_version_{0};
+    std::atomic<std::uint64_t> active_tree_generation_{0};
     std::atomic<std::uint64_t> loops_accepted_{0};
     std::atomic<std::uint64_t> loops_rejected_{0};
+    std::atomic<std::uint64_t> shadow_builds_started_{0};
+    std::atomic<std::uint64_t> shadow_builds_ready_{0};
+    std::atomic<std::uint64_t> shadow_builds_failed_{0};
+    std::atomic<std::uint64_t> shadow_builds_stale_{0};
+    std::atomic<double> shadow_build_time_ms_sum_{0.0};
+    std::atomic<double> shadow_build_time_ms_max_{0.0};
     std::atomic<double> graph_time_ms_sum_{0.0};
     std::atomic<double> graph_time_ms_max_{0.0};
 };

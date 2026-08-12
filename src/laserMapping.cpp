@@ -1125,6 +1125,9 @@ public:
         this->declare_parameter<double>("loop_closure.loop_maximum_initial_rotation_error_deg", 45.0);
         this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_translation_m", 20.0);
         this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_rotation_deg", 45.0);
+        this->declare_parameter<double>("loop_closure.corrected_map_radius_m", 80.0);
+        this->declare_parameter<int>("loop_closure.corrected_map_maximum_keyframes", 1000);
+        this->declare_parameter<int>("loop_closure.corrected_map_maximum_input_points", 3000000);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1290,6 +1293,8 @@ public:
         int loop_minimum_keyframe_separation = 5;
         double loop_maximum_initial_rotation_error_deg = 45.0;
         double loop_maximum_pose_correction_rotation_deg = 45.0;
+        int corrected_map_maximum_keyframes = 1000;
+        int corrected_map_maximum_input_points = 3000000;
         string diagnostics_directory;
         this->get_parameter_or<double>("loop_closure.keyframe_translation_m",
                                        loop_config.keyframes.translation_m, 1.0);
@@ -1322,6 +1327,12 @@ public:
                                        loop_config.pose_graph.loop_maximum_pose_correction_translation_m, 20.0);
         this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_rotation_deg",
                                        loop_maximum_pose_correction_rotation_deg, 45.0);
+        this->get_parameter_or<double>("loop_closure.corrected_map_radius_m",
+                                       loop_config.shadow_map.radius_m, 80.0);
+        this->get_parameter_or<int>("loop_closure.corrected_map_maximum_keyframes",
+                                    corrected_map_maximum_keyframes, 1000);
+        this->get_parameter_or<int>("loop_closure.corrected_map_maximum_input_points",
+                                    corrected_map_maximum_input_points, 3000000);
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =
@@ -1334,6 +1345,11 @@ public:
             std::max(0.0, loop_maximum_initial_rotation_error_deg) * PI_M / 180.0;
         loop_config.pose_graph.loop_maximum_pose_correction_rotation_rad =
             std::max(0.0, loop_maximum_pose_correction_rotation_deg) * PI_M / 180.0;
+        loop_config.shadow_map.voxel_size_m = filter_size_map_min;
+        loop_config.shadow_map.maximum_keyframes = static_cast<std::size_t>(
+            std::max(1, corrected_map_maximum_keyframes));
+        loop_config.shadow_map.maximum_input_points = static_cast<std::size_t>(
+            std::max(1, corrected_map_maximum_input_points));
         loop_config.diagnostics_directory = diagnostics_directory;
         if (loop_config.enabled)
         {
@@ -1605,6 +1621,12 @@ private:
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
                     ikdtree.Build(feats_down_world->points);
+                    if (loop_closure_)
+                    {
+                        ++active_tree_generation_;
+                        loop_closure_->notify_active_tree_generation(
+                            active_tree_generation_);
+                    }
                     submit_loop_keyframe(Measures.lidar_end_time);
                 }
                 g_publish_mode = "kdtree_init";
@@ -1649,8 +1671,14 @@ private:
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            submit_loop_keyframe(Measures.lidar_end_time);
             map_incremental();
+            if (loop_closure_)
+            {
+                ++active_tree_generation_;
+                loop_closure_->notify_active_tree_generation(
+                    active_tree_generation_);
+            }
+            submit_loop_keyframe(Measures.lidar_end_time);
             t5 = omp_get_wtime();
             
             /******* Publish points *******/

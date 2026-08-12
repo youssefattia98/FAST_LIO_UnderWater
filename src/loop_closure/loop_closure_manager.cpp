@@ -11,7 +11,8 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
     : config_(std::move(config)),
       selector_(config_.keyframes),
       queue_(config_.queue_capacity),
-      pose_graph_(config_.pose_graph)
+      pose_graph_(config_.pose_graph),
+      shadow_map_builder_(config_.shadow_map)
 {
     if (!config_.enabled)
     {
@@ -28,8 +29,15 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
             << "from_id,to_id,accepted,reason,graph_version,graph_error_before,"
                "graph_error_after,translation_error_before,translation_error_after,"
                "rotation_error_before_rad,rotation_error_after_rad,optimization_time_ms\n";
+        shadow_diagnostics_.open(
+            config_.diagnostics_directory / "shadow_rebuilds.csv");
+        shadow_diagnostics_
+            << "graph_version,source_tree_generation,status,reason,selected_keyframes,"
+               "input_points,filtered_points,reconstruction_time_ms,downsample_time_ms,"
+               "tree_build_time_ms,estimated_tree_bytes\n";
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
+    shadow_worker_ = std::thread(&LoopClosureManager::run_shadow_builder, this);
 }
 
 LoopEvaluation LoopClosureManager::inject_loop(const LoopConstraint &constraint)
@@ -39,6 +47,11 @@ LoopEvaluation LoopClosureManager::inject_loop(const LoopConstraint &constraint)
     if (result.accepted)
     {
         ++loops_accepted_;
+        const PoseGraphSnapshot graph = pose_graph_.snapshot();
+        ShadowMapRequest request;
+        request.graph = graph;
+        request.source_tree_generation = active_tree_generation_.load();
+        shadow_queue_.push_latest(std::move(request));
     }
     else
     {
@@ -49,14 +62,68 @@ LoopEvaluation LoopClosureManager::inject_loop(const LoopConstraint &constraint)
     return result;
 }
 
+void LoopClosureManager::notify_active_tree_generation(std::uint64_t generation)
+{
+    active_tree_generation_.store(generation);
+}
+
 LoopClosureManager::~LoopClosureManager()
 {
     queue_.close();
+    shadow_queue_.close();
     if (worker_.joinable())
     {
         worker_.join();
     }
+    if (shadow_worker_.joinable())
+    {
+        shadow_worker_.join();
+    }
     write_summary();
+}
+
+void LoopClosureManager::run_shadow_builder()
+{
+    while (const std::optional<ShadowMapRequest> request = shadow_queue_.wait_pop())
+    {
+        ++shadow_builds_started_;
+        ShadowMapResult result = shadow_map_builder_.build(*request);
+        const double elapsed_ms = result.reconstruction_time_ms +
+                                  result.downsample_time_ms +
+                                  result.tree_build_time_ms;
+        double sum = shadow_build_time_ms_sum_.load();
+        while (!shadow_build_time_ms_sum_.compare_exchange_weak(sum, sum + elapsed_ms))
+        {
+        }
+        double maximum = shadow_build_time_ms_max_.load();
+        while (maximum < elapsed_ms &&
+               !shadow_build_time_ms_max_.compare_exchange_weak(maximum, elapsed_ms))
+        {
+        }
+        if (!result.valid)
+        {
+            ++shadow_builds_failed_;
+            write_shadow_diagnostic(result, "failed");
+            write_summary();
+            continue;
+        }
+        const std::uint64_t current_graph_version = pose_graph_.snapshot().version;
+        if (!shadow_result_matches_graph_version(result, current_graph_version))
+        {
+            ++shadow_builds_stale_;
+            write_shadow_diagnostic(result, "stale");
+            write_summary();
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(shadow_result_mutex_);
+            latest_shadow_map_ =
+                std::make_shared<const ShadowMapResult>(std::move(result));
+        }
+        ++shadow_builds_ready_;
+        write_shadow_diagnostic(*shadow_map_snapshot(), "ready");
+        write_summary();
+    }
 }
 
 void LoopClosureManager::run()
@@ -138,6 +205,12 @@ void LoopClosureManager::write_summary() const
             << "  \"graph_loop_factors\": " << graph.loop_factor_count << ",\n"
             << "  \"loops_accepted\": " << final_stats.loops_accepted << ",\n"
             << "  \"loops_rejected\": " << final_stats.loops_rejected << ",\n"
+            << "  \"shadow_builds_started\": " << final_stats.shadow_builds_started << ",\n"
+            << "  \"shadow_builds_ready\": " << final_stats.shadow_builds_ready << ",\n"
+            << "  \"shadow_builds_failed\": " << final_stats.shadow_builds_failed << ",\n"
+            << "  \"shadow_builds_stale\": " << final_stats.shadow_builds_stale << ",\n"
+            << "  \"shadow_build_time_ms_sum\": " << final_stats.shadow_build_time_ms_sum << ",\n"
+            << "  \"shadow_build_time_ms_max\": " << final_stats.shadow_build_time_ms_max << ",\n"
             << "  \"graph_time_ms_sum\": " << final_stats.graph_time_ms_sum
             << ",\n"
             << "  \"graph_time_ms_max\": " << final_stats.graph_time_ms_max
@@ -151,6 +224,27 @@ void LoopClosureManager::write_summary() const
         error.clear();
         std::filesystem::rename(temporary, output, error);
     }
+}
+
+void LoopClosureManager::write_shadow_diagnostic(
+    const ShadowMapResult &result,
+    const std::string &status)
+{
+    if (!shadow_diagnostics_)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    shadow_diagnostics_ << result.graph_version << ','
+                        << result.source_tree_generation << ',' << status << ','
+                        << std::quoted(result.reason) << ','
+                        << result.selected_keyframes << ',' << result.input_points << ','
+                        << result.filtered_points << ',' << std::setprecision(17)
+                        << result.reconstruction_time_ms << ','
+                        << result.downsample_time_ms << ','
+                        << result.tree_build_time_ms << ','
+                        << result.estimated_tree_bytes << '\n';
+    shadow_diagnostics_.flush();
 }
 
 void LoopClosureManager::write_loop_diagnostic(
@@ -186,9 +280,21 @@ LoopClosureStats LoopClosureManager::stats() const
     result.graph_version = graph_version_.load();
     result.loops_accepted = loops_accepted_.load();
     result.loops_rejected = loops_rejected_.load();
+    result.shadow_builds_started = shadow_builds_started_.load();
+    result.shadow_builds_ready = shadow_builds_ready_.load();
+    result.shadow_builds_failed = shadow_builds_failed_.load();
+    result.shadow_builds_stale = shadow_builds_stale_.load();
+    result.shadow_build_time_ms_sum = shadow_build_time_ms_sum_.load();
+    result.shadow_build_time_ms_max = shadow_build_time_ms_max_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
     result.graph_time_ms_max = graph_time_ms_max_.load();
     return result;
+}
+
+std::shared_ptr<const ShadowMapResult> LoopClosureManager::shadow_map_snapshot() const
+{
+    std::lock_guard<std::mutex> lock(shadow_result_mutex_);
+    return latest_shadow_map_;
 }
 
 PoseGraphSnapshot LoopClosureManager::graph_snapshot() const
