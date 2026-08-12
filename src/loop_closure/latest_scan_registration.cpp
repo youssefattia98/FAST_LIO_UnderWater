@@ -198,6 +198,14 @@ RegistrationResult LatestScanRegistrar::register_scan(
     result.source_active_tree_generation = scan.active_tree_generation;
     result.scan_timestamp = scan.timestamp;
     result.T_local_vehicle_raw = scan.T_local_vehicle_raw;
+    result.graph_anchor_covariance_position_rotation.block<3, 3>(0, 0) =
+        graph.latest_optimized_covariance_graph.block<3, 3>(3, 3);
+    result.graph_anchor_covariance_position_rotation.block<3, 3>(0, 3) =
+        graph.latest_optimized_covariance_graph.block<3, 3>(3, 0);
+    result.graph_anchor_covariance_position_rotation.block<3, 3>(3, 0) =
+        graph.latest_optimized_covariance_graph.block<3, 3>(0, 3);
+    result.graph_anchor_covariance_position_rotation.block<3, 3>(3, 3) =
+        graph.latest_optimized_covariance_graph.block<3, 3>(0, 0);
     const auto reject = [&](const std::string &reason) {
         result.reason = reason;
         result.registration_time_ms =

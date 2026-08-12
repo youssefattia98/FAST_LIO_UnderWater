@@ -66,6 +66,7 @@
 #include <geometry_msgs/msg/vector3.hpp>
 #include "auxiliary_sensor_fusion.hpp"
 #include "loop_closure/loop_closure_manager.hpp"
+#include "loop_closure/state_transport.hpp"
 #include "observability_manager.hpp"
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -145,7 +146,8 @@ PointCloudXYZI::Ptr _featsArray;
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-KD_TREE<PointType> ikdtree;
+std::shared_ptr<KD_TREE<PointType>> ikdtree =
+    std::make_shared<KD_TREE<PointType>>();
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -236,7 +238,7 @@ void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
 void points_cache_collect()
 {
     PointVector points_history;
-    ikdtree.acquire_removed_points(points_history);
+    ikdtree->acquire_removed_points(points_history);
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
 }
 
@@ -286,7 +288,7 @@ void lasermap_fov_segment()
 
     points_cache_collect();
     double delete_begin = omp_get_wtime();
-    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree->Delete_Point_Boxes(cub_needrm);
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
@@ -561,8 +563,8 @@ void map_incremental()
     }
 
     double st_time = omp_get_wtime();
-    add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    add_point_size = ikdtree->Add_Points(PointToAdd, true);
+    ikdtree->Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -964,7 +966,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
-            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            ikdtree->Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -1485,6 +1487,7 @@ public:
 private:
     void timer_callback()
     {
+        try_commit_loop_correction();
         bool imu_only_measure = false;
         bool has_measurement = false;
         {
@@ -1636,18 +1639,18 @@ private:
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
-            if(ikdtree.Root_Node == nullptr)
+            if(ikdtree->Root_Node == nullptr)
             {
                 RCLCPP_INFO(this->get_logger(), "Initialize the map kdtree");
                 if(feats_down_size > 5)
                 {
-                    ikdtree.set_downsample_param(filter_size_map_min);
+                    ikdtree->set_downsample_param(filter_size_map_min);
                     feats_down_world->resize(feats_down_size);
                     for(int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
-                    ikdtree.Build(feats_down_world->points);
+                    ikdtree->Build(feats_down_world->points);
                     if (loop_closure_)
                     {
                         ++active_tree_generation_;
@@ -1660,8 +1663,8 @@ private:
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 return;
             }
-            int featsFromMapNum = ikdtree.validnum();
-            kdtree_size_st = ikdtree.size();
+            int featsFromMapNum = ikdtree->validnum();
+            kdtree_size_st = ikdtree->size();
             
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
@@ -1730,6 +1733,158 @@ private:
     }
 
 private:
+    void try_commit_loop_correction()
+    {
+        if (!loop_closure_)
+        {
+            return;
+        }
+        const auto candidate = loop_closure_->take_pending_correction();
+        if (!candidate)
+        {
+            return;
+        }
+        const auto reject = [&]() {
+            loop_closure_->notify_correction_result(false);
+        };
+        if (!candidate->shadow_map || !candidate->registration ||
+            !candidate->scan || !candidate->shadow_map->valid ||
+            !candidate->registration->valid || !candidate->shadow_map->tree ||
+            candidate->registration->graph_version !=
+                loop_closure_->graph_snapshot().version ||
+            candidate->registration->scan_generation !=
+                candidate->scan->scan_generation)
+        {
+            reject();
+            return;
+        }
+
+        const auto &registration = *candidate->registration;
+        const auto correction = uwfl2::loop_closure::compose(
+            registration.T_local_vehicle_registered,
+            uwfl2::loop_closure::inverse(registration.T_local_vehicle_raw));
+        if (!correction.finite())
+        {
+            reject();
+            return;
+        }
+
+        state_ikfom corrected_state = kf.get_x();
+        const Eigen::Matrix3d correction_rotation =
+            correction.rotation.toRotationMatrix();
+        corrected_state.pos =
+            correction_rotation * corrected_state.pos + correction.translation;
+        corrected_state.rot = SO3(
+            correction_rotation * corrected_state.rot.toRotationMatrix());
+        corrected_state.vel = correction_rotation * corrected_state.vel;
+        const auto &original_state = kf.get_x();
+        const bool protected_states_unchanged =
+            corrected_state.offset_R_L_I.toRotationMatrix().isApprox(
+                original_state.offset_R_L_I.toRotationMatrix(), 0.0) &&
+            corrected_state.offset_T_L_I.isApprox(original_state.offset_T_L_I, 0.0) &&
+            corrected_state.bg.isApprox(original_state.bg, 0.0) &&
+            corrected_state.ba.isApprox(original_state.ba, 0.0) &&
+            V3D(corrected_state.grav[0], corrected_state.grav[1],
+                corrected_state.grav[2])
+                .isApprox(V3D(original_state.grav[0], original_state.grav[1],
+                              original_state.grav[2]),
+                          0.0) &&
+            corrected_state.b_dvl.isApprox(original_state.b_dvl, 0.0) &&
+            corrected_state.b_pressure.isApprox(original_state.b_pressure, 0.0);
+        if (!protected_states_unchanged)
+        {
+            reject();
+            return;
+        }
+
+        uwfl2::loop_closure::Matrix6d correction_covariance =
+            registration.covariance +
+            registration.graph_anchor_covariance_position_rotation;
+        correction_covariance =
+            0.5 * (correction_covariance + correction_covariance.transpose());
+        const auto corrected_covariance =
+            uwfl2::loop_closure::transport_uwfl2_covariance(
+                kf.get_P(), correction_rotation, correction_covariance);
+        if (!corrected_state.pos.allFinite() ||
+            !corrected_state.vel.allFinite() ||
+            !corrected_state.rot.toRotationMatrix().allFinite() ||
+            !uwfl2::loop_closure::covariance27_is_valid(corrected_covariance))
+        {
+            reject();
+            return;
+        }
+
+        PointVector registered_scan;
+        registered_scan.reserve(candidate->scan->sonar_points->size());
+        const auto T_local_sonar = uwfl2::loop_closure::compose(
+            registration.T_local_vehicle_registered,
+            candidate->scan->T_vehicle_sonar);
+        for (const auto &point : *candidate->scan->sonar_points)
+        {
+            const Eigen::Vector3d world =
+                T_local_sonar.rotation * Eigen::Vector3d(point.x, point.y, point.z) +
+                T_local_sonar.translation;
+            if (!world.allFinite())
+            {
+                continue;
+            }
+            PointType transformed;
+            transformed.x = static_cast<float>(world.x());
+            transformed.y = static_cast<float>(world.y());
+            transformed.z = static_cast<float>(world.z());
+            transformed.intensity = point.intensity;
+            registered_scan.push_back(transformed);
+        }
+        if (registered_scan.empty())
+        {
+            reject();
+            return;
+        }
+
+        const auto old_state = kf.get_x();
+        const auto old_covariance = kf.get_P();
+        const auto old_tree = ikdtree;
+        const BoxPointType old_bounds = LocalMap_Points;
+        const bool old_initialized = Localmap_Initialized;
+        const std::uint64_t old_generation = active_tree_generation_;
+        try
+        {
+            auto replacement_tree = candidate->shadow_map->tree;
+            replacement_tree->Add_Points(registered_scan, true);
+            const BoxPointType replacement_bounds = replacement_tree->tree_range();
+            auto mutable_covariance = corrected_covariance;
+            kf.change_x(corrected_state);
+            kf.change_P(mutable_covariance);
+            ikdtree = std::move(replacement_tree);
+            LocalMap_Points = replacement_bounds;
+            Localmap_Initialized = true;
+            active_tree_generation_ =
+                std::max(old_generation + 1,
+                         candidate->shadow_map->shadow_tree_generation);
+            loop_closure_->notify_active_tree_generation(active_tree_generation_);
+            state_point = kf.get_x();
+            pos_lid = state_point.pos +
+                      state_point.rot * state_point.offset_T_L_I;
+            position_last = state_point.pos;
+            loop_closure_->notify_correction_result(true);
+        }
+        catch (...)
+        {
+            auto rollback_state = old_state;
+            auto rollback_covariance = old_covariance;
+            kf.change_x(rollback_state);
+            kf.change_P(rollback_covariance);
+            ikdtree = old_tree;
+            LocalMap_Points = old_bounds;
+            Localmap_Initialized = old_initialized;
+            active_tree_generation_ = old_generation;
+            state_point = kf.get_x();
+            pos_lid = state_point.pos +
+                      state_point.rot * state_point.offset_T_L_I;
+            reject();
+        }
+    }
+
     static geometry_msgs::msg::Pose pose_message(
         const uwfl2::loop_closure::Pose3d &pose)
     {

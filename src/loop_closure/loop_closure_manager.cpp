@@ -160,6 +160,11 @@ void LoopClosureManager::run_shadow_builder()
                 std::make_shared<const ShadowMapResult>(std::move(result));
             latest_registration_ =
                 std::make_shared<const RegistrationResult>(std::move(registration));
+            auto pending = std::make_shared<PendingCorrection>();
+            pending->shadow_map = latest_shadow_map_;
+            pending->registration = latest_registration_;
+            pending->scan = scan;
+            pending_correction_ = std::move(pending);
         }
         ++shadow_builds_ready_;
         ++registrations_ready_;
@@ -257,6 +262,8 @@ void LoopClosureManager::write_summary() const
             << "  \"registrations_rejected\": " << final_stats.registrations_rejected << ",\n"
             << "  \"registration_time_ms_sum\": " << final_stats.registration_time_ms_sum << ",\n"
             << "  \"registration_time_ms_max\": " << final_stats.registration_time_ms_max << ",\n"
+            << "  \"corrections_committed\": " << final_stats.corrections_committed << ",\n"
+            << "  \"corrections_rejected\": " << final_stats.corrections_rejected << ",\n"
             << "  \"graph_time_ms_sum\": " << final_stats.graph_time_ms_sum
             << ",\n"
             << "  \"graph_time_ms_max\": " << final_stats.graph_time_ms_max
@@ -364,6 +371,8 @@ LoopClosureStats LoopClosureManager::stats() const
     result.registrations_rejected = registrations_rejected_.load();
     result.registration_time_ms_sum = registration_time_ms_sum_.load();
     result.registration_time_ms_max = registration_time_ms_max_.load();
+    result.corrections_committed = corrections_committed_.load();
+    result.corrections_rejected = corrections_rejected_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
     result.graph_time_ms_max = graph_time_ms_max_.load();
     return result;
@@ -380,6 +389,28 @@ LoopClosureManager::registration_snapshot() const
 {
     std::lock_guard<std::mutex> lock(shadow_result_mutex_);
     return latest_registration_;
+}
+
+std::shared_ptr<const PendingCorrection>
+LoopClosureManager::take_pending_correction()
+{
+    std::lock_guard<std::mutex> lock(shadow_result_mutex_);
+    auto result = pending_correction_;
+    pending_correction_.reset();
+    return result;
+}
+
+void LoopClosureManager::notify_correction_result(bool committed)
+{
+    if (committed)
+    {
+        ++corrections_committed_;
+    }
+    else
+    {
+        ++corrections_rejected_;
+    }
+    write_summary();
 }
 
 PoseGraphSnapshot LoopClosureManager::graph_snapshot() const

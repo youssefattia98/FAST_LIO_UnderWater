@@ -41,6 +41,7 @@ struct PoseGraphSnapshot
     std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> raw_poses;
     std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> optimized_poses;
     std::vector<Keyframe, Eigen::aligned_allocator<Keyframe>> keyframes;
+    Matrix6d latest_optimized_covariance_graph = Matrix6d::Zero();
 };
 
 class FullSe3PoseGraph

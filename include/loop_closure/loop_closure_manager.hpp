@@ -51,8 +51,17 @@ struct LoopClosureStats
     std::uint64_t registrations_rejected = 0;
     double registration_time_ms_sum = 0.0;
     double registration_time_ms_max = 0.0;
+    std::uint64_t corrections_committed = 0;
+    std::uint64_t corrections_rejected = 0;
     double graph_time_ms_sum = 0.0;
     double graph_time_ms_max = 0.0;
+};
+
+struct PendingCorrection
+{
+    std::shared_ptr<const ShadowMapResult> shadow_map;
+    std::shared_ptr<const RegistrationResult> registration;
+    std::shared_ptr<const LatestScanSnapshot> scan;
 };
 
 class LoopClosureManager
@@ -125,6 +134,8 @@ public:
     void notify_active_tree_generation(std::uint64_t generation);
     std::shared_ptr<const ShadowMapResult> shadow_map_snapshot() const;
     std::shared_ptr<const RegistrationResult> registration_snapshot() const;
+    std::shared_ptr<const PendingCorrection> take_pending_correction();
+    void notify_correction_result(bool committed);
 
     template <typename PointRange>
     void notify_latest_scan(double timestamp,
@@ -195,6 +206,7 @@ private:
     std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
     std::shared_ptr<const RegistrationResult> latest_registration_;
     std::shared_ptr<const LatestScanSnapshot> latest_scan_;
+    std::shared_ptr<const PendingCorrection> pending_correction_;
     std::uint64_t next_keyframe_id_ = 0;
     std::atomic<std::uint64_t> submitted_{0};
     std::atomic<std::uint64_t> processed_{0};
@@ -213,6 +225,8 @@ private:
     std::atomic<std::uint64_t> registrations_rejected_{0};
     std::atomic<double> registration_time_ms_sum_{0.0};
     std::atomic<double> registration_time_ms_max_{0.0};
+    std::atomic<std::uint64_t> corrections_committed_{0};
+    std::atomic<std::uint64_t> corrections_rejected_{0};
     std::atomic<double> graph_time_ms_sum_{0.0};
     std::atomic<double> graph_time_ms_max_{0.0};
 };

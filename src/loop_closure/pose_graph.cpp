@@ -342,6 +342,11 @@ PoseGraphSnapshot FullSe3PoseGraph::snapshot() const
         result.optimized_poses.push_back(
             from_gtsam(estimate_.at<gtsam::Pose3>(pose_key(keyframe.id))));
     }
+    if (!keyframes_.empty())
+    {
+        result.latest_optimized_covariance_graph =
+            isam_.marginalCovariance(pose_key(keyframes_.back().id));
+    }
     return result;
 }
 

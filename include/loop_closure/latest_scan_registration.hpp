@@ -54,6 +54,7 @@ struct RegistrationResult
     Pose3d T_local_vehicle_initial;
     Pose3d T_local_vehicle_registered;
     Matrix6d covariance = Matrix6d::Identity();
+    Matrix6d graph_anchor_covariance_position_rotation = Matrix6d::Zero();
     std::size_t initial_effective_points = 0;
     std::size_t final_effective_points = 0;
     double initial_residual_mean_m = 0.0;

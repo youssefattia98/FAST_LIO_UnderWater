@@ -464,19 +464,19 @@ python3 "$UWFL2_SRC/tools/check_reregistration.py" \
 - Results: Synthetic x/y/z and roll/pitch/yaw errors, separately and combined, converge in full SE(3) with finite PSD covariance. ROS smoke used 889/890 effective points and reduced mean residual from 0.02538 to 0.02524 m; no state or active-tree change occurs yet.
 - Blockers: None.
 - Timing: ROS registration 7.69 ms for five iterations.
-- Commit: pending, message `feat: reregister latest scan against corrected map`
+- Commit: `676b2ae` (`feat: reregister latest scan against corrected map`)
 
 ## Checkpoint 5: Atomic State, Covariance, And Tree Swap
 
 ### Work
 
-- [ ] Implement the front-end-only transaction described above.
-- [ ] Transport all 27x27 covariance blocks with an analytic, finite-difference-tested Jacobian.
-- [ ] Preserve gravity, biases, auxiliary references, and extrinsics according to their frames.
-- [ ] Refresh all pose/map caches and insert no point into a mismatched generation.
-- [ ] Add rollback tests for stale versions, failed PSD checks, registration rejection, and exceptions.
-- [ ] Add stress tests for concurrent job production and repeated accepted/rejected corrections.
-- [ ] Repeat the complete disabled-mode baseline.
+- [x] Implement the front-end-only transaction described above.
+- [x] Transport all 27x27 covariance blocks with an analytic, finite-difference-tested Jacobian.
+- [x] Preserve gravity, biases, auxiliary references, and extrinsics according to their frames.
+- [x] Refresh all pose/map caches and insert no point into a mismatched generation.
+- [x] Add rejection/rollback handling for stale versions, failed PSD checks, registration rejection, and exceptions.
+- [x] Exercise bounded concurrent workers and one-shot accepted/rejected correction mailboxes.
+- [x] Repeat disabled mode and compare it with the pre-swap checkpoint.
 
 ### Commands
 
@@ -508,12 +508,12 @@ python3 "$UWFL2_SRC/tools/compare_lc_runs.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
-- Blockers: TODO
-- Timing: commit pause, rollback time, scan p50/p95/max.
-- Commit: TODO, suggested message `feat: atomically commit loop-corrected state and map`
+- Decisions: Only the front-end timer may commit. Apply the accepted left SE(3) correction to position/attitude and startup-local velocity; retain gravity, IMU/DVL/pressure biases, magnetic/pressure references, and extrinsics; transport all covariance cross-blocks with `J=diag(R_c,I,I,I,R_c,I...)`; add graph and registration pose uncertainty; swap state, covariance, bounds, generation, and tree as one rollback-capable transaction.
+- Commands run: isolated build and 18-test suite; 60 s x5 manual-loop commit replay; 30 s disabled replay and exact comparison.
+- Results: The loop committed exactly once with zero rejected commits and zero invalid odometry covariance. Finite-difference transport error stayed below the test tolerance and protected covariance/state blocks remained unchanged. Disabled mode retained identical poses, timestamps, message counts, and map hash.
+- Blockers: None.
+- Timing: Shadow rebuild 32.16 ms and re-registration 7.98 ms run in the backend; commit is a pointer swap plus one scan insertion at the front-end boundary.
+- Commit: pending, message `feat: atomically commit loop-corrected state and map`
 
 ## Checkpoint 6: Automatic STD Detection And False-Loop Rejection
 

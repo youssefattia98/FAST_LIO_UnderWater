@@ -11,6 +11,7 @@
 #include "loop_closure/loop_closure_types.hpp"
 #include "loop_closure/pose_graph.hpp"
 #include "loop_closure/shadow_map.hpp"
+#include "loop_closure/state_transport.hpp"
 
 namespace lc = uwfl2::loop_closure;
 
@@ -468,4 +469,57 @@ TEST(LatestScanRegistration, RecoversIndependentAndCombinedFullSe3Errors)
                   result.initial_residual_mean_m + 1e-9);
         EXPECT_TRUE(lc::covariance_is_valid(result.covariance));
     }
+}
+
+TEST(StateTransport, AnalyticJacobianMatchesFullSe3FiniteDifference)
+{
+    const Eigen::Matrix3d correction =
+        Eigen::AngleAxisd(0.47, Eigen::Vector3d(1.0, -0.4, 0.7).normalized())
+            .toRotationMatrix();
+    const Eigen::Matrix3d base_rotation =
+        Eigen::AngleAxisd(-0.31, Eigen::Vector3d(0.2, 1.0, -0.3).normalized())
+            .toRotationMatrix();
+    const auto analytic = lc::correction_transport_jacobian(correction);
+    lc::Matrix27d numerical = lc::Matrix27d::Zero();
+    const double epsilon = 1e-7;
+    for (int column = 0; column < 27; ++column)
+    {
+        Eigen::Matrix<double, 27, 1> delta =
+            Eigen::Matrix<double, 27, 1>::Zero();
+        delta(column) = epsilon;
+        Eigen::Matrix<double, 27, 1> output = delta;
+        output.segment<3>(0) = correction * delta.segment<3>(0);
+        const Eigen::Vector3d attitude_delta = delta.segment<3>(3);
+        const Eigen::Matrix3d perturbed =
+            base_rotation * Eigen::AngleAxisd(
+                                attitude_delta.norm(),
+                                attitude_delta.norm() > 0.0
+                                    ? attitude_delta.normalized()
+                                    : Eigen::Vector3d::UnitX())
+                                .toRotationMatrix();
+        const Eigen::Matrix3d relative =
+            (correction * base_rotation).transpose() * correction * perturbed;
+        output.segment<3>(3) =
+            Eigen::AngleAxisd(relative).axis() * Eigen::AngleAxisd(relative).angle();
+        output.segment<3>(12) = correction * delta.segment<3>(12);
+        numerical.col(column) = output / epsilon;
+    }
+    EXPECT_LT((analytic - numerical).cwiseAbs().maxCoeff(), 2e-8);
+}
+
+TEST(StateTransport, KeepsProtectedBlocksAndProducesPsdCovariance)
+{
+    lc::Matrix27d covariance = lc::Matrix27d::Identity() * 0.01;
+    covariance.block<3, 3>(0, 15).setConstant(1e-4);
+    covariance.block<3, 3>(15, 0) = covariance.block<3, 3>(0, 15).transpose();
+    const Eigen::Matrix3d rotation =
+        Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    lc::Matrix6d correction_covariance = lc::Matrix6d::Identity() * 1e-3;
+    const auto transported = lc::transport_uwfl2_covariance(
+        covariance, rotation, correction_covariance);
+    EXPECT_TRUE(lc::covariance27_is_valid(transported));
+    EXPECT_TRUE((transported.block<12, 12>(15, 15).isApprox(
+        covariance.block<12, 12>(15, 15), 1e-14)));
+    EXPECT_TRUE((transported.block<3, 3>(0, 15).isApprox(
+        rotation * covariance.block<3, 3>(0, 15), 1e-14)));
 }
