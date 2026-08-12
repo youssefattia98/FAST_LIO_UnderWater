@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -136,6 +137,115 @@ TEST(FullSe3PoseGraph, AddsPriorAndConsecutiveOdometryFactors)
     expect_pose_near(snapshot.optimized_poses[0], first, 1e-6);
     expect_pose_near(snapshot.optimized_poses[1], second, 1e-6);
     expect_pose_near(snapshot.optimized_poses[2], third, 1e-6);
+}
+
+TEST(FullSe3PoseGraph, TransactionalLoopReducesFullSe3Residual)
+{
+    lc::FullSe3PoseGraph graph;
+    for (std::uint64_t id = 0; id < 8; ++id)
+    {
+        const double fraction = static_cast<double>(id) / 7.0;
+        const lc::Pose3d drifted = pose(
+            {static_cast<double>(id) * 1.1, 0.2 * fraction, 0.7 * fraction},
+            Eigen::Vector3d(1.0, 0.4, 0.3), 0.18 * fraction);
+        ASSERT_EQ(graph.append_keyframe(keyframe(id, drifted)), id + 1);
+    }
+
+    lc::LoopConstraint loop;
+    loop.from_id = 0;
+    loop.to_id = 7;
+    loop.T_from_to = pose({7.0, 0.0, 0.0}, Eigen::Vector3d::UnitX(), 0.0);
+    loop.covariance = lc::Matrix6d::Identity() * 0.01;
+    const lc::LoopEvaluation evaluation = graph.try_add_loop(loop);
+
+    ASSERT_TRUE(evaluation.accepted) << evaluation.reason;
+    EXPECT_LT(evaluation.graph_error_after, evaluation.graph_error_before);
+    EXPECT_LT(evaluation.loop_translation_error_after,
+              evaluation.loop_translation_error_before);
+    EXPECT_LT(evaluation.loop_rotation_error_after_rad,
+              evaluation.loop_rotation_error_before_rad);
+    const auto snapshot = graph.snapshot();
+    EXPECT_EQ(snapshot.loop_factor_count, 1U);
+    EXPECT_EQ(snapshot.factor_count, 9U);
+    EXPECT_LT(snapshot.optimized_poses.back().translation.z(),
+              snapshot.raw_poses.back().translation.z());
+    EXPECT_LT(lc::rotation_distance_rad(snapshot.optimized_poses.back(),
+                                        lc::Pose3d{}),
+              lc::rotation_distance_rad(snapshot.raw_poses.back(), lc::Pose3d{}));
+}
+
+TEST(FullSe3PoseGraph, RejectedLoopLeavesCommittedGraphUnchanged)
+{
+    lc::FullSe3PoseGraph graph;
+    for (std::uint64_t id = 0; id < 8; ++id)
+    {
+        ASSERT_EQ(graph.append_keyframe(keyframe(
+                      id, pose({static_cast<double>(id), 0.0, 0.0},
+                               Eigen::Vector3d::UnitZ(), 0.0))),
+                  id + 1);
+    }
+    const auto before = graph.snapshot();
+    lc::LoopConstraint reversed;
+    reversed.from_id = 0;
+    reversed.to_id = 7;
+    reversed.T_from_to = pose({-7.0, 0.0, 0.0}, Eigen::Vector3d::UnitZ(), 0.0);
+    reversed.covariance = lc::Matrix6d::Identity() * 0.01;
+    const auto evaluation = graph.try_add_loop(reversed);
+    ASSERT_FALSE(evaluation.accepted);
+    EXPECT_EQ(evaluation.reason, "initial_loop_residual_too_large");
+    const auto after = graph.snapshot();
+    EXPECT_EQ(after.version, before.version);
+    EXPECT_EQ(after.factor_count, before.factor_count);
+    EXPECT_EQ(after.loop_factor_count, 0U);
+    for (std::size_t index = 0; index < before.optimized_poses.size(); ++index)
+    {
+        expect_pose_near(after.optimized_poses[index],
+                         before.optimized_poses[index]);
+    }
+}
+
+TEST(FullSe3PoseGraph, RejectsStaleAndNonFiniteConstraints)
+{
+    lc::FullSe3PoseGraph graph;
+    ASSERT_EQ(graph.append_keyframe(keyframe(0, lc::Pose3d{})), 1U);
+    lc::LoopConstraint stale;
+    stale.from_id = 0;
+    stale.to_id = 99;
+    EXPECT_EQ(graph.try_add_loop(stale).reason, "unknown_keyframe");
+
+    lc::LoopConstraint invalid;
+    invalid.from_id = 0;
+    invalid.to_id = 1;
+    invalid.T_from_to.translation.x() =
+        std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(graph.try_add_loop(invalid).reason,
+              "non_finite_or_invalid_covariance");
+}
+
+TEST(FullSe3PoseGraph, RejectsImpossibleConstraintAfterTemporaryOptimization)
+{
+    lc::FullSe3PoseGraph graph;
+    for (std::uint64_t id = 0; id < 8; ++id)
+    {
+        ASSERT_EQ(graph.append_keyframe(keyframe(
+                      id, pose({static_cast<double>(id), 0.0, 0.0},
+                               Eigen::Vector3d::UnitZ(), 0.0))),
+                  id + 1);
+    }
+    const auto before = graph.snapshot();
+    lc::LoopConstraint impossible;
+    impossible.from_id = 0;
+    impossible.to_id = 7;
+    impossible.T_from_to = pose({100.0, 50.0, -40.0},
+                                Eigen::Vector3d(1.0, 1.0, 1.0), 2.5);
+    impossible.covariance = lc::Matrix6d::Identity() * 1e-4;
+    impossible.test_override = true;
+    const auto evaluation = graph.try_add_loop(impossible);
+    EXPECT_FALSE(evaluation.accepted);
+    const auto after = graph.snapshot();
+    EXPECT_EQ(after.version, before.version);
+    EXPECT_EQ(after.factor_count, before.factor_count);
+    EXPECT_EQ(after.loop_factor_count, 0U);
 }
 
 TEST(LoopClosureManager, DrainsWorkerAndShutsDownCleanly)

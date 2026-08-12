@@ -23,8 +23,30 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
         std::filesystem::create_directories(config_.diagnostics_directory);
         diagnostics_.open(config_.diagnostics_directory / "keyframes.csv");
         diagnostics_ << "id,timestamp,tx,ty,tz,qw,qx,qy,qz,points,graph_version,graph_time_ms\n";
+        loop_diagnostics_.open(config_.diagnostics_directory / "loops.csv");
+        loop_diagnostics_
+            << "from_id,to_id,accepted,reason,graph_version,graph_error_before,"
+               "graph_error_after,translation_error_before,translation_error_after,"
+               "rotation_error_before_rad,rotation_error_after_rad,optimization_time_ms\n";
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
+}
+
+LoopEvaluation LoopClosureManager::inject_loop(const LoopConstraint &constraint)
+{
+    LoopEvaluation result = pose_graph_.try_add_loop(constraint);
+    graph_version_.store(result.graph_version);
+    if (result.accepted)
+    {
+        ++loops_accepted_;
+    }
+    else
+    {
+        ++loops_rejected_;
+    }
+    write_loop_diagnostic(constraint, result);
+    write_summary();
+    return result;
 }
 
 LoopClosureManager::~LoopClosureManager()
@@ -77,14 +99,18 @@ void LoopClosureManager::write_diagnostic(
     {
         return;
     }
-    const Pose3d pose = keyframe.T_local_vehicle.normalized();
-    diagnostics_ << keyframe.id << ',' << std::setprecision(17) << keyframe.timestamp
-                 << ',' << pose.translation.x() << ',' << pose.translation.y() << ','
-                 << pose.translation.z() << ',' << pose.rotation.w() << ','
-                 << pose.rotation.x() << ',' << pose.rotation.y() << ','
-                 << pose.rotation.z() << ',' << keyframe.sonar_points->size() << ','
-                 << version << ',' << graph_time_ms << '\n';
-    diagnostics_.flush();
+    {
+        std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+        const Pose3d pose = keyframe.T_local_vehicle.normalized();
+        diagnostics_ << keyframe.id << ',' << std::setprecision(17)
+                     << keyframe.timestamp << ',' << pose.translation.x() << ','
+                     << pose.translation.y() << ',' << pose.translation.z() << ','
+                     << pose.rotation.w() << ',' << pose.rotation.x() << ','
+                     << pose.rotation.y() << ',' << pose.rotation.z() << ','
+                     << keyframe.sonar_points->size() << ',' << version << ','
+                     << graph_time_ms << '\n';
+        diagnostics_.flush();
+    }
     write_summary();
 }
 
@@ -96,6 +122,7 @@ void LoopClosureManager::write_summary() const
     }
     const LoopClosureStats final_stats = stats();
     const PoseGraphSnapshot graph = graph_snapshot();
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
     const auto output = config_.diagnostics_directory / "loop_closure_summary.json";
     const auto temporary = config_.diagnostics_directory /
                            "loop_closure_summary.json.tmp";
@@ -108,6 +135,9 @@ void LoopClosureManager::write_summary() const
             << "  \"graph_version\": " << final_stats.graph_version << ",\n"
             << "  \"graph_nodes\": " << graph.node_count << ",\n"
             << "  \"graph_factors\": " << graph.factor_count << ",\n"
+            << "  \"graph_loop_factors\": " << graph.loop_factor_count << ",\n"
+            << "  \"loops_accepted\": " << final_stats.loops_accepted << ",\n"
+            << "  \"loops_rejected\": " << final_stats.loops_rejected << ",\n"
             << "  \"graph_time_ms_sum\": " << final_stats.graph_time_ms_sum
             << ",\n"
             << "  \"graph_time_ms_max\": " << final_stats.graph_time_ms_max
@@ -123,6 +153,29 @@ void LoopClosureManager::write_summary() const
     }
 }
 
+void LoopClosureManager::write_loop_diagnostic(
+    const LoopConstraint &constraint,
+    const LoopEvaluation &evaluation)
+{
+    if (!loop_diagnostics_)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    loop_diagnostics_ << constraint.from_id << ',' << constraint.to_id << ','
+                      << (evaluation.accepted ? 1 : 0) << ','
+                      << std::quoted(evaluation.reason) << ','
+                      << evaluation.graph_version << ',' << std::setprecision(17)
+                      << evaluation.graph_error_before << ','
+                      << evaluation.graph_error_after << ','
+                      << evaluation.loop_translation_error_before << ','
+                      << evaluation.loop_translation_error_after << ','
+                      << evaluation.loop_rotation_error_before_rad << ','
+                      << evaluation.loop_rotation_error_after_rad << ','
+                      << evaluation.optimization_time_ms << '\n';
+    loop_diagnostics_.flush();
+}
+
 LoopClosureStats LoopClosureManager::stats() const
 {
     LoopClosureStats result;
@@ -131,6 +184,8 @@ LoopClosureStats LoopClosureManager::stats() const
     result.failed = failed_.load();
     result.dropped = queue_.dropped();
     result.graph_version = graph_version_.load();
+    result.loops_accepted = loops_accepted_.load();
+    result.loops_rejected = loops_rejected_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
     result.graph_time_ms_max = graph_time_ms_max_.load();
     return result;

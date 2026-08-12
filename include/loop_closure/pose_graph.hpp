@@ -21,6 +21,11 @@ struct PoseGraphConfig
     double prior_translation_sigma_m = 1e-4;
     double odometry_rotation_variance_floor = 1e-8;
     double odometry_translation_variance_floor = 1e-6;
+    std::size_t loop_minimum_keyframe_separation = 5;
+    double loop_maximum_initial_translation_error_m = 10.0;
+    double loop_maximum_initial_rotation_error_rad = 45.0 * 3.14159265358979323846 / 180.0;
+    double loop_maximum_pose_correction_translation_m = 20.0;
+    double loop_maximum_pose_correction_rotation_rad = 45.0 * 3.14159265358979323846 / 180.0;
 };
 
 struct PoseGraphSnapshot
@@ -30,6 +35,9 @@ struct PoseGraphSnapshot
     std::uint64_t version = 0;
     std::size_t node_count = 0;
     std::size_t factor_count = 0;
+    std::size_t loop_factor_count = 0;
+    std::vector<std::uint64_t> ids;
+    std::vector<double> timestamps;
     std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> raw_poses;
     std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> optimized_poses;
 };
@@ -40,6 +48,7 @@ public:
     explicit FullSe3PoseGraph(PoseGraphConfig config = {});
 
     std::uint64_t append_keyframe(const Keyframe &keyframe);
+    LoopEvaluation try_add_loop(const LoopConstraint &constraint);
     PoseGraphSnapshot snapshot() const;
 
     static gtsam::Pose3 to_gtsam(const Pose3d &pose);
@@ -58,6 +67,7 @@ private:
     gtsam::Values estimate_;
     std::vector<Keyframe, Eigen::aligned_allocator<Keyframe>> keyframes_;
     std::uint64_t version_ = 0;
+    std::size_t loop_factor_count_ = 0;
 };
 
 }  // namespace uwfl2::loop_closure

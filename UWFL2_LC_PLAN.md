@@ -339,17 +339,17 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
 - Results: All seven loop-closure unit tests pass. The enabled smoke processed 5/5 keyframes with zero failures/drops and a maximum graph insertion time of 2.54 ms. The complete disabled replay produced 5,945 odometry and 5,944 registered-cloud messages, identical header stamps and serialized poses, and the identical 5,739,064-point map SHA-256. Its ATE RMSE/max/final remained 0.070/0.156/0.081 m.
 - Blockers: No implementation blocker. The build currently uses the official Ubuntu GTSAM packages from an isolated `/tmp` prefix; install `libgtsam-dev` normally on deployment hosts.
 - Timing: Complete x5 disabled replay CPU mean/p95/max 46.7/66.7/82.3% and RSS mean/p95/max 349.3/481.1/482.9 MB. The x1-to-x5 ROS-time lag ratio is not a real-time regression metric; exact output equivalence is the disabled-mode criterion.
-- Commit: pending, message `feat: add optional SE3 keyframes and pose graph`
+- Commit: `a7a8f9f` (`feat: add optional SE3 keyframes and pose graph`)
 
 ## Checkpoint 2: Manually Injected Full-SE(3) Loop
 
 ### Work
 
-- [ ] Add a test-only `/uwfl2_lc/inject_loop` service with explicit from/to IDs and a full relative pose/covariance.
-- [ ] Derive the simulation loop transform from ground truth at the selected keyframe timestamps; never assume identity or planar closure.
-- [ ] Optimize a temporary graph, validate it, then commit only the graph result. Do not correct the live state/tree yet.
-- [ ] Publish raw/optimized graph paths and loop diagnostics.
-- [ ] Test a valid loop, reversed transform, impossible transform, stale IDs, and non-finite data.
+- [x] Add a test-only `/uwfl2_lc/inject_loop` service with explicit from/to IDs and a full relative pose/covariance.
+- [x] Derive the simulation loop transform from ground truth at the selected keyframe timestamps; never assume identity or planar closure.
+- [x] Optimize a temporary graph, validate it, then commit only the graph result. Do not correct the live state/tree yet.
+- [x] Publish raw/optimized graph paths and loop diagnostics.
+- [x] Test a valid loop, reversed transform, impossible transform, stale IDs, and non-finite data.
 
 ### Commands
 
@@ -379,12 +379,12 @@ python3 "$UWFL2_SRC/tools/check_pose_graph.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
-- Blockers: TODO
-- Timing: temporary optimization p50/p95/max and graph size.
-- Commit: TODO, suggested message `feat: validate manually injected SE3 loops`
+- Decisions: Define every loop as `T_from_to = inverse(T_local_from) T_local_to`; use GTSAM tangent ordering `[rotation, translation]`; recover the simulator's IKF vehicle pose as `T_W_BROV T_BROV_imu` rather than assuming the ground-truth child is the IMU frame; validate with a temporary Levenberg--Marquardt graph and rebuild stock iSAM2 only after acceptance.
+- Commands run: isolated build and 10-test GTest suite; `make_manual_loop.py` on `sim3`; 60 s x5 ROS replay with `/uwfl2_lc/inject_loop`; `check_pose_graph.py --require-full-se3 --require-one-accepted-loop --check-residuals`.
+- Results: The ROS smoke processed 13/13 keyframes with zero drops/failures. One full-SE(3) loop was accepted; graph error fell from 0.4895 to 0.00183, translation residual from 0.0493 m to 0.000119 m, and rotation residual from 0.0838 deg to 0.0161 deg. Reversed, stale, and non-finite unit constraints are rejected without changing graph version, factors, or optimized poses. Live IKF state and active map remain unchanged in this checkpoint.
+- Blockers: None. A diagnostics mutex self-deadlock found by the first service smoke was fixed and the replay was repeated successfully.
+- Timing: Accepted 13-node loop transaction 0.94 ms; incremental graph insertion maximum 0.93 ms.
+- Commit: pending, message `feat: validate manually injected SE3 loops`
 
 ## Checkpoint 3: Corrected Historical Map And Shadow ikd-Tree
 

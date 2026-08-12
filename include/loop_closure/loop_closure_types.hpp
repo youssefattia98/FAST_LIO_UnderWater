@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
@@ -111,6 +112,31 @@ struct Keyframe
     std::shared_ptr<const std::vector<PointXYZI>> sonar_points;
     std::uint64_t graph_version = 0;
     std::uint64_t tree_generation = 0;
+};
+
+struct LoopConstraint
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    std::uint64_t from_id = 0;
+    std::uint64_t to_id = 0;
+    Pose3d T_from_to;
+    Matrix6d covariance = Matrix6d::Identity();
+    bool test_override = false;
+};
+
+struct LoopEvaluation
+{
+    bool accepted = false;
+    std::string reason;
+    std::uint64_t graph_version = 0;
+    double graph_error_before = 0.0;
+    double graph_error_after = 0.0;
+    double loop_translation_error_before = 0.0;
+    double loop_translation_error_after = 0.0;
+    double loop_rotation_error_before_rad = 0.0;
+    double loop_rotation_error_after_rad = 0.0;
+    double optimization_time_ms = 0.0;
 };
 
 struct KeyframeSelectionConfig

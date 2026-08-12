@@ -1,11 +1,14 @@
 #include "loop_closure/pose_graph.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <stdexcept>
 
 #include <Eigen/Eigenvalues>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/NoiseModel.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
 
@@ -44,14 +47,40 @@ Matrix6d force_positive_definite(Matrix6d covariance, const PoseGraphConfig &con
            solver.eigenvectors().transpose();
 }
 
-}  // namespace
-
-FullSe3PoseGraph::FullSe3PoseGraph(PoseGraphConfig config) : config_(config)
+gtsam::ISAM2Params isam_parameters()
 {
     gtsam::ISAM2Params parameters;
     parameters.relinearizeThreshold = 0.01;
     parameters.relinearizeSkip = 1;
-    isam_ = gtsam::ISAM2(parameters);
+    return parameters;
+}
+
+struct ResidualMagnitude
+{
+    double translation = 0.0;
+    double rotation = 0.0;
+};
+
+ResidualMagnitude relative_pose_residual(
+    const gtsam::Pose3 &from,
+    const gtsam::Pose3 &to,
+    const gtsam::Pose3 &measurement)
+{
+    const gtsam::Pose3 predicted = from.between(to);
+    const gtsam::Pose3 error = measurement.between(predicted);
+    return {error.translation().norm(), error.rotation().axisAngle().second};
+}
+
+bool finite_pose(const gtsam::Pose3 &pose)
+{
+    return pose.matrix().allFinite();
+}
+
+}  // namespace
+
+FullSe3PoseGraph::FullSe3PoseGraph(PoseGraphConfig config) : config_(config)
+{
+    isam_ = gtsam::ISAM2(isam_parameters());
 }
 
 gtsam::Pose3 FullSe3PoseGraph::to_gtsam(const Pose3d &pose)
@@ -131,6 +160,166 @@ std::uint64_t FullSe3PoseGraph::append_keyframe(const Keyframe &keyframe)
     return version_;
 }
 
+LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto started = std::chrono::steady_clock::now();
+    LoopEvaluation result;
+    result.graph_version = version_;
+
+    const auto reject = [&](const std::string &reason) {
+        result.accepted = false;
+        result.reason = reason;
+        result.optimization_time_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        return result;
+    };
+
+    if (constraint.from_id == constraint.to_id)
+    {
+        return reject("same_keyframe");
+    }
+    if (!constraint.T_from_to.finite() ||
+        !covariance_is_valid(constraint.covariance))
+    {
+        return reject("non_finite_or_invalid_covariance");
+    }
+
+    const auto from_iterator = std::find_if(
+        keyframes_.begin(), keyframes_.end(), [&](const Keyframe &keyframe) {
+            return keyframe.id == constraint.from_id;
+        });
+    const auto to_iterator = std::find_if(
+        keyframes_.begin(), keyframes_.end(), [&](const Keyframe &keyframe) {
+            return keyframe.id == constraint.to_id;
+        });
+    if (from_iterator == keyframes_.end() || to_iterator == keyframes_.end())
+    {
+        return reject("unknown_keyframe");
+    }
+    const std::size_t from_index =
+        static_cast<std::size_t>(std::distance(keyframes_.begin(), from_iterator));
+    const std::size_t to_index =
+        static_cast<std::size_t>(std::distance(keyframes_.begin(), to_iterator));
+    if (from_index >= to_index)
+    {
+        return reject("keyframes_not_chronological");
+    }
+    if (!constraint.test_override &&
+        to_index - from_index < config_.loop_minimum_keyframe_separation)
+    {
+        return reject("insufficient_keyframe_separation");
+    }
+
+    const gtsam::Key from_key = pose_key(constraint.from_id);
+    const gtsam::Key to_key = pose_key(constraint.to_id);
+    const gtsam::Pose3 measurement = to_gtsam(constraint.T_from_to);
+    const ResidualMagnitude initial_residual = relative_pose_residual(
+        estimate_.at<gtsam::Pose3>(from_key),
+        estimate_.at<gtsam::Pose3>(to_key), measurement);
+    result.loop_translation_error_before = initial_residual.translation;
+    result.loop_rotation_error_before_rad = initial_residual.rotation;
+    if (!constraint.test_override &&
+        (initial_residual.translation >
+             config_.loop_maximum_initial_translation_error_m ||
+         initial_residual.rotation > config_.loop_maximum_initial_rotation_error_rad))
+    {
+        return reject("initial_loop_residual_too_large");
+    }
+
+    try
+    {
+        gtsam::NonlinearFactorGraph candidate_graph = graph_;
+        const Matrix6d covariance = force_positive_definite(
+            constraint.covariance, config_);
+        candidate_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+            from_key, to_key, measurement,
+            gtsam::noiseModel::Gaussian::Covariance(covariance)));
+        result.graph_error_before = candidate_graph.error(estimate_);
+
+        gtsam::LevenbergMarquardtParams parameters;
+        parameters.setVerbosityLM("SILENT");
+        parameters.setMaxIterations(50);
+        const gtsam::Values candidate_estimate =
+            gtsam::LevenbergMarquardtOptimizer(
+                candidate_graph, estimate_, parameters)
+                .optimize();
+        result.graph_error_after = candidate_graph.error(candidate_estimate);
+
+        if (!std::isfinite(result.graph_error_before) ||
+            !std::isfinite(result.graph_error_after) ||
+            result.graph_error_after > result.graph_error_before +
+                                           std::max(1e-9, 1e-9 * result.graph_error_before))
+        {
+            return reject("optimization_did_not_reduce_error");
+        }
+
+        const ResidualMagnitude final_residual = relative_pose_residual(
+            candidate_estimate.at<gtsam::Pose3>(from_key),
+            candidate_estimate.at<gtsam::Pose3>(to_key), measurement);
+        result.loop_translation_error_after = final_residual.translation;
+        result.loop_rotation_error_after_rad = final_residual.rotation;
+        if (final_residual.translation > initial_residual.translation + 1e-9 ||
+            final_residual.rotation > initial_residual.rotation + 1e-9)
+        {
+            return reject("loop_residual_increased");
+        }
+
+        for (const Keyframe &keyframe : keyframes_)
+        {
+            const gtsam::Key key = pose_key(keyframe.id);
+            const gtsam::Pose3 before = estimate_.at<gtsam::Pose3>(key);
+            const gtsam::Pose3 after = candidate_estimate.at<gtsam::Pose3>(key);
+            if (!finite_pose(after))
+            {
+                return reject("non_finite_optimized_pose");
+            }
+            const ResidualMagnitude correction = relative_pose_residual(
+                before, after, gtsam::Pose3());
+            if (correction.translation >
+                    config_.loop_maximum_pose_correction_translation_m ||
+                correction.rotation >
+                    config_.loop_maximum_pose_correction_rotation_rad)
+            {
+                return reject("optimized_pose_correction_too_large");
+            }
+        }
+
+        gtsam::ISAM2 replacement(isam_parameters());
+        replacement.update(candidate_graph, candidate_estimate);
+        replacement.update();
+        gtsam::Values replacement_estimate = replacement.calculateEstimate();
+        for (const Keyframe &keyframe : keyframes_)
+        {
+            if (!finite_pose(
+                    replacement_estimate.at<gtsam::Pose3>(pose_key(keyframe.id))))
+            {
+                return reject("non_finite_committed_pose");
+            }
+        }
+
+        graph_ = std::move(candidate_graph);
+        estimate_ = std::move(replacement_estimate);
+        isam_ = std::move(replacement);
+        ++loop_factor_count_;
+        ++version_;
+        result.accepted = true;
+        result.reason = "accepted";
+        result.graph_version = version_;
+        result.optimization_time_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        return result;
+    }
+    catch (const std::exception &exception)
+    {
+        return reject(std::string("optimization_exception: ") + exception.what());
+    }
+}
+
 PoseGraphSnapshot FullSe3PoseGraph::snapshot() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -138,10 +327,15 @@ PoseGraphSnapshot FullSe3PoseGraph::snapshot() const
     result.version = version_;
     result.node_count = keyframes_.size();
     result.factor_count = graph_.size();
+    result.loop_factor_count = loop_factor_count_;
+    result.ids.reserve(keyframes_.size());
+    result.timestamps.reserve(keyframes_.size());
     result.raw_poses.reserve(keyframes_.size());
     result.optimized_poses.reserve(keyframes_.size());
     for (const Keyframe &keyframe : keyframes_)
     {
+        result.ids.push_back(keyframe.id);
+        result.timestamps.push_back(keyframe.timestamp);
         result.raw_poses.push_back(keyframe.T_local_vehicle);
         result.optimized_poses.push_back(
             from_gtsam(estimate_.at<gtsam::Pose3>(pose_key(keyframe.id))));

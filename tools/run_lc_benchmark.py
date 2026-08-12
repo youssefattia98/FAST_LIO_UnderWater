@@ -25,7 +25,15 @@ import psutil
 import yaml
 
 
-RECORD_TOPICS = ("/Odometry", "/cloud_registered", "/tf", "/tf_static", "/clock")
+RECORD_TOPICS = (
+    "/Odometry",
+    "/cloud_registered",
+    "/tf",
+    "/tf_static",
+    "/clock",
+    "/uwfl2_lc/raw_path",
+    "/uwfl2_lc/optimized_path",
+)
 
 
 def utc_now() -> str:
@@ -292,6 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--loop-closure", choices=("true", "false"), default="false")
     parser.add_argument("--detection", choices=("true", "false"), default="false")
+    parser.add_argument("--inject-loop", type=Path)
     parser.add_argument("--workspace", type=Path, default=Path("/home/attia/ros2_ws"))
     parser.add_argument("--ros-setup", type=Path, default=Path("/opt/ros/jazzy/setup.bash"))
     parser.add_argument("--drain-seconds", type=float, default=10.0)
@@ -323,6 +332,11 @@ def validate_args(args: argparse.Namespace, source_root: Path) -> None:
         raise FileExistsError(
             f"Output already exists: {args.output}. Baseline result directories are immutable."
         )
+    if args.inject_loop is not None:
+        if not args.inject_loop.exists():
+            raise FileNotFoundError(f"loop request does not exist: {args.inject_loop}")
+        if args.loop_closure != "true":
+            raise ValueError("--inject-loop requires --loop-closure true")
 
 
 def main() -> int:
@@ -333,6 +347,8 @@ def main() -> int:
     args.output = args.output.expanduser().resolve()
     args.workspace = args.workspace.expanduser().resolve()
     args.ros_setup = args.ros_setup.expanduser().resolve()
+    if args.inject_loop is not None:
+        args.inject_loop = args.inject_loop.expanduser().resolve()
     workspace_setup = args.workspace / "install" / "setup.bash"
     validate_args(args, source_root)
 
@@ -342,6 +358,8 @@ def main() -> int:
     logs.mkdir()
     ros_logs.mkdir()
     shutil.copy2(args.config, args.output / "input_config.yaml")
+    if args.inject_loop is not None:
+        shutil.copy2(args.inject_loop, args.output / "manual_loop_request.yaml")
     runtime_config = write_runtime_config(args, args.output)
 
     env = os.environ.copy()
@@ -357,6 +375,7 @@ def main() -> int:
         "branch_required": "feature/uwfl2-ltaom-loop-closure",
         "loop_closure_requested": args.loop_closure == "true",
         "automatic_detection_requested": args.detection == "true",
+        "manual_loop_request": str(args.inject_loop) if args.inject_loop else None,
         "bag": str(args.bag),
         "bag_metadata_sha256": sha256(args.bag / "metadata.yaml"),
         "config": str(args.config),
@@ -460,6 +479,16 @@ def main() -> int:
             timeout=args.startup_timeout,
         ):
             raise RuntimeError("/map_save did not become available before timeout")
+        if args.inject_loop is not None and not wait_for_service(
+            "/uwfl2_lc/inject_loop",
+            cwd=args.output,
+            env=env,
+            ros_setup=args.ros_setup,
+            workspace_setup=workspace_setup,
+            launch=launch,
+            timeout=args.startup_timeout,
+        ):
+            raise RuntimeError("/uwfl2_lc/inject_loop did not become available")
 
         parameter_result = command_output(
             sourced_command(
@@ -548,6 +577,37 @@ def main() -> int:
         manifest["exit_codes"]["play"] = player_returncode
         if player_returncode != 0:
             raise RuntimeError(f"rosbag playback failed with {player_returncode}")
+
+        if args.inject_loop is not None:
+            time.sleep(2.0)
+            loop_request = read_yaml(args.inject_loop)
+            if not isinstance(loop_request, dict):
+                raise ValueError("manual loop YAML must contain one request mapping")
+            inject_result = command_output(
+                sourced_command(
+                    [
+                        "ros2",
+                        "service",
+                        "call",
+                        "/uwfl2_lc/inject_loop",
+                        "fast_lio/srv/InjectLoop",
+                        json.dumps(loop_request, separators=(",", ":")),
+                    ],
+                    args.ros_setup,
+                    workspace_setup,
+                ),
+                cwd=args.output,
+                env=env,
+                timeout=180.0,
+            )
+            manifest["commands"]["inject_loop"] = inject_result
+            (args.output / "manual_loop_response.txt").write_text(
+                inject_result.get("output", "")
+            )
+            if inject_result.get("returncode") != 0 or "accepted=True" not in inject_result.get(
+                "output", ""
+            ):
+                raise RuntimeError("manual loop service did not accept the constraint")
 
         time.sleep(args.drain_seconds)
         map_save_result = command_output(

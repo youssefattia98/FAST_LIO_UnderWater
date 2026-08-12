@@ -1,0 +1,17 @@
+# The relative transform is T_from_to = inverse(T_local_from) * T_local_to.
+# Covariance is row-major in GTSAM Pose3 tangent order [rotation, translation].
+uint64 from_id
+uint64 to_id
+geometry_msgs/Pose relative_pose
+float64[36] covariance
+bool test_override
+---
+bool accepted
+string reason
+uint64 graph_version
+float64 graph_error_before
+float64 graph_error_after
+float64 loop_translation_error_before
+float64 loop_translation_error_after
+float64 loop_rotation_error_before_deg
+float64 loop_rotation_error_after_deg

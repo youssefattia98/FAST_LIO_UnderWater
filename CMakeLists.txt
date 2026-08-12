@@ -84,10 +84,12 @@ message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
 
 set(msg_files
   "msg/Pose6D.msg"
+  "srv/InjectLoop.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   ${msg_files}
+  DEPENDENCIES geometry_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
 

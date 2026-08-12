@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 
@@ -34,6 +35,8 @@ struct LoopClosureStats
     std::uint64_t failed = 0;
     std::uint64_t dropped = 0;
     std::uint64_t graph_version = 0;
+    std::uint64_t loops_accepted = 0;
+    std::uint64_t loops_rejected = 0;
     double graph_time_ms_sum = 0.0;
     double graph_time_ms_max = 0.0;
 };
@@ -104,12 +107,15 @@ public:
 
     LoopClosureStats stats() const;
     PoseGraphSnapshot graph_snapshot() const;
+    LoopEvaluation inject_loop(const LoopConstraint &constraint);
 
 private:
     void run();
     void write_diagnostic(const Keyframe &keyframe, std::uint64_t version,
                           double graph_time_ms);
     void write_summary() const;
+    void write_loop_diagnostic(const LoopConstraint &constraint,
+                               const LoopEvaluation &evaluation);
 
     LoopClosureConfig config_;
     KeyframeSelector selector_;
@@ -117,11 +123,15 @@ private:
     FullSe3PoseGraph pose_graph_;
     std::thread worker_;
     std::ofstream diagnostics_;
+    std::ofstream loop_diagnostics_;
+    mutable std::mutex diagnostics_mutex_;
     std::uint64_t next_keyframe_id_ = 0;
     std::atomic<std::uint64_t> submitted_{0};
     std::atomic<std::uint64_t> processed_{0};
     std::atomic<std::uint64_t> failed_{0};
     std::atomic<std::uint64_t> graph_version_{0};
+    std::atomic<std::uint64_t> loops_accepted_{0};
+    std::atomic<std::uint64_t> loops_rejected_{0};
     std::atomic<double> graph_time_ms_sum_{0.0};
     std::atomic<double> graph_time_ms_max_{0.0};
 };

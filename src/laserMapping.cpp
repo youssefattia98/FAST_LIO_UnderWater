@@ -59,6 +59,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include "fast_lio/srv/inject_loop.hpp"
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -1119,6 +1120,11 @@ public:
         this->declare_parameter<double>("loop_closure.prior_translation_sigma_m", 1e-4);
         this->declare_parameter<double>("loop_closure.odometry_rotation_variance_floor", 1e-8);
         this->declare_parameter<double>("loop_closure.odometry_translation_variance_floor", 1e-6);
+        this->declare_parameter<int>("loop_closure.loop_minimum_keyframe_separation", 5);
+        this->declare_parameter<double>("loop_closure.loop_maximum_initial_translation_error_m", 10.0);
+        this->declare_parameter<double>("loop_closure.loop_maximum_initial_rotation_error_deg", 45.0);
+        this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_translation_m", 20.0);
+        this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_rotation_deg", 45.0);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1281,6 +1287,9 @@ public:
         double keyframe_rotation_deg = 10.0;
         int keyframe_minimum_points = 20;
         int loop_queue_capacity = 8;
+        int loop_minimum_keyframe_separation = 5;
+        double loop_maximum_initial_rotation_error_deg = 45.0;
+        double loop_maximum_pose_correction_rotation_deg = 45.0;
         string diagnostics_directory;
         this->get_parameter_or<double>("loop_closure.keyframe_translation_m",
                                        loop_config.keyframes.translation_m, 1.0);
@@ -1303,12 +1312,28 @@ public:
                                        loop_config.pose_graph.odometry_rotation_variance_floor, 1e-8);
         this->get_parameter_or<double>("loop_closure.odometry_translation_variance_floor",
                                        loop_config.pose_graph.odometry_translation_variance_floor, 1e-6);
+        this->get_parameter_or<int>("loop_closure.loop_minimum_keyframe_separation",
+                                    loop_minimum_keyframe_separation, 5);
+        this->get_parameter_or<double>("loop_closure.loop_maximum_initial_translation_error_m",
+                                       loop_config.pose_graph.loop_maximum_initial_translation_error_m, 10.0);
+        this->get_parameter_or<double>("loop_closure.loop_maximum_initial_rotation_error_deg",
+                                       loop_maximum_initial_rotation_error_deg, 45.0);
+        this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_translation_m",
+                                       loop_config.pose_graph.loop_maximum_pose_correction_translation_m, 20.0);
+        this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_rotation_deg",
+                                       loop_maximum_pose_correction_rotation_deg, 45.0);
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =
             static_cast<std::size_t>(std::max(1, keyframe_minimum_points));
         loop_config.queue_capacity =
             static_cast<std::size_t>(std::max(1, loop_queue_capacity));
+        loop_config.pose_graph.loop_minimum_keyframe_separation =
+            static_cast<std::size_t>(std::max(1, loop_minimum_keyframe_separation));
+        loop_config.pose_graph.loop_maximum_initial_rotation_error_rad =
+            std::max(0.0, loop_maximum_initial_rotation_error_deg) * PI_M / 180.0;
+        loop_config.pose_graph.loop_maximum_pose_correction_rotation_rad =
+            std::max(0.0, loop_maximum_pose_correction_rotation_deg) * PI_M / 180.0;
         loop_config.diagnostics_directory = diagnostics_directory;
         if (loop_config.enabled)
         {
@@ -1322,6 +1347,7 @@ public:
         sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         lidar_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         processing_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        backend_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         rclcpp::SubscriptionOptions sensor_options;
         sensor_options.callback_group = sensor_callback_group_;
         rclcpp::SubscriptionOptions lidar_options;
@@ -1397,6 +1423,18 @@ public:
                                          processing_callback_group_);
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
+        if (loop_closure_)
+        {
+            raw_graph_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+                "/uwfl2_lc/raw_path", 2);
+            optimized_graph_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+                "/uwfl2_lc/optimized_path", 2);
+            loop_inject_srv_ = this->create_service<fast_lio::srv::InjectLoop>(
+                "/uwfl2_lc/inject_loop",
+                std::bind(&LaserMappingNode::inject_loop_callback, this,
+                          std::placeholders::_1, std::placeholders::_2),
+                rclcpp::ServicesQoS(), backend_callback_group_);
+        }
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
@@ -1637,6 +1675,97 @@ private:
     }
 
 private:
+    static geometry_msgs::msg::Pose pose_message(
+        const uwfl2::loop_closure::Pose3d &pose)
+    {
+        geometry_msgs::msg::Pose message;
+        const auto normalized = pose.normalized();
+        message.position.x = normalized.translation.x();
+        message.position.y = normalized.translation.y();
+        message.position.z = normalized.translation.z();
+        message.orientation.w = normalized.rotation.w();
+        message.orientation.x = normalized.rotation.x();
+        message.orientation.y = normalized.rotation.y();
+        message.orientation.z = normalized.rotation.z();
+        return message;
+    }
+
+    void publish_graph_paths()
+    {
+        if (!loop_closure_ || !raw_graph_path_pub_ || !optimized_graph_path_pub_)
+        {
+            return;
+        }
+        const auto graph = loop_closure_->graph_snapshot();
+        nav_msgs::msg::Path raw_path;
+        nav_msgs::msg::Path optimized_path;
+        raw_path.header.frame_id = "camera_init";
+        optimized_path.header.frame_id = "camera_init";
+        raw_path.header.stamp = this->get_clock()->now();
+        optimized_path.header.stamp = raw_path.header.stamp;
+        raw_path.poses.reserve(graph.raw_poses.size());
+        optimized_path.poses.reserve(graph.optimized_poses.size());
+        for (std::size_t index = 0; index < graph.raw_poses.size(); ++index)
+        {
+            geometry_msgs::msg::PoseStamped raw;
+            geometry_msgs::msg::PoseStamped optimized;
+            raw.header.frame_id = raw_path.header.frame_id;
+            optimized.header.frame_id = optimized_path.header.frame_id;
+            const auto nanoseconds = static_cast<std::int64_t>(
+                std::llround(graph.timestamps[index] * 1e9));
+            raw.header.stamp = rclcpp::Time(nanoseconds, RCL_ROS_TIME);
+            optimized.header.stamp = raw.header.stamp;
+            raw.pose = pose_message(graph.raw_poses[index]);
+            optimized.pose = pose_message(graph.optimized_poses[index]);
+            raw_path.poses.push_back(std::move(raw));
+            optimized_path.poses.push_back(std::move(optimized));
+        }
+        raw_graph_path_pub_->publish(raw_path);
+        optimized_graph_path_pub_->publish(optimized_path);
+    }
+
+    void inject_loop_callback(
+        const std::shared_ptr<fast_lio::srv::InjectLoop::Request> request,
+        std::shared_ptr<fast_lio::srv::InjectLoop::Response> response)
+    {
+        uwfl2::loop_closure::LoopConstraint constraint;
+        constraint.from_id = request->from_id;
+        constraint.to_id = request->to_id;
+        constraint.T_from_to.translation = {
+            request->relative_pose.position.x,
+            request->relative_pose.position.y,
+            request->relative_pose.position.z};
+        constraint.T_from_to.rotation = Eigen::Quaterniond(
+            request->relative_pose.orientation.w,
+            request->relative_pose.orientation.x,
+            request->relative_pose.orientation.y,
+            request->relative_pose.orientation.z);
+        for (int row = 0; row < 6; ++row)
+        {
+            for (int column = 0; column < 6; ++column)
+            {
+                constraint.covariance(row, column) =
+                    request->covariance[static_cast<std::size_t>(row * 6 + column)];
+            }
+        }
+        constraint.test_override = request->test_override;
+        const auto evaluation = loop_closure_->inject_loop(constraint);
+        response->accepted = evaluation.accepted;
+        response->reason = evaluation.reason;
+        response->graph_version = evaluation.graph_version;
+        response->graph_error_before = evaluation.graph_error_before;
+        response->graph_error_after = evaluation.graph_error_after;
+        response->loop_translation_error_before =
+            evaluation.loop_translation_error_before;
+        response->loop_translation_error_after =
+            evaluation.loop_translation_error_after;
+        response->loop_rotation_error_before_deg =
+            evaluation.loop_rotation_error_before_rad * 180.0 / PI_M;
+        response->loop_rotation_error_after_deg =
+            evaluation.loop_rotation_error_after_rad * 180.0 / PI_M;
+        publish_graph_paths();
+    }
+
     void submit_loop_keyframe(double timestamp)
     {
         if (!loop_closure_ || !feats_down_body)
@@ -1665,6 +1794,8 @@ private:
     std::unique_ptr<uwfl2::loop_closure::LoopClosureManager> loop_closure_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
@@ -1674,6 +1805,8 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::CallbackGroup::SharedPtr backend_callback_group_;
+    rclcpp::Service<fast_lio::srv::InjectLoop>::SharedPtr loop_inject_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
