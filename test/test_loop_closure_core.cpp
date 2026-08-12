@@ -393,3 +393,79 @@ TEST(ShadowMap, EnforcesInputPointBudget)
     EXPECT_EQ(result.reason, "Shadow-map input point budget exceeded");
     EXPECT_FALSE(result.tree);
 }
+
+TEST(LatestScanRegistration, RecoversIndependentAndCombinedFullSe3Errors)
+{
+    lc::ShadowPointVector map_points;
+    auto add_point = [&](double x, double y, double z) {
+        lc::ShadowPoint point;
+        point.x = static_cast<float>(x);
+        point.y = static_cast<float>(y);
+        point.z = static_cast<float>(z);
+        map_points.push_back(point);
+    };
+    for (double first = -1.5; first <= 1.5; first += 0.15)
+    {
+        for (double second = -1.5; second <= 1.5; second += 0.15)
+        {
+            add_point(-2.0, first, second);
+            add_point(2.0, first, second);
+            add_point(first, -2.0, second);
+            add_point(first, 2.0, second);
+            add_point(first, second, -2.0);
+            add_point(first, second, 2.0);
+        }
+    }
+    lc::ShadowMapResult shadow;
+    shadow.valid = true;
+    shadow.graph_version = 1;
+    shadow.shadow_tree_generation = 1;
+    shadow.tree = std::make_shared<lc::ShadowTree>();
+    shadow.tree->Build(map_points);
+
+    auto scan_points = std::make_shared<std::vector<lc::PointXYZI>>();
+    scan_points->reserve(map_points.size());
+    for (const auto &point : map_points)
+    {
+        scan_points->push_back({point.x, point.y, point.z, 0.0F});
+    }
+    lc::PoseGraphSnapshot graph;
+    graph.version = 1;
+    graph.raw_poses = {lc::Pose3d{}};
+    graph.optimized_poses = {lc::Pose3d{}};
+    lc::RegistrationConfig config;
+    config.minimum_effective_points = 100;
+    config.maximum_neighbor_distance_m = 1.0;
+    config.plane_fit_threshold_m = 0.03;
+    config.maximum_registration_translation_m = 1.0;
+    config.maximum_registration_rotation_rad = 0.5;
+    lc::LatestScanRegistrar registrar(config);
+
+    const std::vector<lc::Pose3d> perturbations = {
+        pose({0.12, 0.0, 0.0}, Eigen::Vector3d::UnitX(), 0.0),
+        pose({0.0, -0.12, 0.0}, Eigen::Vector3d::UnitY(), 0.0),
+        pose({0.0, 0.0, 0.12}, Eigen::Vector3d::UnitZ(), 0.0),
+        pose(Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitX(), 0.05),
+        pose(Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitY(), -0.05),
+        pose(Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitZ(), 0.05),
+        pose({0.08, -0.06, 0.1}, Eigen::Vector3d(1.0, -0.5, 0.8), 0.06),
+    };
+    for (std::size_t index = 0; index < perturbations.size(); ++index)
+    {
+        lc::LatestScanSnapshot scan;
+        scan.timestamp = 1.0;
+        scan.scan_generation = index + 1;
+        scan.T_local_vehicle_raw = perturbations[index];
+        scan.sonar_points = scan_points;
+        const lc::RegistrationResult result =
+            registrar.register_scan(scan, graph, shadow);
+        ASSERT_TRUE(result.valid) << index << ": " << result.reason;
+        EXPECT_LT(result.T_local_vehicle_registered.translation.norm(), 2e-3);
+        EXPECT_LT(result.T_local_vehicle_registered.rotation.angularDistance(
+                      Eigen::Quaterniond::Identity()),
+                  2e-3);
+        EXPECT_LE(result.final_residual_mean_m,
+                  result.initial_residual_mean_m + 1e-9);
+        EXPECT_TRUE(lc::covariance_is_valid(result.covariance));
+    }
+}

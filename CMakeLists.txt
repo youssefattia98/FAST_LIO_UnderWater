@@ -103,6 +103,7 @@ target_link_libraries(uwfl2_ikdtree PUBLIC ${PCL_LIBRARIES})
 
 add_library(uwfl2_loop_closure
   src/loop_closure/loop_closure_manager.cpp
+  src/loop_closure/latest_scan_registration.cpp
   src/loop_closure/pose_graph.cpp
   src/loop_closure/shadow_map.cpp
 )

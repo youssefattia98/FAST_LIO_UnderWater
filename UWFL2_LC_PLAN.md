@@ -426,18 +426,18 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
 - Results: The ROS replay rebuilt one ready shadow tree from 13 keyframes and 10,964 input points into 3,346 deterministic map points, with zero failed/stale builds. Active-tree odometry, timestamps, and saved-map hash remained exactly identical to Checkpoint 2. Unit tests cover identity/arbitrary full-SE(3) transforms, radius/index behavior, voxel determinism, ikd-tree queries, graph-generation rejection, and point-budget enforcement.
 - Blockers: None.
 - Timing: Reconstruction 0.77 ms, downsampling 0.87 ms, ikd-tree build 29.94 ms, total 31.57 ms; estimated ikd-tree node memory 0.59 MB for this smoke window.
-- Commit: pending, message `feat: rebuild corrected map in a shadow ikd-tree`
+- Commit: `5344d4b` (`feat: rebuild corrected map in a shadow ikd-tree`)
 
 ## Checkpoint 4: Latest-Scan Re-Registration
 
 ### Work
 
-- [ ] Snapshot the latest processed scan and raw pose without blocking sensor callbacks.
-- [ ] Propagate the delayed graph correction from its anchor to the scan timestamp.
-- [ ] Register that scan to the shadow tree in full SE(3), initialized by the graph correction.
-- [ ] Require improved point-to-plane residual, enough effective points, convergence, and a finite covariance.
-- [ ] Reject poor registration without changing state/tree.
-- [ ] Test x/y/z translation and roll/pitch/yaw perturbations independently and together.
+- [x] Snapshot the latest processed scan and raw pose without blocking sensor callbacks.
+- [x] Propagate the delayed graph correction from its anchor to the scan timestamp.
+- [x] Register that scan to the shadow tree in full SE(3), initialized by the graph correction.
+- [x] Require improved point-to-plane residual, enough effective points, convergence, and a finite covariance.
+- [x] Reject poor registration without changing state/tree.
+- [x] Test x/y/z translation and roll/pitch/yaw perturbations independently and together.
 
 ### Commands
 
@@ -459,12 +459,12 @@ python3 "$UWFL2_SRC/tools/check_reregistration.py" \
 
 ### Log
 
-- Decisions: TODO
-- Commands run: TODO
-- Results: TODO
-- Blockers: TODO
-- Timing: registration p50/p95/max, queue age, scan latency.
-- Commit: TODO, suggested message `feat: reregister latest scan against corrected map`
+- Decisions: Use UWFL2's additive-position/right-SO(3) perturbation and a six-dimensional point-to-plane solve; reject rank-deficient geometry; propagate delayed correction by left-composing the latest raw pose with the optimized/raw anchor transform. Mean robust residual is the acceptance cost; p95 remains diagnostic because correspondence changes can move it by sub-millimeter amounts.
+- Commands run: isolated build and 16-test suite; 60 s x5 `sim3` replay with manual loop; registration diagnostic check.
+- Results: Synthetic x/y/z and roll/pitch/yaw errors, separately and combined, converge in full SE(3) with finite PSD covariance. ROS smoke used 889/890 effective points and reduced mean residual from 0.02538 to 0.02524 m; no state or active-tree change occurs yet.
+- Blockers: None.
+- Timing: ROS registration 7.69 ms for five iterations.
+- Commit: pending, message `feat: reregister latest scan against corrected map`
 
 ## Checkpoint 5: Atomic State, Covariance, And Tree Swap
 

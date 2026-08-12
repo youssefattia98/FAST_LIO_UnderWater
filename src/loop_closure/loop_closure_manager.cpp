@@ -12,7 +12,8 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
       selector_(config_.keyframes),
       queue_(config_.queue_capacity),
       pose_graph_(config_.pose_graph),
-      shadow_map_builder_(config_.shadow_map)
+      shadow_map_builder_(config_.shadow_map),
+      registrar_(config_.registration)
 {
     if (!config_.enabled)
     {
@@ -35,6 +36,13 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
             << "graph_version,source_tree_generation,status,reason,selected_keyframes,"
                "input_points,filtered_points,reconstruction_time_ms,downsample_time_ms,"
                "tree_build_time_ms,estimated_tree_bytes\n";
+        registration_diagnostics_.open(
+            config_.diagnostics_directory / "reregistrations.csv");
+        registration_diagnostics_
+            << "graph_version,shadow_tree_generation,scan_generation,scan_timestamp,"
+               "valid,converged,reason,initial_effective,final_effective,"
+               "initial_mean_m,initial_p95_m,final_mean_m,final_p95_m,"
+               "information_min_eigenvalue,information_condition,iterations,time_ms\n";
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
     shadow_worker_ = std::thread(&LoopClosureManager::run_shadow_builder, this);
@@ -115,12 +123,46 @@ void LoopClosureManager::run_shadow_builder()
             write_summary();
             continue;
         }
+        const auto scan = std::atomic_load_explicit(
+            &latest_scan_, std::memory_order_acquire);
+        if (!scan)
+        {
+            ++registrations_rejected_;
+            result.reason = "latest_scan_unavailable";
+            write_shadow_diagnostic(result, "registration_rejected");
+            write_summary();
+            continue;
+        }
+        RegistrationResult registration =
+            registrar_.register_scan(*scan, request->graph, result);
+        double sum_registration = registration_time_ms_sum_.load();
+        while (!registration_time_ms_sum_.compare_exchange_weak(
+            sum_registration, sum_registration + registration.registration_time_ms))
+        {
+        }
+        double max_registration = registration_time_ms_max_.load();
+        while (max_registration < registration.registration_time_ms &&
+               !registration_time_ms_max_.compare_exchange_weak(
+                   max_registration, registration.registration_time_ms))
+        {
+        }
+        write_registration_diagnostic(registration);
+        if (!registration.valid)
+        {
+            ++registrations_rejected_;
+            write_shadow_diagnostic(result, "registration_rejected");
+            write_summary();
+            continue;
+        }
         {
             std::lock_guard<std::mutex> lock(shadow_result_mutex_);
             latest_shadow_map_ =
                 std::make_shared<const ShadowMapResult>(std::move(result));
+            latest_registration_ =
+                std::make_shared<const RegistrationResult>(std::move(registration));
         }
         ++shadow_builds_ready_;
+        ++registrations_ready_;
         write_shadow_diagnostic(*shadow_map_snapshot(), "ready");
         write_summary();
     }
@@ -211,6 +253,10 @@ void LoopClosureManager::write_summary() const
             << "  \"shadow_builds_stale\": " << final_stats.shadow_builds_stale << ",\n"
             << "  \"shadow_build_time_ms_sum\": " << final_stats.shadow_build_time_ms_sum << ",\n"
             << "  \"shadow_build_time_ms_max\": " << final_stats.shadow_build_time_ms_max << ",\n"
+            << "  \"registrations_ready\": " << final_stats.registrations_ready << ",\n"
+            << "  \"registrations_rejected\": " << final_stats.registrations_rejected << ",\n"
+            << "  \"registration_time_ms_sum\": " << final_stats.registration_time_ms_sum << ",\n"
+            << "  \"registration_time_ms_max\": " << final_stats.registration_time_ms_max << ",\n"
             << "  \"graph_time_ms_sum\": " << final_stats.graph_time_ms_sum
             << ",\n"
             << "  \"graph_time_ms_max\": " << final_stats.graph_time_ms_max
@@ -224,6 +270,34 @@ void LoopClosureManager::write_summary() const
         error.clear();
         std::filesystem::rename(temporary, output, error);
     }
+}
+
+void LoopClosureManager::write_registration_diagnostic(
+    const RegistrationResult &result)
+{
+    if (!registration_diagnostics_)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    registration_diagnostics_ << result.graph_version << ','
+                              << result.shadow_tree_generation << ','
+                              << result.scan_generation << ','
+                              << std::setprecision(17) << result.scan_timestamp << ','
+                              << (result.valid ? 1 : 0) << ','
+                              << (result.converged ? 1 : 0) << ','
+                              << std::quoted(result.reason) << ','
+                              << result.initial_effective_points << ','
+                              << result.final_effective_points << ','
+                              << result.initial_residual_mean_m << ','
+                              << result.initial_residual_p95_m << ','
+                              << result.final_residual_mean_m << ','
+                              << result.final_residual_p95_m << ','
+                              << result.information_min_eigenvalue << ','
+                              << result.information_condition << ','
+                              << result.iterations << ','
+                              << result.registration_time_ms << '\n';
+    registration_diagnostics_.flush();
 }
 
 void LoopClosureManager::write_shadow_diagnostic(
@@ -286,6 +360,10 @@ LoopClosureStats LoopClosureManager::stats() const
     result.shadow_builds_stale = shadow_builds_stale_.load();
     result.shadow_build_time_ms_sum = shadow_build_time_ms_sum_.load();
     result.shadow_build_time_ms_max = shadow_build_time_ms_max_.load();
+    result.registrations_ready = registrations_ready_.load();
+    result.registrations_rejected = registrations_rejected_.load();
+    result.registration_time_ms_sum = registration_time_ms_sum_.load();
+    result.registration_time_ms_max = registration_time_ms_max_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
     result.graph_time_ms_max = graph_time_ms_max_.load();
     return result;
@@ -295,6 +373,13 @@ std::shared_ptr<const ShadowMapResult> LoopClosureManager::shadow_map_snapshot()
 {
     std::lock_guard<std::mutex> lock(shadow_result_mutex_);
     return latest_shadow_map_;
+}
+
+std::shared_ptr<const RegistrationResult>
+LoopClosureManager::registration_snapshot() const
+{
+    std::lock_guard<std::mutex> lock(shadow_result_mutex_);
+    return latest_registration_;
 }
 
 PoseGraphSnapshot LoopClosureManager::graph_snapshot() const

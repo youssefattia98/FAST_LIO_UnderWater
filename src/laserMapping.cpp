@@ -1128,6 +1128,12 @@ public:
         this->declare_parameter<double>("loop_closure.corrected_map_radius_m", 80.0);
         this->declare_parameter<int>("loop_closure.corrected_map_maximum_keyframes", 1000);
         this->declare_parameter<int>("loop_closure.corrected_map_maximum_input_points", 3000000);
+        this->declare_parameter<int>("loop_closure.registration_maximum_iterations", 12);
+        this->declare_parameter<int>("loop_closure.registration_minimum_effective_points", 30);
+        this->declare_parameter<double>("loop_closure.registration_maximum_neighbor_distance_m", 2.25);
+        this->declare_parameter<double>("loop_closure.registration_plane_threshold_m", 0.12);
+        this->declare_parameter<double>("loop_closure.registration_maximum_translation_m", 2.0);
+        this->declare_parameter<double>("loop_closure.registration_maximum_rotation_deg", 15.0);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1295,6 +1301,9 @@ public:
         double loop_maximum_pose_correction_rotation_deg = 45.0;
         int corrected_map_maximum_keyframes = 1000;
         int corrected_map_maximum_input_points = 3000000;
+        int registration_maximum_iterations = 12;
+        int registration_minimum_effective_points = 30;
+        double registration_maximum_rotation_deg = 15.0;
         string diagnostics_directory;
         this->get_parameter_or<double>("loop_closure.keyframe_translation_m",
                                        loop_config.keyframes.translation_m, 1.0);
@@ -1333,6 +1342,18 @@ public:
                                     corrected_map_maximum_keyframes, 1000);
         this->get_parameter_or<int>("loop_closure.corrected_map_maximum_input_points",
                                     corrected_map_maximum_input_points, 3000000);
+        this->get_parameter_or<int>("loop_closure.registration_maximum_iterations",
+                                    registration_maximum_iterations, 12);
+        this->get_parameter_or<int>("loop_closure.registration_minimum_effective_points",
+                                    registration_minimum_effective_points, 30);
+        this->get_parameter_or<double>("loop_closure.registration_maximum_neighbor_distance_m",
+                                       loop_config.registration.maximum_neighbor_distance_m, 2.25);
+        this->get_parameter_or<double>("loop_closure.registration_plane_threshold_m",
+                                       loop_config.registration.plane_fit_threshold_m, 0.12);
+        this->get_parameter_or<double>("loop_closure.registration_maximum_translation_m",
+                                       loop_config.registration.maximum_registration_translation_m, 2.0);
+        this->get_parameter_or<double>("loop_closure.registration_maximum_rotation_deg",
+                                       registration_maximum_rotation_deg, 15.0);
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =
@@ -1350,6 +1371,12 @@ public:
             std::max(1, corrected_map_maximum_keyframes));
         loop_config.shadow_map.maximum_input_points = static_cast<std::size_t>(
             std::max(1, corrected_map_maximum_input_points));
+        loop_config.registration.maximum_iterations =
+            std::max(1, registration_maximum_iterations);
+        loop_config.registration.minimum_effective_points = static_cast<std::size_t>(
+            std::max(6, registration_minimum_effective_points));
+        loop_config.registration.maximum_registration_rotation_rad =
+            std::max(0.0, registration_maximum_rotation_deg) * PI_M / 180.0;
         loop_config.diagnostics_directory = diagnostics_directory;
         if (loop_config.enabled)
         {
@@ -1813,6 +1840,10 @@ private:
 
         const auto pose_covariance =
             uwfl2::loop_closure::extract_graph_pose_covariance(kf.get_P());
+        ++latest_scan_generation_;
+        loop_closure_->notify_latest_scan(
+            timestamp, latest_scan_generation_, active_tree_generation_,
+            T_local_vehicle, T_vehicle_sonar, feats_down_body->points);
         loop_closure_->try_submit(timestamp, T_local_vehicle, pose_covariance,
                                   T_vehicle_sonar, feats_down_body->points,
                                   active_tree_generation_);
@@ -1840,6 +1871,7 @@ private:
     bool effect_pub_en = false, map_pub_en = false;
     bool aux_timeline_started_ = false;
     std::uint64_t active_tree_generation_ = 0;
+    std::uint64_t latest_scan_generation_ = 0;
     int effect_feat_num = 0;
     double deltaT, deltaR;
     bool flg_EKF_converged, EKF_stop_flg = 0;
