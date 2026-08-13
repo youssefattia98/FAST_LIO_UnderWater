@@ -739,6 +739,22 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   `default.yaml` was restored to `1.0e-6`; loop thresholds were not weakened to
   compensate for the changed front-end trajectory. Artifacts are retained in
   `UWFL2_LC_RESULTS/zigzag_default_verify_x5`.
+- Zigzag magnetic-weighting retune: the preferred real-map settings are
+  `mag_cov=1.0` and `heading_cov_floor=1.0`. With these settings, sparse 5 s
+  return keyframes provide consecutive 0.64--0.80 overlap but their independent
+  full-SE(3) corrections exceed the former hard-coded 1 m/10 deg confirmation
+  window. The confirmation translation/rotation limits are now exposed with
+  unchanged defaults; this bag uses 2 m/20 deg, 0.60 minimum overlap, two
+  confirmations, a 300 s minimum duration, and 24 registration iterations.
+- Validation: build and 25/25 tests passed. The x5 replay accepted four
+  geometrically supported return constraints (`0--104`, `7--106`, `0--109`,
+  `8--112`) and committed all four corrected state/tree transactions. It
+  processed 118/118 keyframes with zero backend drops. Each registration
+  reduced or preserved its point-to-plane residual. Artifacts are retained in
+  `UWFL2_LC_RESULTS/zigzag_mag1_final_confirmation20_x5`; map saving alone
+  reports disabled because `pcd_save_en` is false. Full x1 RViz map validation
+  remains pending.
+- Commit: `435f128` exposes and tests the full-SE(3) confirmation tolerances.
 
 ## Stop Conditions
 
