@@ -2163,7 +2163,7 @@ private:
         };
         auto raw_points = marker(1, visualization_msgs::msg::Marker::SPHERE_LIST,
                                  "raw_keyframes");
-        raw_points.scale.x = raw_points.scale.y = raw_points.scale.z = 0.16;
+        raw_points.scale.x = raw_points.scale.y = raw_points.scale.z = 0.45;
         raw_points.color.r = 1.0F;
         raw_points.color.g = 0.55F;
         raw_points.color.a = 0.7F;
@@ -2171,7 +2171,7 @@ private:
             2, visualization_msgs::msg::Marker::SPHERE_LIST,
             "optimized_keyframes");
         optimized_points.scale.x = optimized_points.scale.y =
-            optimized_points.scale.z = 0.20;
+            optimized_points.scale.z = 0.55;
         optimized_points.color.g = 1.0F;
         optimized_points.color.b = 0.25F;
         optimized_points.color.a = 0.9F;
@@ -2197,8 +2197,8 @@ private:
                                "rejected_loops");
         auto accepted = marker(5, visualization_msgs::msg::Marker::LINE_LIST,
                                "accepted_loops");
-        proposed.scale.x = rejected.scale.x = 0.035;
-        accepted.scale.x = 0.10;
+        proposed.scale.x = rejected.scale.x = 0.12;
+        accepted.scale.x = 0.24;
         proposed.color.r = proposed.color.g = 1.0F;
         proposed.color.a = 0.8F;
         rejected.color.r = 1.0F;
@@ -2241,9 +2241,9 @@ private:
         {
             auto correction = marker(6, visualization_msgs::msg::Marker::ARROW,
                                      "state_correction");
-            correction.scale.x = 0.05;
-            correction.scale.y = 0.12;
-            correction.scale.z = 0.16;
+            correction.scale.x = 0.18;
+            correction.scale.y = 0.42;
+            correction.scale.z = 0.50;
             correction.color.r = 0.75F;
             correction.color.b = 1.0F;
             correction.color.a = 1.0F;
@@ -2261,7 +2261,7 @@ private:
 
         auto status = marker(7, visualization_msgs::msg::Marker::TEXT_VIEW_FACING,
                              "loop_status");
-        status.scale.z = 0.7;
+        status.scale.z = 1.2;
         status.color.r = status.color.g = status.color.b = status.color.a = 1.0F;
         if (!graph.optimized_poses.empty())
         {
