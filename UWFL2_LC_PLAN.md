@@ -709,6 +709,26 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration300_x5`,
   and
   `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration300_x1`.
+- Zigzag real-bag tuning: the untuned x5 diagnostic proposed 13 candidates but
+  graph-rejected all three confirmed constraints. The final `10--114` and
+  `10--115` matches had 0.851/0.887 overlap and 25/23 RANSAC inliers, but NIS
+  2993.5/2721.7 because the front-end covariance did not represent the roughly
+  3.86 m accumulated return drift. The earlier `2--98` candidate had only 0.482
+  overlap. Bag-specific settings now require 0.80 overlap, two confirmations,
+  a 0.95 single-detection threshold, NIS below 4000, and 24 registration
+  iterations. The controlled x5 replay accepted only `10--114`; registration
+  reduced mean residual from 0.0505 m to 0.0465 m and one atomic correction
+  committed with zero backend drops. The 12-iteration trial accepted the graph
+  factor but safely rejected commit after reaching its iteration limit.
+- Zigzag commands/results: diagnostics used `run_lc_benchmark.py` with bag
+  `/home/attia/ros2_ws/bags/DONE/zigzagwall_processed5`, config
+  `config/zigzagwall_processed5.yaml`, domains 102--104, and rate 5.0. Results
+  are retained under `UWFL2_LC_RESULTS/zigzag_lc_diagnostic_x5`,
+  `zigzag_lc_final_return_x5`, and `zigzag_lc_final_return_reg24_x5`.
+  The benchmark reports failure only because this config intentionally has PCD
+  saving disabled; launch, replay, recording, detection, graph optimization,
+  re-registration, and commit completed. Full x1 visual map validation remains
+  pending because this real bag has no ground truth.
 
 ## Stop Conditions
 
