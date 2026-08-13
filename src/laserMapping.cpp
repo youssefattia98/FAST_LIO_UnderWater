@@ -1171,6 +1171,10 @@ public:
             "loop_closure.std_single_detection_overlap_minimum", 0.80);
         this->declare_parameter<double>(
             "loop_closure.std_accepted_loop_cooldown_s", 0.0);
+        this->declare_parameter<double>(
+            "loop_closure.std_confirmation_translation_m", 1.0);
+        this->declare_parameter<double>(
+            "loop_closure.std_confirmation_rotation_deg", 10.0);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1422,6 +1426,15 @@ public:
         this->get_parameter_or<double>(
             "loop_closure.std_accepted_loop_cooldown_s",
             loop_config.std_detection.accepted_loop_cooldown_s, 0.0);
+        this->get_parameter_or<double>(
+            "loop_closure.std_confirmation_translation_m",
+            loop_config.std_detection.confirmation_translation_m, 1.0);
+        double std_confirmation_rotation_deg = 10.0;
+        this->get_parameter_or<double>(
+            "loop_closure.std_confirmation_rotation_deg",
+            std_confirmation_rotation_deg, 10.0);
+        loop_config.std_detection.confirmation_rotation_rad =
+            std::max(0.0, std_confirmation_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =
