@@ -1483,7 +1483,8 @@ public:
                 benchmark_diagnostics_directory_ / "front_end_timing.csv");
             front_end_timing_
                 << "scan_timestamp,status,elapsed_ms,effective_features,"
-                   "input_points,map_points\n";
+                   "input_points,map_points,sonar_dx_roll_deg,"
+                   "sonar_dx_pitch_deg,sonar_dx_yaw_deg\n";
         }
         if (loop_config.enabled)
         {
@@ -1622,12 +1623,14 @@ private:
         if(has_measurement)
         {
             const double scan_processing_started = omp_get_wtime();
+            V3D sonar_attitude_correction = V3D::Zero();
             const auto finish_scan_timing = [&](const char *status) {
                 if (!imu_only_measure)
                 {
                     write_front_end_timing(
                         Measures.lidar_end_time, status,
-                        1000.0 * (omp_get_wtime() - scan_processing_started));
+                        1000.0 * (omp_get_wtime() - scan_processing_started),
+                        sonar_attitude_correction);
                 }
             };
             if (flg_first_scan)
@@ -1824,9 +1827,14 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            const M3D rotation_before_sonar = kf.get_x().rot.toRotationMatrix();
             const double lidar_update_cov =
                 auxiliary_fusion_enabled ? 1.0 : LASER_POINT_COV_XY;
             kf.update_iterated_dyn_share_modified(lidar_update_cov, solve_H_time);
+            const M3D sonar_rotation_delta =
+                rotation_before_sonar.transpose() *
+                kf.get_x().rot.toRotationMatrix();
+            sonar_attitude_correction = Log(sonar_rotation_delta);
             update_state_outputs();
 
             double t_update_end = omp_get_wtime();
@@ -1854,7 +1862,8 @@ private:
     }
 
     void write_front_end_timing(double timestamp, const char *status,
-                                double elapsed_ms)
+                                double elapsed_ms,
+                                const V3D &sonar_attitude_correction)
     {
         if (!front_end_timing_)
         {
@@ -1864,7 +1873,10 @@ private:
         front_end_timing_ << std::setprecision(17) << timestamp << ',' << status
                           << ',' << elapsed_ms << ',' << effect_feat_num << ','
                           << feats_down_size << ','
-                          << (ikdtree ? ikdtree->validnum() : 0) << '\n';
+                          << (ikdtree ? ikdtree->validnum() : 0) << ','
+                          << sonar_attitude_correction.x() * 180.0 / M_PI << ','
+                          << sonar_attitude_correction.y() * 180.0 / M_PI << ','
+                          << sonar_attitude_correction.z() * 180.0 / M_PI << '\n';
         front_end_timing_.flush();
         ++timed_scans_;
     }

@@ -1139,6 +1139,20 @@ private:
             reset_mag_reference_locked();
         }
         last_timestamp_mag_ = timestamp;
+
+        // Some drivers republish one hardware reading at the IMU rate with a
+        // fresh ROS timestamp. Treat an identical field vector as the same
+        // magnetic sample so it cannot initialize or update the filter twice.
+        const V3D raw(msg->magnetic_field.x,
+                      msg->magnetic_field.y,
+                      msg->magnetic_field.z);
+        if (last_mag_raw_valid_ &&
+            (raw.array() == last_mag_raw_.array()).all())
+        {
+            return;
+        }
+        last_mag_raw_ = raw;
+        last_mag_raw_valid_ = true;
         mag_buffer_.push_back(msg);
     }
 
@@ -1165,6 +1179,8 @@ private:
         mag_reference_local_.setZero();
         mag_horizontal_reference_local_.setZero();
         mag_reference_heading_variance_ = 0.0;
+        last_mag_raw_.setZero();
+        last_mag_raw_valid_ = false;
     }
 
     bool mag_reference_is_ready() const
@@ -1536,6 +1552,8 @@ private:
     std::vector<V3D> mag_reference_samples_local_;
     int mag_reference_sample_count_ = 0;
     bool mag_reference_ready_ = false;
+    V3D last_mag_raw_ = V3D::Zero();
+    bool last_mag_raw_valid_ = false;
     // Fixed when reference collection starts; magnetometer updates rotate only about this axis.
     V3D mag_vertical_local_ = V3D::UnitZ();
     V3D mag_reference_local_ = V3D::Zero();

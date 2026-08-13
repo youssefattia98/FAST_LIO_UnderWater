@@ -755,6 +755,20 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   reports disabled because `pcd_save_en` is false. Full x1 RViz map validation
   remains pending.
 - Commit: `435f128` exposes and tests the full-SE(3) confirmation tolerances.
+- LC-off front-end heading investigation: the real zigzag bag republishes each
+  physical magnetic reading with fresh ROS timestamps. Of 81,625 messages,
+  only 4,893 field vectors were distinct (about 10 Hz); 94% were identical
+  copies. Fusing every copy built the 20-sample startup reference in 0.22 s and
+  accumulated a 0.212 deg/s heading-axis gyro-bias correction. Identical field
+  vectors are now accepted once, as required by the scalar-heading model.
+- Validation: the first diagnostic build failed on an Eigen expression passed
+  to `Log`; materializing the rotation matrix fixed it. The subsequent build,
+  2/2 tests, and complete x5 LC-disabled replay passed. Accepted magnetic
+  updates fell from 81,522 to 4,855, reference initialization took 1.98 s, and
+  net gyro-bias correction fell to -0.0063 deg/s. Sonar yaw correction remained
+  0.0142 deg/scan mean absolute, confirming the ikd-tree/sonar path was not
+  changed. Results are in `UWFL2_LC_RESULTS/zigzag_frontend_heading_mag_on_lc_off`
+  and `zigzag_frontend_heading_dedup_lc_off_v2`. Visual map validation is pending.
 
 ## Stop Conditions
 
