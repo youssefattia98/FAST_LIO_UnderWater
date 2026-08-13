@@ -786,6 +786,15 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   to 0.94 m. Combining it with `heading_cov_floor=0.005 rad^2` reduced mean/p95
   heading disagreement to 4.10/8.43 deg and return-wall disagreement near 360 s
   from 4.49 deg to 0.79 deg. These YAML values remain pending visual validation.
+- Visual review of `dvl.velocity_cov=0.0025` and
+  `magnetometer.heading_cov_floor=0.005` found consistent seabed, smooth turns,
+  and wall-heading error below 2 deg, but with a small clockwise over-correction
+  near 75% of the route. The next isolated visual candidate weakens only the
+  magnetic update to `heading_cov_floor=0.01`.
+- The `0.01` replay remained smooth and improved positional closure from 1.05 m
+  to 0.88 m. The recorded `World -> base_link` odometry does not agree closely
+  enough with mapped-wall geometry around 75% to select between `0.005` and
+  `0.01`; the final magnetic floor therefore requires visual wall validation.
 
 ## Stop Conditions
 
