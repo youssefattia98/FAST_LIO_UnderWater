@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(fast_lio)
 
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -77,7 +79,7 @@ set(dependencies
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io kdtree)
-find_package(GTSAM 4.2 REQUIRED)
+find_package(GTSAM 4.2 REQUIRED MODULE)
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
