@@ -679,6 +679,36 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   drops. Final ATE improved from 0.0807 m to 0.0483 m. ATE RMSE changed from
   0.0700 m to 0.0747 m and maximum from 0.1559 m to 0.1982 m, so final closure
   improved endpoint consistency but not every whole-trajectory metric.
+- Premature-loop tuning: a 120 s minimum revisit interval was rejected because
+  it accepted the mid-route `198--331` loop and duplicate final loops `1--355`
+  and `1--356` (x5 ATE RMSE/max/final: 0.07413/0.15591/0.09293 m). The detector
+  now exposes `std_minimum_loop_duration_s` and
+  `std_accepted_loop_cooldown_s`; both default to the behavior-preserving 0 s.
+  For sim3, 300 s and 30 s respectively suppress the undesired
+  mid-route and duplicate closures while retaining the final return.
+- Commands: `colcon build --packages-select fast_lio --symlink-install` and
+  `colcon test --packages-select fast_lio`. Replays used
+  `python3 tools/run_lc_benchmark.py --label sim3_final_only_duration300_x5
+  --domain-id 98 --rate 5.0 --bag /home/attia/ros2_ws/bags/DONE/sim3
+  --config config/default.yaml --loop-closure true --detection true --output
+  /home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration300_x5`
+  and `python3 tools/run_lc_benchmark.py --label
+  sim3_final_only_duration300_x1 --domain-id 99 --rate 1.0 --bag
+  /home/attia/ros2_ws/bags/DONE/sim3 --config config/default.yaml
+  --loop-closure true --detection true --output
+  /home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration300_x1`.
+- Results: build and 24/24 tests passed. Both x5 and x1 runs processed 358/358
+  keyframes with zero drops and accepted only `1--355`. Against the no-loop
+  baseline RMSE/max/final of 0.06996/0.15591/0.08066 m, x5 produced
+  0.06944/0.15591/0.02298 m and x1 produced
+  0.06951/0.15591/0.03770 m. The x1 correction committed in 0.663 ms; graph,
+  shadow rebuild, and registration maxima were 6.04, 66.26, and 24.18 ms.
+- Commit: `8af25ac` (`fix: defer loop closure to survey return`).
+- Result directories:
+  `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration120_x5`,
+  `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration300_x5`,
+  and
+  `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim3_final_only_duration300_x1`.
 
 ## Stop Conditions
 
