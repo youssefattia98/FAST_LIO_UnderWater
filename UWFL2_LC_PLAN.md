@@ -729,6 +729,8 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   saving disabled; launch, replay, recording, detection, graph optimization,
   re-registration, and commit completed. Full x1 visual map validation remains
   pending because this real bag has no ground truth.
+- Commit: `cf5b722` records the zigzag tuning evidence. The active YAML remains
+  in the user's existing uncommitted config worktree for visual x1 validation.
 
 ## Stop Conditions
 
