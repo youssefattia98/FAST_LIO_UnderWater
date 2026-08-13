@@ -220,9 +220,9 @@ RegistrationResult LatestScanRegistrar::register_scan(
     {
         return reject("invalid_registration_input");
     }
-    if (shadow_map.graph_version != graph.version)
+    if (!shadow_result_matches_graph(shadow_map, graph))
     {
-        return reject("stale_shadow_graph_version");
+        return reject("stale_shadow_graph");
     }
 
     const Pose3d delayed_correction = compose(

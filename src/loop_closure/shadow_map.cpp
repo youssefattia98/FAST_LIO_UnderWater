@@ -273,6 +273,7 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
 {
     ShadowMapResult result;
     result.graph_version = request.graph.version;
+    result.graph_loop_factor_count = request.graph.loop_factor_count;
     result.source_tree_generation = request.source_tree_generation;
     result.shadow_tree_generation = request.graph.version;
     try
@@ -309,6 +310,13 @@ bool shadow_result_matches_graph_version(const ShadowMapResult &result,
                                          std::uint64_t graph_version)
 {
     return result.valid && result.graph_version == graph_version;
+}
+
+bool shadow_result_matches_graph(const ShadowMapResult &result,
+                                 const PoseGraphSnapshot &graph)
+{
+    return result.valid && result.graph_version <= graph.version &&
+           result.graph_loop_factor_count == graph.loop_factor_count;
 }
 
 }  // namespace uwfl2::loop_closure

@@ -36,6 +36,7 @@ struct ShadowMapRequest
 struct ShadowMapResult
 {
     std::uint64_t graph_version = 0;
+    std::size_t graph_loop_factor_count = 0;
     std::uint64_t source_tree_generation = 0;
     std::uint64_t shadow_tree_generation = 0;
     std::size_t selected_keyframes = 0;
@@ -71,5 +72,7 @@ private:
 
 bool shadow_result_matches_graph_version(const ShadowMapResult &result,
                                          std::uint64_t graph_version);
+bool shadow_result_matches_graph(const ShadowMapResult &result,
+                                 const PoseGraphSnapshot &graph);
 
 }  // namespace uwfl2::loop_closure

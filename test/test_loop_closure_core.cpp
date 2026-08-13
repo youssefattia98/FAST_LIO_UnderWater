@@ -401,6 +401,11 @@ TEST(ShadowMap, BuildsQueryableIkdTreeAndRejectsStaleGeneration)
         result, request.graph.version));
     EXPECT_FALSE(lc::shadow_result_matches_graph_version(
         result, request.graph.version + 1));
+    auto appended_graph = request.graph;
+    ++appended_graph.version;
+    EXPECT_TRUE(lc::shadow_result_matches_graph(result, appended_graph));
+    ++appended_graph.loop_factor_count;
+    EXPECT_FALSE(lc::shadow_result_matches_graph(result, appended_graph));
 }
 
 TEST(ShadowMap, EnforcesInputPointBudget)
@@ -441,6 +446,7 @@ TEST(LatestScanRegistration, RecoversIndependentAndCombinedFullSe3Errors)
     lc::ShadowMapResult shadow;
     shadow.valid = true;
     shadow.graph_version = 1;
+    shadow.graph_loop_factor_count = 0;
     shadow.shadow_tree_generation = 1;
     shadow.tree = std::make_shared<lc::ShadowTree>();
     shadow.tree->Build(map_points);
@@ -453,6 +459,7 @@ TEST(LatestScanRegistration, RecoversIndependentAndCombinedFullSe3Errors)
     }
     lc::PoseGraphSnapshot graph;
     graph.version = 1;
+    graph.loop_factor_count = 0;
     graph.raw_poses = {lc::Pose3d{}};
     graph.optimized_poses = {lc::Pose3d{}};
     lc::RegistrationConfig config;

@@ -781,7 +781,18 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
             Impl::Pending{historical.frame.id, keyframe.id, correction, 1};
     }
 
+    const std::uint64_t keyframe_separation =
+        keyframe.id - historical.frame.id;
+    const bool high_confidence_single_detection =
+        impl_->config.single_detection_overlap_minimum > 0.0 &&
+        best_overlap >= impl_->config.single_detection_overlap_minimum &&
+        best_inliers >= 2 * impl_->config.minimum_ransac_inliers &&
+        best_matches >= 10 * impl_->config.minimum_triangle_matches &&
+        keyframe_separation >=
+            5 * impl_->config.minimum_keyframe_separation;
+
     if (impl_->config.required_consistent_detections <= 1 ||
+        high_confidence_single_detection ||
         (consistent && impl_->pending->confirmations >=
                            impl_->config.required_consistent_detections))
     {
@@ -800,7 +811,9 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
             Eigen::Matrix3d::Identity() * translation_sigma * translation_sigma;
         result.confirmed = true;
         result.loop = loop;
-        result.reason = "confirmed";
+        result.reason = high_confidence_single_detection
+                            ? "confirmed_high_confidence"
+                            : "confirmed";
         impl_->pending.reset();
     }
     else

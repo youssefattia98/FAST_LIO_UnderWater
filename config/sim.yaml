@@ -94,6 +94,5 @@
             enable: false
             automatic_detection_enable: false
             visualization_enable: true
-            # Accept the isolated sim3 revisit (NIS 0.178) while rejecting the
-            # next candidate (NIS 30.4).
-            loop_maximum_initial_nis: 1.0
+            # 95% chi-square consistency threshold for a full-SE(3) innovation.
+            loop_maximum_initial_nis: 12.592

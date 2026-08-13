@@ -75,6 +75,14 @@ struct PendingCorrection
     std::shared_ptr<const ShadowMapResult> shadow_map;
     std::shared_ptr<const RegistrationResult> registration;
     std::shared_ptr<const LatestScanSnapshot> scan;
+    std::size_t refresh_attempt = 0;
+};
+
+struct RegistrationRefreshRequest
+{
+    std::shared_ptr<const ShadowMapResult> shadow_map;
+    PoseGraphSnapshot graph;
+    std::size_t attempt = 0;
 };
 
 struct LoopVisualizationEvent
@@ -157,6 +165,9 @@ public:
     std::shared_ptr<const ShadowMapResult> shadow_map_snapshot() const;
     std::shared_ptr<const RegistrationResult> registration_snapshot() const;
     std::shared_ptr<const PendingCorrection> take_pending_correction();
+    bool request_registration_refresh(
+        const std::shared_ptr<const ShadowMapResult> &shadow_map,
+        std::size_t attempt);
     std::vector<LoopVisualizationEvent> visualization_events() const;
     void notify_correction_result(bool committed, double elapsed_ms,
                                   const std::string &reason);
@@ -208,6 +219,7 @@ private:
     void write_loop_diagnostic(const LoopConstraint &constraint,
                                const LoopEvaluation &evaluation);
     void run_shadow_builder();
+    void run_registration_refresher();
     void write_shadow_diagnostic(const ShadowMapResult &result,
                                  const std::string &status);
     void write_registration_diagnostic(const RegistrationResult &result);
@@ -219,12 +231,14 @@ private:
     KeyframeSelector selector_;
     BoundedQueue<Keyframe> queue_;
     BoundedQueue<ShadowMapRequest> shadow_queue_{1};
+    BoundedQueue<RegistrationRefreshRequest> registration_queue_{1};
     FullSe3PoseGraph pose_graph_;
     ShadowMapBuilder shadow_map_builder_;
     LatestScanRegistrar registrar_;
     std::unique_ptr<StableTriangleDetector> std_detector_;
     std::thread worker_;
     std::thread shadow_worker_;
+    std::thread registration_worker_;
     std::ofstream diagnostics_;
     std::ofstream loop_diagnostics_;
     std::ofstream shadow_diagnostics_;

@@ -662,6 +662,23 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   messages on each visualization topic and all 24 tests passed.
 - Commit: `cd356ce` adds instrumentation; this evaluation is committed
   separately.
+- Final-return detection fix (sim3): the return to the starting area produced
+  a strong `1--355` match (86% overlap, 524 triangle matches), but the bag ended
+  before the former two-scan confirmation rule could confirm it. Exceptionally
+  strong, long-span matches may now proceed after one detection while ordinary
+  matches still require two confirmations and all pose-graph consistency tests.
+  The SE(3) NIS limit is the 95% six-dimensional chi-square threshold (12.592).
+- Asynchronous commit fix: registration results now carry exact scan/tree
+  generations. Stale results request bounded background re-registration against
+  the newest scan and cannot replace the active IKF/tree. Loop residual
+  acceptance uses covariance-weighted factor error instead of requiring every
+  translation/rotation component to decrease independently.
+- Validation: `colcon build --packages-select fast_lio --symlink-install` and
+  29/29 tests passed. A full sim3 x1 replay accepted and committed loops
+  `262--322` and `1--355`; the final correction refreshed once, with no keyframe
+  drops. Final ATE improved from 0.0807 m to 0.0483 m. ATE RMSE changed from
+  0.0700 m to 0.0747 m and maximum from 0.1559 m to 0.1982 m, so final closure
+  improved endpoint consistency but not every whole-trajectory metric.
 
 ## Stop Conditions
 

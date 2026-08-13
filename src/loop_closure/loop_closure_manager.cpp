@@ -61,6 +61,8 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
     shadow_worker_ = std::thread(&LoopClosureManager::run_shadow_builder, this);
+    registration_worker_ =
+        std::thread(&LoopClosureManager::run_registration_refresher, this);
 }
 
 LoopEvaluation LoopClosureManager::inject_loop(const LoopConstraint &constraint)
@@ -105,6 +107,11 @@ LoopClosureManager::~LoopClosureManager()
     {
         shadow_worker_.join();
     }
+    registration_queue_.close();
+    if (registration_worker_.joinable())
+    {
+        registration_worker_.join();
+    }
     write_summary();
 }
 
@@ -141,18 +148,32 @@ void LoopClosureManager::run_shadow_builder()
             write_summary();
             continue;
         }
+        auto shadow_map =
+            std::make_shared<const ShadowMapResult>(std::move(result));
+        ++shadow_builds_ready_;
+        write_shadow_diagnostic(*shadow_map, "ready");
+        registration_queue_.push_latest(
+            RegistrationRefreshRequest{shadow_map, request->graph, 0});
+        write_summary();
+    }
+}
+
+void LoopClosureManager::run_registration_refresher()
+{
+    while (const std::optional<RegistrationRefreshRequest> request =
+               registration_queue_.wait_pop())
+    {
         const auto scan = std::atomic_load_explicit(
             &latest_scan_, std::memory_order_acquire);
-        if (!scan)
+        if (!scan || !request->shadow_map ||
+            !shadow_result_matches_graph(*request->shadow_map, request->graph))
         {
             ++registrations_rejected_;
-            result.reason = "latest_scan_unavailable";
-            write_shadow_diagnostic(result, "registration_rejected");
             write_summary();
             continue;
         }
-        RegistrationResult registration =
-            registrar_.register_scan(*scan, request->graph, result);
+        RegistrationResult registration = registrar_.register_scan(
+            *scan, request->graph, *request->shadow_map);
         double sum_registration = registration_time_ms_sum_.load();
         while (!registration_time_ms_sum_.compare_exchange_weak(
             sum_registration, sum_registration + registration.registration_time_ms))
@@ -168,27 +189,42 @@ void LoopClosureManager::run_shadow_builder()
         if (!registration.valid)
         {
             ++registrations_rejected_;
-            write_shadow_diagnostic(result, "registration_rejected");
             write_summary();
             continue;
         }
         {
             std::lock_guard<std::mutex> lock(shadow_result_mutex_);
-            latest_shadow_map_ =
-                std::make_shared<const ShadowMapResult>(std::move(result));
+            latest_shadow_map_ = request->shadow_map;
             latest_registration_ =
                 std::make_shared<const RegistrationResult>(std::move(registration));
             auto pending = std::make_shared<PendingCorrection>();
             pending->shadow_map = latest_shadow_map_;
             pending->registration = latest_registration_;
             pending->scan = scan;
+            pending->refresh_attempt = request->attempt;
             pending_correction_ = std::move(pending);
         }
-        ++shadow_builds_ready_;
         ++registrations_ready_;
-        write_shadow_diagnostic(*shadow_map_snapshot(), "ready");
         write_summary();
     }
+}
+
+bool LoopClosureManager::request_registration_refresh(
+    const std::shared_ptr<const ShadowMapResult> &shadow_map,
+    std::size_t attempt)
+{
+    constexpr std::size_t maximum_attempts = 4;
+    if (!shadow_map || attempt > maximum_attempts)
+    {
+        return false;
+    }
+    PoseGraphSnapshot graph = pose_graph_.snapshot();
+    if (!shadow_result_matches_graph(*shadow_map, graph))
+    {
+        return false;
+    }
+    return registration_queue_.push_latest(
+        RegistrationRefreshRequest{shadow_map, std::move(graph), attempt});
 }
 
 void LoopClosureManager::run()

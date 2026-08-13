@@ -256,9 +256,11 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
         gtsam::NonlinearFactorGraph candidate_graph = graph_;
         const Matrix6d covariance = force_positive_definite(
             constraint.covariance, config_);
-        candidate_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+        const auto loop_factor = gtsam::BetweenFactor<gtsam::Pose3>(
             from_key, to_key, measurement,
-            gtsam::noiseModel::Gaussian::Covariance(covariance)));
+            gtsam::noiseModel::Gaussian::Covariance(covariance));
+        const double loop_error_before = loop_factor.error(estimate_);
+        candidate_graph.add(loop_factor);
         result.graph_error_before = candidate_graph.error(estimate_);
 
         gtsam::LevenbergMarquardtParams parameters;
@@ -283,8 +285,11 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
             candidate_estimate.at<gtsam::Pose3>(to_key), measurement);
         result.loop_translation_error_after = final_residual.translation;
         result.loop_rotation_error_after_rad = final_residual.rotation;
-        if (final_residual.translation > initial_residual.translation + 1e-9 ||
-            final_residual.rotation > initial_residual.rotation + 1e-9)
+        const double loop_error_after = loop_factor.error(candidate_estimate);
+        if (!std::isfinite(loop_error_before) ||
+            !std::isfinite(loop_error_after) ||
+            loop_error_after > loop_error_before +
+                                   std::max(1e-9, 1e-9 * loop_error_before))
         {
             return reject("loop_residual_increased");
         }

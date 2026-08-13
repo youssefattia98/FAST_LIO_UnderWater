@@ -40,6 +40,7 @@ struct StdConfig
     double geometric_overlap_minimum = 0.20;
     std::size_t refinement_iterations = 6;
     std::size_t required_consistent_detections = 2;
+    double single_detection_overlap_minimum = 0.80;
     double confirmation_translation_m = 1.0;
     double confirmation_rotation_rad = 10.0 * 3.14159265358979323846 / 180.0;
     std::size_t confirmation_target_id_tolerance = 5;

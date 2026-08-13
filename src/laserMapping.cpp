@@ -1146,7 +1146,7 @@ public:
         this->declare_parameter<int>("loop_closure.loop_minimum_keyframe_separation", 5);
         this->declare_parameter<double>("loop_closure.loop_maximum_initial_translation_error_m", 10.0);
         this->declare_parameter<double>("loop_closure.loop_maximum_initial_rotation_error_deg", 45.0);
-        this->declare_parameter<double>("loop_closure.loop_maximum_initial_nis", 0.1);
+        this->declare_parameter<double>("loop_closure.loop_maximum_initial_nis", 12.592);
         this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_translation_m", 20.0);
         this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_rotation_deg", 45.0);
         this->declare_parameter<double>("loop_closure.corrected_map_radius_m", 80.0);
@@ -1165,6 +1165,8 @@ public:
         this->declare_parameter<double>("loop_closure.std_overlap_minimum", 0.20);
         this->declare_parameter<double>("loop_closure.std_overlap_distance_m", 0.35);
         this->declare_parameter<int>("loop_closure.std_required_confirmations", 2);
+        this->declare_parameter<double>(
+            "loop_closure.std_single_detection_overlap_minimum", 0.80);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1370,7 +1372,7 @@ public:
         this->get_parameter_or<double>("loop_closure.loop_maximum_initial_rotation_error_deg",
                                        loop_maximum_initial_rotation_error_deg, 45.0);
         this->get_parameter_or<double>("loop_closure.loop_maximum_initial_nis",
-                                       loop_config.pose_graph.loop_maximum_initial_nis, 0.1);
+                                       loop_config.pose_graph.loop_maximum_initial_nis, 12.592);
         this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_translation_m",
                                        loop_config.pose_graph.loop_maximum_pose_correction_translation_m, 20.0);
         this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_rotation_deg",
@@ -1407,6 +1409,9 @@ public:
                                        loop_config.std_detection.geometric_overlap_distance_m, 0.35);
         this->get_parameter_or<int>("loop_closure.std_required_confirmations",
                                     std_required_confirmations, 2);
+        this->get_parameter_or<double>(
+            "loop_closure.std_single_detection_overlap_minimum",
+            loop_config.std_detection.single_detection_overlap_minimum, 0.80);
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =
@@ -1940,12 +1945,21 @@ private:
         if (!candidate->shadow_map || !candidate->registration ||
             !candidate->scan || !candidate->shadow_map->valid ||
             !candidate->registration->valid || !candidate->shadow_map->tree ||
-            candidate->registration->graph_version !=
-                loop_closure_->graph_snapshot().version ||
             candidate->registration->scan_generation !=
                 candidate->scan->scan_generation)
         {
             reject("stale_or_invalid_candidate");
+            return;
+        }
+
+        const auto graph = loop_closure_->graph_snapshot();
+        if (candidate->registration->scan_generation != latest_scan_generation_ ||
+            candidate->scan->active_tree_generation != active_tree_generation_ ||
+            candidate->registration->graph_version != graph.version)
+        {
+            loop_closure_->request_registration_refresh(
+                candidate->shadow_map, candidate->refresh_attempt + 1);
+            reject("stale_candidate_refresh_requested");
             return;
         }
 
