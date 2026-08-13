@@ -850,6 +850,20 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   points; the final build and both CTest executables passed.
 - Implementation commit: `50e296e` (`feat: rebuild and publish corrected
   history map`).
+- Corrected-map rendering follow-up: adjacent keyframe submaps overlapped in
+  the historical output, so RViz received repeated surface samples. The output
+  now receives one global deterministic voxel pass at `filter_size_map`, and
+  the transient-local cloud is republished only when map history changes.
+  `/cloud_registered` remains visually denser because it displays full
+  undistorted scans with RViz decay rather than the compact mapping output.
+- Validation: build and 2/2 CTest executables passed. On the same 60 s x5
+  window, corrected output dropped from 595,833 points (19 MB) to 225,947
+  points (6.9 MB). The complete x5 zigzag replay in
+  `UWFL2_LC_RESULTS/zigzag_corrected_history_compact_x5` processed 115/115
+  keyframes with zero drops/failures, accepted two loop factors, and committed
+  one atomic correction. The saved corrected map dropped from 444,846 points
+  (14.2 MB) to 73,160 points (2.34 MB); peak RSS dropped from 618.6 MB to
+  531.5 MB. Latest-scan registration remained valid and reduced its residual.
 - Failed/recovered tests: the first complete replay exceeded the existing
   3,000,000-point shadow budget (4,013,316 history points), so no correction
   committed. Voxelizing each owned submap at `max(filter_size_surf,

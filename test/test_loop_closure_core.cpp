@@ -398,6 +398,37 @@ TEST(ShadowMap, KeepsFullCorrectedHistoryOutsideTheLiveMapRadius)
     EXPECT_NEAR(actual.z, expected.z(), 1e-5);
 }
 
+TEST(ShadowMap, GloballyCompactsOverlappingHistoricalSubmaps)
+{
+    lc::PoseGraphSnapshot graph;
+    graph.version = 3;
+    graph.ids = {0, 1};
+    graph.timestamps = {1.0, 2.0};
+    graph.raw_poses = {
+        pose({-20.0, 0.0, 0.0}, Eigen::Vector3d::UnitZ(), 0.0),
+        pose({20.0, 0.0, 0.0}, Eigen::Vector3d::UnitZ(), 0.0)};
+    graph.optimized_poses = graph.raw_poses;
+    for (std::size_t index = 0; index < 2; ++index)
+    {
+        lc::Keyframe frame = keyframe(index, graph.raw_poses[index]);
+        frame.map_points_world =
+            std::make_shared<const std::vector<lc::PointXYZI>>(
+                1, lc::PointXYZI{0.01F + 0.01F * static_cast<float>(index),
+                                 0.0F, 0.0F, static_cast<float>(index)});
+        graph.keyframes.push_back(std::move(frame));
+    }
+    graph.node_count = graph.keyframes.size();
+
+    lc::ShadowMapConfig config;
+    config.radius_m = 5.0;
+    config.voxel_size_m = 0.2;
+    const auto result = lc::ShadowMapBuilder(config).build({graph, 2});
+    ASSERT_TRUE(result.valid) << result.reason;
+    ASSERT_TRUE(result.corrected_history_points);
+    EXPECT_EQ(result.selected_keyframes, 1U);
+    EXPECT_EQ(result.corrected_history_points->size(), 1U);
+}
+
 TEST(ShadowMap, VoxelSelectionIsDeterministicAndMatchesCenterRule)
 {
     auto graph = shadow_graph(lc::Pose3d{});

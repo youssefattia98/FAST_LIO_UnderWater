@@ -2011,13 +2011,9 @@ private:
     }
 
     std::vector<uwfl2::loop_closure::PointXYZI>
-    compact_pending_map_points() const
+    compact_map_points(
+        const std::vector<uwfl2::loop_closure::PointXYZI> &pending) const
     {
-        std::vector<uwfl2::loop_closure::PointXYZI> pending;
-        {
-            std::lock_guard<std::mutex> lock(mapping_output_mutex);
-            pending = pending_map_points_world_;
-        }
         if (pending.empty())
         {
             return {};
@@ -2059,14 +2055,27 @@ private:
         return output;
     }
 
+    std::vector<uwfl2::loop_closure::PointXYZI>
+    compact_pending_map_points() const
+    {
+        std::vector<uwfl2::loop_closure::PointXYZI> pending;
+        {
+            std::lock_guard<std::mutex> lock(mapping_output_mutex);
+            pending = pending_map_points_world_;
+        }
+        return compact_map_points(pending);
+    }
+
     PointCloudXYZI corrected_mapping_snapshot() const
     {
         PointCloudXYZI snapshot;
+        std::vector<uwfl2::loop_closure::PointXYZI> pending;
         {
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
             snapshot = *pcl_wait_pub;
+            pending = pending_map_points_world_;
         }
-        for (const auto &point : compact_pending_map_points())
+        for (const auto &point : compact_map_points(pending))
         {
             PointType converted;
             converted.x = point.x;
@@ -2080,7 +2089,23 @@ private:
         snapshot.width = static_cast<std::uint32_t>(snapshot.size());
         snapshot.height = 1;
         snapshot.is_dense = false;
-        return snapshot;
+        if (snapshot.empty())
+        {
+            return snapshot;
+        }
+
+        PointCloudXYZI::Ptr input(new PointCloudXYZI(snapshot));
+        PointCloudXYZI filtered;
+        pcl::VoxelGrid<PointType> filter;
+        const float leaf =
+            static_cast<float>(std::max(1e-3, filter_size_map_min));
+        filter.setLeafSize(leaf, leaf, leaf);
+        filter.setInputCloud(input);
+        filter.filter(filtered);
+        filtered.width = static_cast<std::uint32_t>(filtered.size());
+        filtered.height = 1;
+        filtered.is_dense = false;
+        return filtered;
     }
 
     void commit_mapping_submap(
@@ -2415,10 +2440,8 @@ private:
             return;
         }
 
-        const auto now = std::chrono::steady_clock::now();
         const bool requested = corrected_map_publish_requested_.exchange(false);
-        if (!requested &&
-            now < next_corrected_map_publish_)
+        if (!requested)
         {
             return;
         }
@@ -2436,9 +2459,6 @@ private:
         message.header.frame_id = "camera_init";
         pubCorrectedMap_->publish(message);
 
-        next_corrected_map_publish_ = now + std::chrono::duration_cast<
-            std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(active_map_interval_s_));
     }
 
     static geometry_msgs::msg::Pose pose_message(
@@ -2757,7 +2777,6 @@ private:
     std::atomic<bool> corrected_map_publish_requested_{true};
     double active_map_interval_s_ = 1.0;
     std::chrono::steady_clock::time_point next_active_map_publish_{};
-    std::chrono::steady_clock::time_point next_corrected_map_publish_{};
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;

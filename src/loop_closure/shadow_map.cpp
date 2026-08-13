@@ -340,14 +340,12 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
             result.reason = "corrected_map_empty";
             return result;
         }
-        std::vector<std::size_t> all_keyframes(request.graph.keyframes.size());
-        for (std::size_t index = 0; index < all_keyframes.size(); ++index)
-        {
-            all_keyframes[index] = index;
-        }
+        ShadowMapConfig history_config = config_;
+        history_config.radius_m = 0.0;
+        history_config.maximum_keyframes = request.graph.keyframes.size();
         result.corrected_history_points =
-            std::make_shared<const ShadowPointVector>(reconstruct_points(
-                request, all_keyframes, config_.maximum_input_points));
+            std::make_shared<const ShadowPointVector>(
+                reconstruct_and_downsample(request, history_config));
         const auto tree_started = Clock::now();
         auto tree = std::make_shared<ShadowTree>();
         tree->set_downsample_param(static_cast<float>(config_.voxel_size_m));
