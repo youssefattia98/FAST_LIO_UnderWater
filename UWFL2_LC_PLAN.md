@@ -818,6 +818,43 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   squares rendered nearly black at the saved camera distance. The display now
   uses bright cyan five-pixel points; a second live RViz instance visibly
   rendered the complete compact map. No estimator code changed.
+- Corrected historical map output: LTA-OM's
+  `loop_optimization_node.cpp::pubAndSaveGloablMap()` transforms every stored
+  keyframe cloud by its optimized-pose correction and uses the same resulting
+  cloud for RViz and PCD output. UWFL2-LC now follows that design: voxelized
+  full-SE(3) keyframe submaps are retained, rebuilt from optimized graph poses,
+  published on `/uwfl2/corrected_map`, and used by `/map_save`. The bounded
+  local shadow ikd-tree remains separate from this full historical output.
+- Validation commands:
+  `colcon build --packages-select fast_lio --symlink-install` and
+  `ctest --test-dir build/fast_lio --output-on-failure` passed. A 60 s x5
+  zigzag smoke test published 595,833 corrected-history points versus 20,989
+  live-tree points and saved exactly 595,833 PCD points. The initial unvoxelized
+  implementation produced 2,075,252 points and was rejected as too costly.
+- Full acceptance replay command: `python3 tools/run_lc_benchmark.py --label
+  zigzag_corrected_history_v3_x5 --domain-id 178 --rate 5 --bag
+  /home/attia/ros2_ws/bags/DONE/zigzagwall_processed5 --config
+  /tmp/uwfl2_corrected_history_full.yaml --output
+  /home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/zigzag_corrected_history_v3_x5
+  --loop-closure true --detection true --drain-seconds 10`.
+- Full replay results: 115/115 keyframes processed with zero drops/failures;
+  two loop factors accepted; one atomic correction committed. The final shadow
+  rebuild used 442,141 historical input points, retained 80,497 local-tree
+  points, and took 111.47 ms worst case. Latest-scan registration reduced mean
+  residual from 0.02744 m to 0.02602 m; commit took 14.54 ms. The saved corrected
+  PCD has 444,846 points (14.2 MB). Peak process-tree RSS was 618.6 MB.
+- Corrected-map ROS serialization runs on the backend callback group, following
+  LTA-OM's separate global-map publishing thread rather than blocking the
+  front-end timer. A post-change 20 s x5 smoke test published a 6,956-point
+  snapshot and `/map_save` later wrote the same growing history at 17,949
+  points; the final build and both CTest executables passed.
+- Failed/recovered tests: the first complete replay exceeded the existing
+  3,000,000-point shadow budget (4,013,316 history points), so no correction
+  committed. Voxelizing each owned submap at `max(filter_size_surf,
+  filter_size_map)` reduced the history below budget. A later rebuild became
+  stale while the front end appended a keyframe; stale builds now enqueue the
+  newest graph snapshot, allowing the accepted loop to complete without
+  blocking the front end.
 
 ## Stop Conditions
 

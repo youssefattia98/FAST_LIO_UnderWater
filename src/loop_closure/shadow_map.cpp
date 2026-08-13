@@ -131,6 +131,88 @@ bool lexicographically_less(const ShadowPoint &lhs, const ShadowPoint &rhs)
            std::tie(rhs.x, rhs.y, rhs.z, rhs.intensity);
 }
 
+const std::vector<PointXYZI> &map_source(const Keyframe &keyframe)
+{
+    if (keyframe.map_points_world && !keyframe.map_points_world->empty())
+    {
+        return *keyframe.map_points_world;
+    }
+    if (!keyframe.sonar_points)
+    {
+        throw std::runtime_error("Keyframe has no immutable map cloud");
+    }
+    return *keyframe.sonar_points;
+}
+
+ShadowPoint corrected_point(const ShadowMapRequest &request,
+                            std::size_t index,
+                            const PointXYZI &source)
+{
+    const Keyframe &keyframe = request.graph.keyframes[index];
+    Eigen::Vector3d world;
+    if (keyframe.map_points_world && !keyframe.map_points_world->empty())
+    {
+        const Pose3d correction = compose(
+            request.graph.optimized_poses[index],
+            inverse(request.graph.raw_poses[index]));
+        world = correction.rotation *
+                    Eigen::Vector3d(source.x, source.y, source.z) +
+                correction.translation;
+    }
+    else
+    {
+        const Pose3d T_local_sonar = compose(
+            request.graph.optimized_poses[index], keyframe.T_vehicle_sonar);
+        world = T_local_sonar.rotation *
+                    Eigen::Vector3d(source.x, source.y, source.z) +
+                T_local_sonar.translation;
+    }
+
+    ShadowPoint point;
+    point.x = static_cast<float>(world.x());
+    point.y = static_cast<float>(world.y());
+    point.z = static_cast<float>(world.z());
+    point.intensity = source.intensity;
+    point.normal_x = 0.0F;
+    point.normal_y = 0.0F;
+    point.normal_z = 0.0F;
+    point.curvature = 0.0F;
+    return point;
+}
+
+ShadowPointVector reconstruct_points(
+    const ShadowMapRequest &request,
+    const std::vector<std::size_t> &indices,
+    std::size_t maximum_input_points)
+{
+    std::size_t total_points = 0;
+    for (const std::size_t index : indices)
+    {
+        const auto &points = map_source(request.graph.keyframes[index]);
+        if (points.size() > maximum_input_points - total_points)
+        {
+            throw std::runtime_error("Shadow-map input point budget exceeded");
+        }
+        total_points += points.size();
+    }
+
+    ShadowPointVector reconstructed;
+    reconstructed.reserve(total_points);
+    for (const std::size_t index : indices)
+    {
+        for (const PointXYZI &source : map_source(request.graph.keyframes[index]))
+        {
+            const ShadowPoint point = corrected_point(request, index, source);
+            if (std::isfinite(point.x) && std::isfinite(point.y) &&
+                std::isfinite(point.z))
+            {
+                reconstructed.push_back(point);
+            }
+        }
+    }
+    return reconstructed;
+}
+
 }  // namespace
 
 ShadowMapBuilder::ShadowMapBuilder(ShadowMapConfig config) : config_(config)
@@ -161,16 +243,7 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
     std::size_t total_points = 0;
     for (const std::size_t index : selected)
     {
-        const auto &points = request.graph.keyframes[index].sonar_points;
-        if (!points)
-        {
-            throw std::runtime_error("Keyframe has no immutable sonar cloud");
-        }
-        if (points->size() > config.maximum_input_points - total_points)
-        {
-            throw std::runtime_error("Shadow-map input point budget exceeded");
-        }
-        total_points += points->size();
+        total_points += map_source(request.graph.keyframes[index]).size();
     }
     if (input_point_count)
     {
@@ -183,43 +256,24 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
         VoxelKey voxel;
         double center_distance_squared = 0.0;
     };
+    const ShadowPointVector corrected =
+        reconstruct_points(request, selected, config.maximum_input_points);
     std::vector<WorldPoint> reconstructed;
-    reconstructed.reserve(total_points);
+    reconstructed.reserve(corrected.size());
     const double inverse_leaf = 1.0 / config.voxel_size_m;
-    for (const std::size_t index : selected)
+    for (const ShadowPoint &point : corrected)
     {
-        const Keyframe &keyframe = request.graph.keyframes[index];
-        const Pose3d T_local_sonar = compose(
-            request.graph.optimized_poses[index], keyframe.T_vehicle_sonar);
-        for (const PointXYZI &local : *keyframe.sonar_points)
-        {
-            const Eigen::Vector3d world =
-                T_local_sonar.rotation * Eigen::Vector3d(local.x, local.y, local.z) +
-                T_local_sonar.translation;
-            if (!world.allFinite())
-            {
-                continue;
-            }
-            const VoxelKey key{
-                static_cast<std::int64_t>(std::floor(world.x() * inverse_leaf)),
-                static_cast<std::int64_t>(std::floor(world.y() * inverse_leaf)),
-                static_cast<std::int64_t>(std::floor(world.z() * inverse_leaf))};
-            const Eigen::Vector3d center(
-                (static_cast<double>(key.x) + 0.5) * config.voxel_size_m,
-                (static_cast<double>(key.y) + 0.5) * config.voxel_size_m,
-                (static_cast<double>(key.z) + 0.5) * config.voxel_size_m);
-            ShadowPoint point;
-            point.x = static_cast<float>(world.x());
-            point.y = static_cast<float>(world.y());
-            point.z = static_cast<float>(world.z());
-            point.intensity = local.intensity;
-            point.normal_x = 0.0F;
-            point.normal_y = 0.0F;
-            point.normal_z = 0.0F;
-            point.curvature = 0.0F;
-            reconstructed.push_back(
-                {point, key, (world - center).squaredNorm()});
-        }
+        const Eigen::Vector3d world(point.x, point.y, point.z);
+        const VoxelKey key{
+            static_cast<std::int64_t>(std::floor(world.x() * inverse_leaf)),
+            static_cast<std::int64_t>(std::floor(world.y() * inverse_leaf)),
+            static_cast<std::int64_t>(std::floor(world.z() * inverse_leaf))};
+        const Eigen::Vector3d center(
+            (static_cast<double>(key.x) + 0.5) * config.voxel_size_m,
+            (static_cast<double>(key.y) + 0.5) * config.voxel_size_m,
+            (static_cast<double>(key.z) + 0.5) * config.voxel_size_m);
+        reconstructed.push_back(
+            {point, key, (world - center).squaredNorm()});
     }
     const auto reconstruction_finished = Clock::now();
 
@@ -286,6 +340,14 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
             result.reason = "corrected_map_empty";
             return result;
         }
+        std::vector<std::size_t> all_keyframes(request.graph.keyframes.size());
+        for (std::size_t index = 0; index < all_keyframes.size(); ++index)
+        {
+            all_keyframes[index] = index;
+        }
+        result.corrected_history_points =
+            std::make_shared<const ShadowPointVector>(reconstruct_points(
+                request, all_keyframes, config_.maximum_input_points));
         const auto tree_started = Clock::now();
         auto tree = std::make_shared<ShadowTree>();
         tree->set_downsample_param(static_cast<float>(config_.voxel_size_m));

@@ -140,11 +140,17 @@ void LoopClosureManager::run_shadow_builder()
             write_summary();
             continue;
         }
-        const std::uint64_t current_graph_version = pose_graph_.snapshot().version;
+        PoseGraphSnapshot current_graph = pose_graph_.snapshot();
+        const std::uint64_t current_graph_version = current_graph.version;
         if (!shadow_result_matches_graph_version(result, current_graph_version))
         {
             ++shadow_builds_stale_;
             write_shadow_diagnostic(result, "stale");
+            // Keyframes may arrive while an asynchronous rebuild is running.
+            // Requeue the newest graph snapshot so a valid accepted loop is not
+            // lost merely because the front end advanced by one keyframe.
+            shadow_queue_.push_latest(ShadowMapRequest{
+                std::move(current_graph), active_tree_generation_.load()});
             write_summary();
             continue;
         }

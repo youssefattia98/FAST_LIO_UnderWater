@@ -110,6 +110,9 @@ struct Keyframe
     Matrix6d pose_covariance = Matrix6d::Identity();
     Pose3d T_vehicle_sonar;
     std::shared_ptr<const std::vector<PointXYZI>> sonar_points;
+    // Compact scan history already expressed in the raw camera_init frame.
+    // Keeping it attached to its pose makes global map correction reversible.
+    std::shared_ptr<const std::vector<PointXYZI>> map_points_world;
     std::uint64_t graph_version = 0;
     std::uint64_t tree_generation = 0;
 };

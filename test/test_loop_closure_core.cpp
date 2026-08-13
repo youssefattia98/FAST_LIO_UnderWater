@@ -351,6 +351,53 @@ TEST(ShadowMap, ReconstructsKnownFullSe3Transform)
     }
 }
 
+TEST(ShadowMap, KeepsFullCorrectedHistoryOutsideTheLiveMapRadius)
+{
+    lc::PoseGraphSnapshot graph;
+    graph.version = 9;
+    graph.ids = {0, 1};
+    graph.timestamps = {1.0, 2.0};
+    graph.raw_poses = {
+        pose({-20.0, 1.0, 0.5}, Eigen::Vector3d::UnitX(), 0.1),
+        pose({20.0, -1.0, -0.5}, Eigen::Vector3d::UnitY(), -0.1)};
+    graph.optimized_poses = {
+        pose({-19.0, 2.0, 1.5}, Eigen::Vector3d::UnitZ(), 0.2),
+        graph.raw_poses[1]};
+    for (std::size_t index = 0; index < 2; ++index)
+    {
+        lc::Keyframe frame = keyframe(index, graph.raw_poses[index]);
+        frame.map_points_world =
+            std::make_shared<const std::vector<lc::PointXYZI>>(
+                1, lc::PointXYZI{static_cast<float>(graph.raw_poses[index].translation.x()),
+                                 static_cast<float>(graph.raw_poses[index].translation.y()),
+                                 static_cast<float>(graph.raw_poses[index].translation.z()),
+                                 static_cast<float>(index)});
+        graph.keyframes.push_back(std::move(frame));
+    }
+    graph.node_count = graph.keyframes.size();
+
+    lc::ShadowMapConfig config;
+    config.radius_m = 5.0;
+    config.voxel_size_m = 0.01;
+    const auto result = lc::ShadowMapBuilder(config).build({graph, 3});
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.selected_keyframes, 1U);
+    ASSERT_TRUE(result.corrected_history_points);
+    ASSERT_EQ(result.corrected_history_points->size(), 2U);
+
+    const lc::Pose3d first_correction = lc::compose(
+        graph.optimized_poses[0], lc::inverse(graph.raw_poses[0]));
+    const auto &first_raw = graph.keyframes[0].map_points_world->front();
+    const Eigen::Vector3d expected =
+        first_correction.rotation *
+            Eigen::Vector3d(first_raw.x, first_raw.y, first_raw.z) +
+        first_correction.translation;
+    const auto &actual = result.corrected_history_points->front();
+    EXPECT_NEAR(actual.x, expected.x(), 1e-5);
+    EXPECT_NEAR(actual.y, expected.y(), 1e-5);
+    EXPECT_NEAR(actual.z, expected.z(), 1e-5);
+}
+
 TEST(ShadowMap, VoxelSelectionIsDeterministicAndMatchesCenterRule)
 {
     auto graph = shadow_graph(lc::Pose3d{});

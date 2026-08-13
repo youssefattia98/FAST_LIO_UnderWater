@@ -49,6 +49,7 @@ struct ShadowMapResult
     bool valid = false;
     std::string reason;
     std::shared_ptr<ShadowTree> tree;
+    std::shared_ptr<const ShadowPointVector> corrected_history_points;
 };
 
 class ShadowMapBuilder

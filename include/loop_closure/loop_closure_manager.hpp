@@ -103,13 +103,14 @@ public:
     LoopClosureManager(const LoopClosureManager &) = delete;
     LoopClosureManager &operator=(const LoopClosureManager &) = delete;
 
-    template <typename PointRange>
+    template <typename PointRange, typename MapPointRange>
     bool try_submit(
         double timestamp,
         const Pose3d &T_local_vehicle,
         const Matrix6d &pose_covariance,
         const Pose3d &T_vehicle_sonar,
         const PointRange &points,
+        const MapPointRange &map_points_world,
         std::uint64_t tree_generation)
     {
         if (!config_.enabled ||
@@ -146,6 +147,18 @@ public:
         keyframe.pose_covariance = pose_covariance;
         keyframe.T_vehicle_sonar = T_vehicle_sonar.normalized();
         keyframe.sonar_points = std::move(local_points);
+        auto map_points = std::make_shared<std::vector<PointXYZI>>();
+        map_points->reserve(map_points_world.size());
+        for (const auto &point : map_points_world)
+        {
+            if (std::isfinite(point.x) && std::isfinite(point.y) &&
+                std::isfinite(point.z))
+            {
+                map_points->push_back(
+                    {point.x, point.y, point.z, point.intensity});
+            }
+        }
+        keyframe.map_points_world = std::move(map_points);
         keyframe.tree_generation = tree_generation;
 
         selector_.accept(timestamp, T_local_vehicle);
@@ -156,6 +169,21 @@ public:
             return false;
         }
         return true;
+    }
+
+    template <typename PointRange>
+    bool try_submit(
+        double timestamp,
+        const Pose3d &T_local_vehicle,
+        const Matrix6d &pose_covariance,
+        const Pose3d &T_vehicle_sonar,
+        const PointRange &points,
+        std::uint64_t tree_generation)
+    {
+        const std::vector<PointXYZI> no_map_points;
+        return try_submit(timestamp, T_local_vehicle, pose_covariance,
+                          T_vehicle_sonar, points, no_map_points,
+                          tree_generation);
     }
 
     LoopClosureStats stats() const;

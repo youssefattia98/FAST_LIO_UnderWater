@@ -591,22 +591,11 @@ void map_incremental()
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+std::mutex mapping_output_mutex;
 void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
 {
     if(scan_pub_en || pcd_save_en)
     {
-        if (pcd_save_en)
-        {
-            const int save_size = feats_down_body->points.size();
-            PointCloudXYZI::Ptr compact_cloud_world(new PointCloudXYZI(save_size, 1));
-            for (int i = 0; i < save_size; i++)
-            {
-                RGBpointBodyToWorld(&feats_down_body->points[i],
-                                    &compact_cloud_world->points[i]);
-            }
-            *pcl_wait_pub += *compact_cloud_world;
-        }
-
         if(scan_pub_en)
         {
             PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
@@ -724,10 +713,10 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
     // pubLaserCloudMap->publish(laserCloudMap);
 }
 
-void save_to_pcd()
+void save_to_pcd(const PointCloudXYZI &map)
 {
     pcl::PCDWriter pcd_writer;
-    pcd_writer.writeBinary(map_file_path, *pcl_wait_pub);
+    pcd_writer.writeBinary(map_file_path, map);
 }
 
 template<typename T>
@@ -1528,6 +1517,8 @@ public:
         {
             pubActiveMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 "/uwfl2/active_map", rclcpp::QoS(1).transient_local().reliable());
+            pubCorrectedMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "/uwfl2/corrected_map", rclcpp::QoS(1).transient_local().reliable());
         }
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -1581,6 +1572,16 @@ public:
         timer_ = this->create_wall_timer(std::chrono::milliseconds(1),
                                          std::bind(&LaserMappingNode::timer_callback, this),
                                          processing_callback_group_);
+        if (pubCorrectedMap_)
+        {
+            const auto corrected_map_period = std::chrono::duration_cast<
+                std::chrono::milliseconds>(std::chrono::duration<double>(
+                std::max(0.1, active_map_interval_s_)));
+            corrected_map_timer_ = this->create_wall_timer(
+                corrected_map_period,
+                std::bind(&LaserMappingNode::maybe_publish_corrected_map, this),
+                backend_callback_group_);
+        }
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
         if (loop_closure_)
@@ -1804,6 +1805,7 @@ private:
                         loop_closure_->notify_active_tree_generation(
                             active_tree_generation_);
                     }
+                    accumulate_mapping_output();
                     submit_loop_keyframe(Measures.lidar_end_time);
                 }
                 g_publish_mode = "kdtree_init";
@@ -1862,6 +1864,7 @@ private:
                 loop_closure_->notify_active_tree_generation(
                     active_tree_generation_);
             }
+            accumulate_mapping_output();
             submit_loop_keyframe(Measures.lidar_end_time);
             t5 = omp_get_wtime();
             
@@ -1954,9 +1957,11 @@ private:
         RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
         if (pcd_save_en)
         {
-            save_to_pcd();
+            const PointCloudXYZI snapshot = corrected_mapping_snapshot();
+            save_to_pcd(snapshot);
             res->success = true;
-            res->message = "Map saved.";
+            res->message = "Corrected map saved with " +
+                           std::to_string(snapshot.size()) + " points.";
         }
         else
         {
@@ -1966,7 +1971,202 @@ private:
         write_front_end_summary();
     }
 
+    void accumulate_mapping_output()
+    {
+        // Loop closure always needs keyframe-owned map history. With loop
+        // closure disabled, retain FAST-LIO2's original behavior and only
+        // accumulate history when PCD saving is enabled.
+        if ((!loop_closure_ && !pcd_save_en) || !feats_down_body ||
+            feats_down_body->empty())
+        {
+            return;
+        }
+
+        PointCloudXYZI compact_world;
+        compact_world.points.resize(feats_down_body->size());
+        for (std::size_t index = 0; index < feats_down_body->size(); ++index)
+        {
+            RGBpointBodyToWorld(&feats_down_body->points[index],
+                                &compact_world.points[index]);
+        }
+        compact_world.width = static_cast<std::uint32_t>(compact_world.size());
+        compact_world.height = 1;
+        compact_world.is_dense = false;
+        if (loop_closure_)
+        {
+            std::lock_guard<std::mutex> lock(mapping_output_mutex);
+            pending_map_points_world_.reserve(
+                pending_map_points_world_.size() + compact_world.size());
+            for (const auto &point : compact_world.points)
+            {
+                pending_map_points_world_.push_back(
+                    {point.x, point.y, point.z, point.intensity});
+            }
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(mapping_output_mutex);
+            *pcl_wait_pub += compact_world;
+        }
+    }
+
+    std::vector<uwfl2::loop_closure::PointXYZI>
+    compact_pending_map_points() const
+    {
+        std::vector<uwfl2::loop_closure::PointXYZI> pending;
+        {
+            std::lock_guard<std::mutex> lock(mapping_output_mutex);
+            pending = pending_map_points_world_;
+        }
+        if (pending.empty())
+        {
+            return {};
+        }
+        PointCloudXYZI::Ptr input(new PointCloudXYZI());
+        input->points.reserve(pending.size());
+        for (const auto &point : pending)
+        {
+            PointType converted;
+            converted.x = point.x;
+            converted.y = point.y;
+            converted.z = point.z;
+            converted.intensity = point.intensity;
+            converted.normal_x = converted.normal_y = converted.normal_z = 0.0F;
+            converted.curvature = 0.0F;
+            input->points.push_back(converted);
+        }
+        input->width = static_cast<std::uint32_t>(input->size());
+        input->height = 1;
+        input->is_dense = false;
+
+        PointCloudXYZI filtered;
+        pcl::VoxelGrid<PointType> filter;
+        // LTA-OM retains voxelized keyframe submaps rather than every registered
+        // scan point. Use the live map resolution so the corrected history and
+        // replacement ikd-tree have the same spatial detail and memory scale.
+        const float leaf = static_cast<float>(
+            std::max({1e-3, filter_size_surf_min, filter_size_map_min}));
+        filter.setLeafSize(leaf, leaf, leaf);
+        filter.setInputCloud(input);
+        filter.filter(filtered);
+
+        std::vector<uwfl2::loop_closure::PointXYZI> output;
+        output.reserve(filtered.size());
+        for (const auto &point : filtered.points)
+        {
+            output.push_back({point.x, point.y, point.z, point.intensity});
+        }
+        return output;
+    }
+
+    PointCloudXYZI corrected_mapping_snapshot() const
+    {
+        PointCloudXYZI snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mapping_output_mutex);
+            snapshot = *pcl_wait_pub;
+        }
+        for (const auto &point : compact_pending_map_points())
+        {
+            PointType converted;
+            converted.x = point.x;
+            converted.y = point.y;
+            converted.z = point.z;
+            converted.intensity = point.intensity;
+            converted.normal_x = converted.normal_y = converted.normal_z = 0.0F;
+            converted.curvature = 0.0F;
+            snapshot.points.push_back(converted);
+        }
+        snapshot.width = static_cast<std::uint32_t>(snapshot.size());
+        snapshot.height = 1;
+        snapshot.is_dense = false;
+        return snapshot;
+    }
+
+    void commit_mapping_submap(
+        const std::vector<uwfl2::loop_closure::PointXYZI> &points)
+    {
+        if (points.empty())
+        {
+            return;
+        }
+        PointCloudXYZI submap;
+        submap.points.reserve(points.size());
+        for (const auto &point : points)
+        {
+            PointType converted;
+            converted.x = point.x;
+            converted.y = point.y;
+            converted.z = point.z;
+            converted.intensity = point.intensity;
+            converted.normal_x = converted.normal_y = converted.normal_z = 0.0F;
+            converted.curvature = 0.0F;
+            submap.points.push_back(converted);
+        }
+        submap.width = static_cast<std::uint32_t>(submap.size());
+        submap.height = 1;
+        submap.is_dense = false;
+        std::lock_guard<std::mutex> lock(mapping_output_mutex);
+        *pcl_wait_pub += submap;
+        pending_map_points_world_.clear();
+    }
+
 private:
+    struct CorrectedMappingOutput
+    {
+        PointCloudXYZI::Ptr cloud;
+        std::vector<uwfl2::loop_closure::PointXYZI> pending_points;
+    };
+
+    CorrectedMappingOutput prepare_corrected_mapping_output(
+        const uwfl2::loop_closure::ShadowMapResult &shadow_map,
+        const uwfl2::loop_closure::Pose3d &latest_correction) const
+    {
+        CorrectedMappingOutput output;
+        if (!shadow_map.corrected_history_points)
+        {
+            return output;
+        }
+
+        output.cloud = std::make_shared<PointCloudXYZI>();
+        output.cloud->points.reserve(
+            shadow_map.corrected_history_points->size());
+        for (const auto &point : *shadow_map.corrected_history_points)
+        {
+            PointType converted;
+            converted.x = point.x;
+            converted.y = point.y;
+            converted.z = point.z;
+            converted.intensity = point.intensity;
+            converted.normal_x = converted.normal_y = converted.normal_z = 0.0F;
+            converted.curvature = 0.0F;
+            output.cloud->points.push_back(converted);
+        }
+
+        const auto compact_pending = compact_pending_map_points();
+        output.pending_points.reserve(compact_pending.size());
+        for (const auto &point : compact_pending)
+        {
+            const Eigen::Vector3d corrected =
+                latest_correction.rotation *
+                    Eigen::Vector3d(point.x, point.y, point.z) +
+                latest_correction.translation;
+            if (!corrected.allFinite())
+            {
+                continue;
+            }
+            output.pending_points.push_back(
+                {static_cast<float>(corrected.x()),
+                 static_cast<float>(corrected.y()),
+                 static_cast<float>(corrected.z()), point.intensity});
+        }
+        output.cloud->width =
+            static_cast<std::uint32_t>(output.cloud->points.size());
+        output.cloud->height = 1;
+        output.cloud->is_dense = false;
+        return output;
+    }
+
     void try_commit_loop_correction()
     {
         if (!loop_closure_)
@@ -2090,6 +2290,9 @@ private:
             return;
         }
 
+        const CorrectedMappingOutput corrected_mapping_output =
+            prepare_corrected_mapping_output(*candidate->shadow_map, correction);
+
         const auto old_state = kf.get_x();
         const auto old_covariance = kf.get_P();
         const auto old_tree = ikdtree;
@@ -2118,6 +2321,13 @@ private:
             loop_closure_->notify_correction_result(
                 true, elapsed_ms(), "committed");
             active_map_publish_requested_ = true;
+            if (corrected_mapping_output.cloud)
+            {
+                std::lock_guard<std::mutex> lock(mapping_output_mutex);
+                pcl_wait_pub = corrected_mapping_output.cloud;
+                pending_map_points_world_ = corrected_mapping_output.pending_points;
+                corrected_map_publish_requested_ = true;
+            }
         }
         catch (...)
         {
@@ -2189,6 +2399,44 @@ private:
 
         active_map_publish_requested_ = false;
         next_active_map_publish_ = now + std::chrono::duration_cast<
+            std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(active_map_interval_s_));
+    }
+
+    void maybe_publish_corrected_map()
+    {
+        if (!map_pub_en || !pubCorrectedMap_)
+        {
+            return;
+        }
+        if (pubCorrectedMap_->get_subscription_count() == 0 &&
+            pubCorrectedMap_->get_intra_process_subscription_count() == 0)
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const bool requested = corrected_map_publish_requested_.exchange(false);
+        if (!requested &&
+            now < next_corrected_map_publish_)
+        {
+            return;
+        }
+
+        const PointCloudXYZI snapshot = corrected_mapping_snapshot();
+        if (snapshot.empty())
+        {
+            corrected_map_publish_requested_.store(requested);
+            return;
+        }
+
+        sensor_msgs::msg::PointCloud2 message;
+        pcl::toROSMsg(snapshot, message);
+        message.header.stamp = this->get_clock()->now();
+        message.header.frame_id = "camera_init";
+        pubCorrectedMap_->publish(message);
+
+        next_corrected_map_publish_ = now + std::chrono::duration_cast<
             std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(active_map_interval_s_));
     }
@@ -2461,9 +2709,16 @@ private:
         loop_closure_->notify_latest_scan(
             timestamp, latest_scan_generation_, active_tree_generation_,
             T_local_vehicle, T_vehicle_sonar, feats_down_body->points);
-        loop_closure_->try_submit(timestamp, T_local_vehicle, pose_covariance,
-                                  T_vehicle_sonar, feats_down_body->points,
-                                  active_tree_generation_);
+        const auto compact_map_points = compact_pending_map_points();
+        const bool submitted = loop_closure_->try_submit(
+            timestamp, T_local_vehicle, pose_covariance, T_vehicle_sonar,
+            feats_down_body->points, compact_map_points,
+            active_tree_generation_);
+        if (submitted)
+        {
+            commit_mapping_submap(compact_map_points);
+            corrected_map_publish_requested_ = true;
+        }
     }
 
     AuxiliarySensorFusion aux_fusion_;
@@ -2477,6 +2732,7 @@ private:
     std::atomic<std::uint64_t> timed_scans_{0};
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubActiveMap_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubCorrectedMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
@@ -2491,19 +2747,23 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr corrected_map_timer_;
     rclcpp::CallbackGroup::SharedPtr backend_callback_group_;
     rclcpp::Service<fast_lio::srv::InjectLoop>::SharedPtr loop_inject_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
     bool active_map_publish_requested_ = true;
+    std::atomic<bool> corrected_map_publish_requested_{true};
     double active_map_interval_s_ = 1.0;
     std::chrono::steady_clock::time_point next_active_map_publish_{};
+    std::chrono::steady_clock::time_point next_corrected_map_publish_{};
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;
     std::uint64_t active_tree_generation_ = 0;
     std::uint64_t latest_scan_generation_ = 0;
+    std::vector<uwfl2::loop_closure::PointXYZI> pending_map_points_world_;
     int effect_feat_num = 0;
     double deltaT, deltaR;
     bool flg_EKF_converged, EKF_stop_flg = 0;
