@@ -55,6 +55,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -1130,6 +1131,7 @@ public:
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
         this->declare_parameter<bool>("loop_closure.enable", false);
         this->declare_parameter<bool>("loop_closure.automatic_detection_enable", false);
+        this->declare_parameter<bool>("loop_closure.visualization_enable", false);
         this->declare_parameter<double>("loop_closure.keyframe_translation_m", 1.0);
         this->declare_parameter<double>("loop_closure.keyframe_rotation_deg", 10.0);
         this->declare_parameter<double>("loop_closure.keyframe_minimum_interval_s", 0.5);
@@ -1322,6 +1324,8 @@ public:
         this->get_parameter_or<bool>("loop_closure.enable", loop_config.enabled, false);
         this->get_parameter_or<bool>("loop_closure.automatic_detection_enable",
                                      loop_config.automatic_detection_enabled, false);
+        this->get_parameter_or<bool>("loop_closure.visualization_enable",
+                                     loop_visualization_enabled_, false);
         double keyframe_rotation_deg = 10.0;
         int keyframe_minimum_points = 20;
         int loop_queue_capacity = 8;
@@ -1543,10 +1547,18 @@ public:
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
         if (loop_closure_)
         {
-            raw_graph_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
-                "/uwfl2_lc/raw_path", 2);
-            optimized_graph_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
-                "/uwfl2_lc/optimized_path", 2);
+            if (loop_visualization_enabled_)
+            {
+                const auto visualization_qos =
+                    rclcpp::QoS(2).transient_local().reliable();
+                raw_graph_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+                    "/uwfl2_lc/raw_path", visualization_qos);
+                optimized_graph_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+                    "/uwfl2_lc/optimized_path", visualization_qos);
+                loop_markers_pub_ =
+                    this->create_publisher<visualization_msgs::msg::MarkerArray>(
+                        "/uwfl2_lc/markers", visualization_qos);
+            }
             loop_inject_srv_ = this->create_service<fast_lio::srv::InjectLoop>(
                 "/uwfl2_lc/inject_loop",
                 std::bind(&LaserMappingNode::inject_loop_callback, this,
@@ -1566,6 +1578,7 @@ private:
     void timer_callback()
     {
         try_commit_loop_correction();
+        maybe_publish_loop_visualization();
         bool imu_only_measure = false;
         bool has_measurement = false;
         {
@@ -2112,6 +2125,160 @@ private:
         optimized_graph_path_pub_->publish(optimized_path);
     }
 
+    void maybe_publish_loop_visualization()
+    {
+        if (!loop_closure_ || !loop_visualization_enabled_ ||
+            !loop_markers_pub_)
+        {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_loop_visualization_publish_)
+        {
+            return;
+        }
+        next_loop_visualization_publish_ = now + std::chrono::milliseconds(500);
+        publish_graph_paths();
+
+        const auto graph = loop_closure_->graph_snapshot();
+        const auto events = loop_closure_->visualization_events();
+        const auto stats = loop_closure_->stats();
+        const auto stamp = this->get_clock()->now();
+        visualization_msgs::msg::MarkerArray output;
+
+        visualization_msgs::msg::Marker clear;
+        clear.action = visualization_msgs::msg::Marker::DELETEALL;
+        output.markers.push_back(clear);
+
+        const auto marker = [&](int id, int type, const std::string &name) {
+            visualization_msgs::msg::Marker result;
+            result.header.frame_id = "camera_init";
+            result.header.stamp = stamp;
+            result.ns = name;
+            result.id = id;
+            result.type = type;
+            result.action = visualization_msgs::msg::Marker::ADD;
+            result.pose.orientation.w = 1.0;
+            return result;
+        };
+        auto raw_points = marker(1, visualization_msgs::msg::Marker::SPHERE_LIST,
+                                 "raw_keyframes");
+        raw_points.scale.x = raw_points.scale.y = raw_points.scale.z = 0.16;
+        raw_points.color.r = 1.0F;
+        raw_points.color.g = 0.55F;
+        raw_points.color.a = 0.7F;
+        auto optimized_points = marker(
+            2, visualization_msgs::msg::Marker::SPHERE_LIST,
+            "optimized_keyframes");
+        optimized_points.scale.x = optimized_points.scale.y =
+            optimized_points.scale.z = 0.20;
+        optimized_points.color.g = 1.0F;
+        optimized_points.color.b = 0.25F;
+        optimized_points.color.a = 0.9F;
+        for (std::size_t index = 0; index < graph.raw_poses.size(); ++index)
+        {
+            geometry_msgs::msg::Point raw;
+            raw.x = graph.raw_poses[index].translation.x();
+            raw.y = graph.raw_poses[index].translation.y();
+            raw.z = graph.raw_poses[index].translation.z();
+            raw_points.points.push_back(raw);
+            geometry_msgs::msg::Point optimized;
+            optimized.x = graph.optimized_poses[index].translation.x();
+            optimized.y = graph.optimized_poses[index].translation.y();
+            optimized.z = graph.optimized_poses[index].translation.z();
+            optimized_points.points.push_back(optimized);
+        }
+        output.markers.push_back(std::move(raw_points));
+        output.markers.push_back(std::move(optimized_points));
+
+        auto proposed = marker(3, visualization_msgs::msg::Marker::LINE_LIST,
+                               "proposed_loops");
+        auto rejected = marker(4, visualization_msgs::msg::Marker::LINE_LIST,
+                               "rejected_loops");
+        auto accepted = marker(5, visualization_msgs::msg::Marker::LINE_LIST,
+                               "accepted_loops");
+        proposed.scale.x = rejected.scale.x = 0.035;
+        accepted.scale.x = 0.10;
+        proposed.color.r = proposed.color.g = 1.0F;
+        proposed.color.a = 0.8F;
+        rejected.color.r = 1.0F;
+        rejected.color.a = 0.35F;
+        accepted.color.g = 1.0F;
+        accepted.color.a = 1.0F;
+        const auto append_edge = [&](visualization_msgs::msg::Marker &lines,
+                                     const auto &event) {
+            const auto source = std::find(graph.ids.begin(), graph.ids.end(),
+                                          event.source_id);
+            const auto target = std::find(graph.ids.begin(), graph.ids.end(),
+                                          event.target_id);
+            if (source == graph.ids.end() || target == graph.ids.end())
+            {
+                return;
+            }
+            for (const auto iterator : {source, target})
+            {
+                const std::size_t index = static_cast<std::size_t>(
+                    std::distance(graph.ids.begin(), iterator));
+                geometry_msgs::msg::Point point;
+                point.x = graph.optimized_poses[index].translation.x();
+                point.y = graph.optimized_poses[index].translation.y();
+                point.z = graph.optimized_poses[index].translation.z();
+                lines.points.push_back(point);
+            }
+        };
+        for (const auto &event : events)
+        {
+            append_edge(event.accepted ? accepted
+                                       : (event.rejected ? rejected : proposed),
+                        event);
+        }
+        output.markers.push_back(std::move(proposed));
+        output.markers.push_back(std::move(rejected));
+        output.markers.push_back(std::move(accepted));
+
+        const auto registration = loop_closure_->registration_snapshot();
+        if (registration && registration->valid)
+        {
+            auto correction = marker(6, visualization_msgs::msg::Marker::ARROW,
+                                     "state_correction");
+            correction.scale.x = 0.05;
+            correction.scale.y = 0.12;
+            correction.scale.z = 0.16;
+            correction.color.r = 0.75F;
+            correction.color.b = 1.0F;
+            correction.color.a = 1.0F;
+            geometry_msgs::msg::Point begin;
+            begin.x = registration->T_local_vehicle_raw.translation.x();
+            begin.y = registration->T_local_vehicle_raw.translation.y();
+            begin.z = registration->T_local_vehicle_raw.translation.z();
+            geometry_msgs::msg::Point end;
+            end.x = registration->T_local_vehicle_registered.translation.x();
+            end.y = registration->T_local_vehicle_registered.translation.y();
+            end.z = registration->T_local_vehicle_registered.translation.z();
+            correction.points = {begin, end};
+            output.markers.push_back(std::move(correction));
+        }
+
+        auto status = marker(7, visualization_msgs::msg::Marker::TEXT_VIEW_FACING,
+                             "loop_status");
+        status.scale.z = 0.7;
+        status.color.r = status.color.g = status.color.b = status.color.a = 1.0F;
+        if (!graph.optimized_poses.empty())
+        {
+            status.pose.position.x = graph.optimized_poses.back().translation.x();
+            status.pose.position.y = graph.optimized_poses.back().translation.y();
+            status.pose.position.z = graph.optimized_poses.back().translation.z() + 2.0;
+        }
+        status.text = "UWFL2-LC | keyframes: " +
+                      std::to_string(graph.node_count) + " | proposed: " +
+                      std::to_string(stats.std_proposed) + " | accepted: " +
+                      std::to_string(stats.std_accepted) + " | rejected: " +
+                      std::to_string(stats.std_graph_rejected) + " | committed: " +
+                      std::to_string(stats.corrections_committed);
+        output.markers.push_back(std::move(status));
+        loop_markers_pub_->publish(output);
+    }
+
     void inject_loop_callback(
         const std::shared_ptr<fast_lio::srv::InjectLoop::Request> request,
         std::shared_ptr<fast_lio::srv::InjectLoop::Response> response)
@@ -2195,6 +2362,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+        loop_markers_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
@@ -2209,6 +2378,8 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
+    bool loop_visualization_enabled_ = false;
+    std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;
     std::uint64_t active_tree_generation_ = 0;
     std::uint64_t latest_scan_generation_ = 0;

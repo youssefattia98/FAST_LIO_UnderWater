@@ -33,6 +33,7 @@ RECORD_TOPICS = (
     "/clock",
     "/uwfl2_lc/raw_path",
     "/uwfl2_lc/optimized_path",
+    "/uwfl2_lc/markers",
 )
 
 

@@ -104,6 +104,78 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Alpha: 0.8
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 140; 0
+      Enabled: true
+      Head Diameter: 0.3
+      Head Length: 0.2
+      Length: 0.3
+      Line Style: Lines
+      Line Width: 0.03
+      Name: LC Raw Graph
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 140; 0
+      Pose Style: None
+      Radius: 0.03
+      Shaft Diameter: 0.1
+      Shaft Length: 0.1
+      Topic:
+        Depth: 2
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /uwfl2_lc/raw_path
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 0; 255; 64
+      Enabled: true
+      Head Diameter: 0.3
+      Head Length: 0.2
+      Length: 0.3
+      Line Style: Lines
+      Line Width: 0.05
+      Name: LC Optimized Graph
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 0; 255; 64
+      Pose Style: None
+      Radius: 0.03
+      Shaft Diameter: 0.1
+      Shaft Length: 0.1
+      Topic:
+        Depth: 2
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /uwfl2_lc/optimized_path
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Loop Closure
+      Namespaces:
+        accepted_loops: true
+        loop_status: true
+        optimized_keyframes: true
+        proposed_loops: true
+        raw_keyframes: true
+        rejected_loops: true
+        state_correction: true
+      Topic:
+        Depth: 2
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /uwfl2_lc/markers
+      Value: true
     - Class: rviz_default_plugins/TF
       Enabled: true
       Filter (blacklist): ""

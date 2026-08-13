@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -74,6 +75,15 @@ struct PendingCorrection
     std::shared_ptr<const ShadowMapResult> shadow_map;
     std::shared_ptr<const RegistrationResult> registration;
     std::shared_ptr<const LatestScanSnapshot> scan;
+};
+
+struct LoopVisualizationEvent
+{
+    std::uint64_t source_id = 0;
+    std::uint64_t target_id = 0;
+    bool accepted = false;
+    bool rejected = false;
+    std::string status;
 };
 
 class LoopClosureManager
@@ -147,6 +157,7 @@ public:
     std::shared_ptr<const ShadowMapResult> shadow_map_snapshot() const;
     std::shared_ptr<const RegistrationResult> registration_snapshot() const;
     std::shared_ptr<const PendingCorrection> take_pending_correction();
+    std::vector<LoopVisualizationEvent> visualization_events() const;
     void notify_correction_result(bool committed, double elapsed_ms,
                                   const std::string &reason);
 
@@ -202,6 +213,7 @@ private:
     void write_registration_diagnostic(const RegistrationResult &result);
     void write_std_diagnostic(const StdDetectionResult &result,
                               const LoopEvaluation *evaluation);
+    void record_visualization_event(const LoopVisualizationEvent &event);
 
     LoopClosureConfig config_;
     KeyframeSelector selector_;
@@ -221,6 +233,8 @@ private:
     std::ofstream commit_diagnostics_;
     mutable std::mutex diagnostics_mutex_;
     mutable std::mutex shadow_result_mutex_;
+    mutable std::mutex visualization_mutex_;
+    std::deque<LoopVisualizationEvent> visualization_events_;
     std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
     std::shared_ptr<const RegistrationResult> latest_registration_;
     std::shared_ptr<const LatestScanSnapshot> latest_scan_;

@@ -652,6 +652,14 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   Final ATE improved from 0.0807 m to 0.0213 m, but RMSE increased from 0.0700 m
   to 0.0758 m and maximum error from 0.1559 m to 0.2005 m. Therefore this is a
   valid end-to-end closure, but not yet an overall trajectory improvement.
+- RMSE diagnosis and visualization: the accepted loop committed a roughly
+  0.136 m latest-scan registration correction at 411.64 s although its graph
+  residual was 0.029 m and scan residual improved by less than 0.001 m. The
+  resulting transient raised the 411.64--420 s RMSE from 0.106 m to 0.184 m;
+  the final error still improved. Optional RViz output now publishes raw and
+  optimized paths, proposed/rejected/accepted loop edges, the registration
+  correction arrow, keyframes, and stage counters. A 30 s smoke produced 30
+  messages on each visualization topic and all 24 tests passed.
 - Commit: `cd356ce` adds instrumentation; this evaluation is committed
   separately.
 

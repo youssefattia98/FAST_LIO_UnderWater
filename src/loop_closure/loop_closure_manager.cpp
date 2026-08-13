@@ -80,6 +80,9 @@ LoopEvaluation LoopClosureManager::inject_loop(const LoopConstraint &constraint)
     {
         ++loops_rejected_;
     }
+    record_visualization_event(
+        {constraint.to_id, constraint.from_id, result.accepted,
+         !result.accepted, result.reason});
     write_loop_diagnostic(constraint, result);
     write_summary();
     return result;
@@ -233,6 +236,13 @@ void LoopClosureManager::run()
                     ++std_awaiting_confirmation_;
                 }
 
+                if (detection.proposed && !detection.loop)
+                {
+                    record_visualization_event(
+                        {detection.source_id, detection.target_id, false, false,
+                         detection.reason});
+                }
+
                 if (detection.loop)
                 {
                     const LoopEvaluation evaluation = inject_loop(*detection.loop);
@@ -258,6 +268,25 @@ void LoopClosureManager::run()
             ++failed_;
         }
     }
+}
+
+void LoopClosureManager::record_visualization_event(
+    const LoopVisualizationEvent &event)
+{
+    std::lock_guard<std::mutex> lock(visualization_mutex_);
+    visualization_events_.push_back(event);
+    constexpr std::size_t maximum_events = 32;
+    while (visualization_events_.size() > maximum_events)
+    {
+        visualization_events_.pop_front();
+    }
+}
+
+std::vector<LoopVisualizationEvent>
+LoopClosureManager::visualization_events() const
+{
+    std::lock_guard<std::mutex> lock(visualization_mutex_);
+    return {visualization_events_.begin(), visualization_events_.end()};
 }
 
 void LoopClosureManager::write_diagnostic(
