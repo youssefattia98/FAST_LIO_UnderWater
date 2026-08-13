@@ -1159,6 +1159,8 @@ public:
         this->declare_parameter<double>("loop_closure.registration_maximum_translation_m", 2.0);
         this->declare_parameter<double>("loop_closure.registration_maximum_rotation_deg", 15.0);
         this->declare_parameter<int>("loop_closure.std_minimum_keyframe_separation", 20);
+        this->declare_parameter<double>(
+            "loop_closure.std_minimum_loop_duration_s", 0.0);
         this->declare_parameter<double>("loop_closure.std_voxel_size_m", 0.6);
         this->declare_parameter<int>("loop_closure.std_minimum_triangle_matches", 5);
         this->declare_parameter<int>("loop_closure.std_minimum_ransac_inliers", 5);
@@ -1167,6 +1169,8 @@ public:
         this->declare_parameter<int>("loop_closure.std_required_confirmations", 2);
         this->declare_parameter<double>(
             "loop_closure.std_single_detection_overlap_minimum", 0.80);
+        this->declare_parameter<double>(
+            "loop_closure.std_accepted_loop_cooldown_s", 0.0);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1397,6 +1401,9 @@ public:
                                        registration_maximum_rotation_deg, 15.0);
         this->get_parameter_or<int>("loop_closure.std_minimum_keyframe_separation",
                                     std_minimum_keyframe_separation, 20);
+        this->get_parameter_or<double>(
+            "loop_closure.std_minimum_loop_duration_s",
+            loop_config.std_detection.minimum_loop_duration_s, 0.0);
         this->get_parameter_or<double>("loop_closure.std_voxel_size_m",
                                        loop_config.std_detection.voxel_size_m, 0.6);
         this->get_parameter_or<int>("loop_closure.std_minimum_triangle_matches",
@@ -1412,6 +1419,9 @@ public:
         this->get_parameter_or<double>(
             "loop_closure.std_single_detection_overlap_minimum",
             loop_config.std_detection.single_detection_overlap_minimum, 0.80);
+        this->get_parameter_or<double>(
+            "loop_closure.std_accepted_loop_cooldown_s",
+            loop_config.std_detection.accepted_loop_cooldown_s, 0.0);
         loop_config.keyframes.rotation_rad =
             std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
         loop_config.keyframes.minimum_points =

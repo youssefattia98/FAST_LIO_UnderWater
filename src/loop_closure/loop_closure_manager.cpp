@@ -285,6 +285,9 @@ void LoopClosureManager::run()
                     if (evaluation.accepted)
                     {
                         ++std_accepted_;
+                        std_detector_->notify_loop_accepted(
+                            detection.source_id, detection.target_id,
+                            keyframe->timestamp);
                     }
                     else
                     {

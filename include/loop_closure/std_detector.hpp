@@ -21,6 +21,7 @@ namespace uwfl2::loop_closure
 struct StdConfig
 {
     std::size_t minimum_keyframe_separation = 20;
+    double minimum_loop_duration_s = 0.0;
     double voxel_size_m = 0.6;
     std::size_t minimum_voxel_points = 5;
     double plane_eigenvalue_ratio = 0.08;
@@ -41,6 +42,7 @@ struct StdConfig
     std::size_t refinement_iterations = 6;
     std::size_t required_consistent_detections = 2;
     double single_detection_overlap_minimum = 0.80;
+    double accepted_loop_cooldown_s = 0.0;
     double confirmation_translation_m = 1.0;
     double confirmation_rotation_rad = 10.0 * 3.14159265358979323846 / 180.0;
     std::size_t confirmation_target_id_tolerance = 5;
@@ -74,6 +76,8 @@ public:
     ~StableTriangleDetector();
 
     StdDetectionResult process(const Keyframe &keyframe);
+    void notify_loop_accepted(std::uint64_t source_id, std::uint64_t target_id,
+                              double source_timestamp);
     std::size_t database_size() const;
 
 private:

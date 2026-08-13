@@ -150,6 +150,7 @@ TEST(StableTriangleDetector, AcceptsStrongLongSpanRevisitWithoutSecondScan)
     lc::StdConfig config = detector_config();
     config.required_consistent_detections = 2;
     config.single_detection_overlap_minimum = 0.80;
+    config.accepted_loop_cooldown_s = 30.0;
     lc::StableTriangleDetector detector(config);
     const auto historical = scene();
     const lc::Pose3d expected =
@@ -163,6 +164,25 @@ TEST(StableTriangleDetector, AcceptsStrongLongSpanRevisitWithoutSecondScan)
     EXPECT_EQ(result.reason, "confirmed_high_confidence");
     EXPECT_EQ(result.loop->from_id, 0U);
     EXPECT_EQ(result.loop->to_id, 20U);
+    detector.notify_loop_accepted(20, 0, 20.0);
+    EXPECT_FALSE(detector.process(frame(21, expected, current)).loop);
+}
+
+TEST(StableTriangleDetector, EnforcesMinimumLoopDuration)
+{
+    lc::StdConfig config = detector_config();
+    config.required_consistent_detections = 1;
+    config.minimum_loop_duration_s = 10.0;
+    lc::StableTriangleDetector detector(config);
+    const auto historical = scene();
+    const lc::Pose3d expected =
+        pose({1.2, -0.8, 0.6}, Eigen::Vector3d(1.0, -0.4, 0.7), 0.45);
+    const auto current = transform_points(historical, expected);
+
+    EXPECT_FALSE(detector.process(frame(0, lc::Pose3d{}, historical)).loop);
+    EXPECT_FALSE(detector.process(frame(3, expected, current)).loop);
+    const auto result = detector.process(frame(20, expected, current));
+    ASSERT_TRUE(result.loop.has_value()) << result.reason;
 }
 
 TEST(StableTriangleDetector, RejectsSparseAndLowOverlapCandidates)

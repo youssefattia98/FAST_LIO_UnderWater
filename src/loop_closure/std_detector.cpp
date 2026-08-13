@@ -493,6 +493,13 @@ struct StableTriangleDetector::Impl
         std::size_t confirmations = 0;
     };
 
+    struct AcceptedLoop
+    {
+        std::uint64_t source_id = 0;
+        std::uint64_t target_id = 0;
+        double source_timestamp = 0.0;
+    };
+
     explicit Impl(StdConfig input) : config(std::move(input)) {}
 
     void add(Entry entry)
@@ -514,6 +521,7 @@ struct StableTriangleDetector::Impl
     std::unordered_map<TriangleKey, std::vector<Reference>, TriangleKeyHash>
         inverted_index;
     std::optional<Pending> pending;
+    std::optional<AcceptedLoop> last_accepted;
 };
 
 StableTriangleDetector::StableTriangleDetector(StdConfig config)
@@ -521,7 +529,11 @@ StableTriangleDetector::StableTriangleDetector(StdConfig config)
 {
     if (impl_->config.voxel_size_m <= 0.0 ||
         impl_->config.triangle_side_resolution_m <= 0.0 ||
-        impl_->config.geometric_overlap_distance_m <= 0.0)
+        impl_->config.geometric_overlap_distance_m <= 0.0 ||
+        !std::isfinite(impl_->config.minimum_loop_duration_s) ||
+        impl_->config.minimum_loop_duration_s < 0.0 ||
+        !std::isfinite(impl_->config.accepted_loop_cooldown_s) ||
+        impl_->config.accepted_loop_cooldown_s < 0.0)
     {
         throw std::invalid_argument("STD metric resolutions must be positive");
     }
@@ -532,6 +544,13 @@ StableTriangleDetector::~StableTriangleDetector() = default;
 std::size_t StableTriangleDetector::database_size() const
 {
     return impl_->entries.size();
+}
+
+void StableTriangleDetector::notify_loop_accepted(
+    std::uint64_t source_id, std::uint64_t target_id, double source_timestamp)
+{
+    impl_->last_accepted =
+        Impl::AcceptedLoop{source_id, target_id, source_timestamp};
 }
 
 StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
@@ -571,7 +590,22 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
                             impl_->entries[reference.entry];
                         if (keyframe.id <= historical.frame.id ||
                             keyframe.id - historical.frame.id <
-                                impl_->config.minimum_keyframe_separation)
+                                impl_->config.minimum_keyframe_separation ||
+                            keyframe.timestamp - historical.frame.timestamp <
+                                impl_->config.minimum_loop_duration_s)
+                        {
+                            continue;
+                        }
+                        if (impl_->last_accepted &&
+                            keyframe.timestamp -
+                                    impl_->last_accepted->source_timestamp <=
+                                impl_->config.accepted_loop_cooldown_s &&
+                            std::llabs(
+                                static_cast<long long>(historical.frame.id) -
+                                static_cast<long long>(
+                                    impl_->last_accepted->target_id)) <=
+                                static_cast<long long>(
+                                    impl_->config.confirmation_target_id_tolerance))
                         {
                             continue;
                         }
