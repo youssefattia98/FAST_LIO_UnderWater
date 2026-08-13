@@ -81,6 +81,8 @@
             mag_timeout: 0.25
 
         publish:
+            map_en: true
+            active_map_interval_s: 1.0
             path_en:  false
             scan_publish_en:  true
             dense_publish_en: true

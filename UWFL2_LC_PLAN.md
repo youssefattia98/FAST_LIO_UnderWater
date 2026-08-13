@@ -804,6 +804,14 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   bounded stale-scan refreshes. All 115 keyframes were processed with zero
   queue drops or backend failures. Artifacts are in
   `UWFL2_LC_RESULTS/zigzag_frontend_final_mag001_lc_on`.
+- Live corrected-map visualization: `publish.map_en` now publishes the current
+  active ikd-tree on `/uwfl2/active_map` at the configured one-second interval
+  only while subscribed, with an immediate refresh after an atomic LC commit.
+  RViz displays this transient-local snapshot and disables the historical
+  `/cloud_registered` accumulator by default. Build and 2/2 tests passed. A
+  60 s zigzag smoke replay at x5 published a nonempty 967-point active-tree
+  snapshot. The first smoke command failed because ROS 2 Jazzy uses
+  `--playback-duration`, not `--duration`; the corrected replay passed.
 
 ## Stop Conditions
 

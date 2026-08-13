@@ -1082,6 +1082,7 @@ public:
         this->declare_parameter<bool>("publish.path_en", true);
         this->declare_parameter<bool>("publish.effect_map_en", false);
         this->declare_parameter<bool>("publish.map_en", false);
+        this->declare_parameter<double>("publish.active_map_interval_s", 1.0);
         this->declare_parameter<bool>("publish.scan_publish_en", true);
         this->declare_parameter<bool>("publish.dense_publish_en", true);
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
@@ -1180,6 +1181,9 @@ public:
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
+        this->get_parameter_or<double>("publish.active_map_interval_s",
+                                       active_map_interval_s_, 1.0);
+        active_map_interval_s_ = std::max(0.1, active_map_interval_s_);
         this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
@@ -1520,6 +1524,11 @@ public:
             imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk, sensor_options);
         aux_fusion_.create_subscriptions(*this, sensor_callback_group_);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
+        if (map_pub_en)
+        {
+            pubActiveMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "/uwfl2/active_map", rclcpp::QoS(1).transient_local().reliable());
+        }
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
@@ -1607,6 +1616,7 @@ private:
     void timer_callback()
     {
         try_commit_loop_correction();
+        maybe_publish_active_map();
         maybe_publish_loop_visualization();
         bool imu_only_measure = false;
         bool has_measurement = false;
@@ -2107,6 +2117,7 @@ private:
             position_last = state_point.pos;
             loop_closure_->notify_correction_result(
                 true, elapsed_ms(), "committed");
+            active_map_publish_requested_ = true;
         }
         catch (...)
         {
@@ -2123,6 +2134,63 @@ private:
                       state_point.rot * state_point.offset_T_L_I;
             reject("transaction_exception_rollback");
         }
+    }
+
+    void maybe_publish_active_map()
+    {
+        if (!map_pub_en || !pubActiveMap_ || !ikdtree || !ikdtree->Root_Node)
+        {
+            return;
+        }
+        if (pubActiveMap_->get_subscription_count() == 0 &&
+            pubActiveMap_->get_intra_process_subscription_count() == 0)
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!active_map_publish_requested_ && now < next_active_map_publish_)
+        {
+            return;
+        }
+
+        PointVector tree_points;
+        tree_points.reserve(static_cast<std::size_t>(std::max(0, ikdtree->validnum())));
+        BoxPointType bounds = ikdtree->tree_range();
+        constexpr float boundary_margin = 1.0e-3F;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            bounds.vertex_min[axis] -= boundary_margin;
+            bounds.vertex_max[axis] += boundary_margin;
+        }
+        ikdtree->Box_Search(bounds, tree_points);
+
+        constexpr std::size_t maximum_visualization_points = 250000;
+        const std::size_t stride = std::max<std::size_t>(
+            1, (tree_points.size() + maximum_visualization_points - 1) /
+                   maximum_visualization_points);
+        PointCloudXYZI active_map;
+        active_map.points.reserve((tree_points.size() + stride - 1) / stride);
+        for (std::size_t index = 0; index < tree_points.size(); index += stride)
+        {
+            active_map.points.push_back(tree_points[index]);
+        }
+        active_map.width = static_cast<std::uint32_t>(active_map.points.size());
+        active_map.height = 1;
+        active_map.is_dense = false;
+
+        sensor_msgs::msg::PointCloud2 message;
+        pcl::toROSMsg(active_map, message);
+        message.header.stamp = lidar_end_time > 0.0
+                                   ? get_ros_time(lidar_end_time)
+                                   : this->get_clock()->now();
+        message.header.frame_id = "camera_init";
+        pubActiveMap_->publish(message);
+
+        active_map_publish_requested_ = false;
+        next_active_map_publish_ = now + std::chrono::duration_cast<
+            std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(active_map_interval_s_));
     }
 
     static geometry_msgs::msg::Pose pose_message(
@@ -2408,6 +2476,7 @@ private:
     std::atomic<std::uint64_t> aux_late_magnetometer_{0};
     std::atomic<std::uint64_t> timed_scans_{0};
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubActiveMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
@@ -2427,6 +2496,9 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
+    bool active_map_publish_requested_ = true;
+    double active_map_interval_s_ = 1.0;
+    std::chrono::steady_clock::time_point next_active_map_publish_{};
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;
