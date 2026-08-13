@@ -646,6 +646,12 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
 - Timing: simulation scan p95 was 4.60 ms disabled and 4.39 ms enabled; real
   scan p95 was 6.07 ms disabled and 6.11 ms enabled. Enabled graph-append p95
   was 0.754 ms (simulation) and 0.448 ms (real).
+- Follow-up sim3 loop test: exposing `loop_maximum_initial_nis` and setting it
+  to 1.0 accepted only loop 262--322 (NIS 0.174). The graph optimization,
+  shadow-tree rebuild, scan re-registration, and atomic commit all succeeded.
+  Final ATE improved from 0.0807 m to 0.0213 m, but RMSE increased from 0.0700 m
+  to 0.0758 m and maximum error from 0.1559 m to 0.2005 m. Therefore this is a
+  valid end-to-end closure, but not yet an overall trajectory improvement.
 - Commit: `cd356ce` adds instrumentation; this evaluation is committed
   separately.
 

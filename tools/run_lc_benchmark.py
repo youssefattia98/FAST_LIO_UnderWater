@@ -300,6 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--loop-closure", choices=("true", "false"), default="false")
     parser.add_argument("--detection", choices=("true", "false"), default="false")
+    parser.add_argument("--rviz", action="store_true")
     parser.add_argument("--inject-loop", type=Path)
     parser.add_argument("--workspace", type=Path, default=Path("/home/attia/ros2_ws"))
     parser.add_argument("--ros-setup", type=Path, default=Path("/opt/ros/jazzy/setup.bash"))
@@ -458,7 +459,7 @@ def main() -> int:
                 "fast_lio",
                 "mapping.launch.py",
                 f"config_file:={runtime_config}",
-                "rviz:=false",
+                f"rviz:={'true' if args.rviz else 'false'}",
                 "use_sim_time:=true",
             ],
             args.ros_setup,

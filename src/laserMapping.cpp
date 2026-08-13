@@ -1144,6 +1144,7 @@ public:
         this->declare_parameter<int>("loop_closure.loop_minimum_keyframe_separation", 5);
         this->declare_parameter<double>("loop_closure.loop_maximum_initial_translation_error_m", 10.0);
         this->declare_parameter<double>("loop_closure.loop_maximum_initial_rotation_error_deg", 45.0);
+        this->declare_parameter<double>("loop_closure.loop_maximum_initial_nis", 0.1);
         this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_translation_m", 20.0);
         this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_rotation_deg", 45.0);
         this->declare_parameter<double>("loop_closure.corrected_map_radius_m", 80.0);
@@ -1364,6 +1365,8 @@ public:
                                        loop_config.pose_graph.loop_maximum_initial_translation_error_m, 10.0);
         this->get_parameter_or<double>("loop_closure.loop_maximum_initial_rotation_error_deg",
                                        loop_maximum_initial_rotation_error_deg, 45.0);
+        this->get_parameter_or<double>("loop_closure.loop_maximum_initial_nis",
+                                       loop_config.pose_graph.loop_maximum_initial_nis, 0.1);
         this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_translation_m",
                                        loop_config.pose_graph.loop_maximum_pose_correction_translation_m, 20.0);
         this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_rotation_deg",

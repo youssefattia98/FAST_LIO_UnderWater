@@ -89,3 +89,10 @@
         pcd_save:
             pcd_save_en: true
             interval: -1
+
+        loop_closure:
+            enable: false
+            automatic_detection_enable: false
+            # Accept the isolated sim3 revisit (NIS 0.178) while rejecting the
+            # next candidate (NIS 30.4).
+            loop_maximum_initial_nis: 1.0
