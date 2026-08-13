@@ -795,6 +795,15 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   to 0.88 m. The recorded `World -> base_link` odometry does not agree closely
   enough with mapped-wall geometry around 75% to select between `0.005` and
   `0.01`; the final magnetic floor therefore requires visual wall validation.
+- Final front-end visual review selected `heading_cov_floor=0.01`: the wall was
+  very good, seabed consistent, and both turns smooth. Automatic LC was then
+  re-enabled and replayed at x5. STD proposed two candidates and accepted return
+  loop `0--104` (overlap-supported SE(3) NIS 2.43); graph error fell from 3.154
+  to 0.478. The shadow tree rebuilt in 44.4 ms, latest-scan residual improved
+  from 0.0656 m to 0.0526 m, and one atomic correction committed after three
+  bounded stale-scan refreshes. All 115 keyframes were processed with zero
+  queue drops or backend failures. Artifacts are in
+  `UWFL2_LC_RESULTS/zigzag_frontend_final_mag001_lc_on`.
 
 ## Stop Conditions
 
