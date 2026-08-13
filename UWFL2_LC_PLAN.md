@@ -813,6 +813,11 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   snapshot. The first smoke command failed because ROS 2 Jazzy uses
   `--playback-duration`, not `--duration`; the corrected replay passed.
   Implementation commit: `b940e94`.
+- Active-map RViz visibility follow-up: a live inspection confirmed the topic,
+  transform, and 7,488-point snapshot were valid, but 0.005 m `AxisColor` flat
+  squares rendered nearly black at the saved camera distance. The display now
+  uses bright cyan five-pixel points; a second live RViz instance visibly
+  rendered the complete compact map. No estimator code changed.
 
 ## Stop Conditions
 
