@@ -568,11 +568,11 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
 
 ### Work
 
-- [ ] Re-run disabled UWFL2 and enabled UWFL2-LC sequentially on the exact same simulation and real bags at x1.
-- [ ] Keep every non-loop parameter identical and archive resolved parameter dumps.
-- [ ] Compare trajectory/map consistency, loop statistics, CPU, RAM, scan latency, graph time, tree-rebuild time, registration/commit time, queue drops, callback drops, and rosbag output counts.
+- [x] Re-run disabled UWFL2 and enabled UWFL2-LC sequentially on the exact same simulation and real bags at x1.
+- [x] Keep every non-loop parameter identical and archive resolved parameter dumps.
+- [x] Compare trajectory/map consistency, loop statistics, CPU, RAM, scan latency, graph time, tree-rebuild time, registration/commit time, queue drops, callback drops, and rosbag output counts.
 - [ ] Run the same commands on the Jetson Orin Nano.
-- [ ] Record every failed run alongside successful runs.
+- [x] Record every failed run alongside successful runs.
 
 ### Final commands
 
@@ -588,36 +588,33 @@ python3 "$UWFL2_SRC/tools/run_lc_benchmark.py" \
   --loop-closure true --detection true \
   --output "$LC_RESULTS/final_uwfl2_lc_sim3"
 
-python3 "$UWFL2_SRC/tools/compare_lc_runs.py" \
+python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   --baseline "$LC_RESULTS/final_uwfl2_disabled_sim3" \
   --candidate "$LC_RESULTS/final_uwfl2_lc_sim3" \
-  --ground-truth-topic /auv/pose_actual \
-  --report "$LC_RESULTS/final_sim3_comparison"
+  --output "$LC_RESULTS/final_sim3_comparison"
 
-python3 "$UWFL2_SRC/tools/compare_lc_runs.py" \
+python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   --baseline "$LC_RESULTS/final_uwfl2_disabled_real" \
   --candidate "$LC_RESULTS/final_uwfl2_lc_real" \
-  --no-ground-truth --map-overlap --closure-consistency \
-  --report "$LC_RESULTS/final_real_comparison"
+  --output "$LC_RESULTS/final_real_comparison"
 ```
 
 ### Required final report
 
 | Metric | UWFL2 disabled | UWFL2-LC | Difference |
 | --- | ---: | ---: | ---: |
-| ATE RMSE/max/final on simulation | TODO | TODO | TODO |
-| RPE translation/rotation | TODO | TODO | TODO |
-| Start/end full-SE(3) closure error | TODO | TODO | TODO |
-| Overlap point-to-plane/map consistency | TODO | TODO | TODO |
-| Loop proposed/accepted/rejected/false | TODO | TODO | TODO |
-| CPU mean/p95/peak | TODO | TODO | TODO |
-| RAM mean/peak | TODO | TODO | TODO |
-| Scan latency p50/p95/max | TODO | TODO | TODO |
-| Graph optimization p50/p95/max | N/A | TODO | TODO |
-| Tree rebuild p50/p95/max | N/A | TODO | TODO |
-| Re-registration and commit p50/p95/max | N/A | TODO | TODO |
-| Sensor/backend queue drops | TODO | TODO | TODO |
-| Published/recorded message counts | TODO | TODO | TODO |
+| ATE RMSE/max/final on simulation [m] | 0.0700 / 0.1559 / 0.0807 | 0.0700 / 0.1559 / 0.0807 | 0 |
+| RPE translation [m] / rotation [deg] RMSE | 0.00685 / 0.0265 | 0.00685 / 0.0265 | 0 |
+| Start/end full-SE(3), translation [m] / rotation [deg] | 0.0793 / 0.183 | 0.0793 / 0.183 | 0 |
+| Map consistency | exact map hash; overlap 1.0 | exact map hash; overlap 1.0 | identical |
+| STD proposed / accepted / graph-rejected, sim (real) | 0 / 0 / 0 | 99 / 0 / 4 (20 / 0 / 3) | no false acceptance |
+| CPU mean/p95/peak, simulation [%] | 19.0 / 24.7 / 35.7 | 18.9 / 24.8 / 30.7 | +0.1 p95 |
+| RAM mean/peak, simulation [MiB] | 349.1 / 483.9 | 370.5 / 527.4 | +21.4 / +43.5 |
+| Scan latency p50/p95/max, simulation [ms] | 3.20 / 4.60 / 128.83 | 3.16 / 4.39 / 119.12 | -0.21 p95 |
+| Graph append p50/p95/max, simulation [ms] | N/A | 0.346 / 0.754 / 1.444 | asynchronous |
+| Tree rebuild; re-registration; commit | N/A | N/A: no accepted loop | N/A |
+| Sensor/backend queue drops | 0 | 0 | 0 |
+| Recorded messages, simulation (real) | 679808 (304590) | 679808 (304590) | 0 |
 
 ### Acceptance
 
@@ -633,15 +630,24 @@ python3 "$UWFL2_SRC/tools/compare_lc_runs.py" \
   diagnostics directory is supplied and do not change estimator decisions.
 - Commands run: `colcon test --packages-select fast_lio`; matched 30 s sim3
   disabled replay at x5; strict `compare_lc_runs.py` regression against the
-  Checkpoint 6 disabled replay.
+  Checkpoint 6 disabled replay; four sequential full x1 runs and
+  `report_lc_evaluation.py` comparisons.
 - Results: 24/24 tests passed. The instrumentation smoke was bit-exact: zero
   pose/rotation/timestamp differences, identical map SHA-256 and output counts.
   It received 149 sonar and 1690 IMU callbacks with zero timestamp rollback,
   buffer-clear, or stale-scan events. Scan latency was 3.37 ms mean and 4.48 ms
-  p95.
-- Blockers: current development host is x86_64, not a Jetson Orin Nano. Final Jetson acceptance cannot be marked complete until the same x1 runs are executed on that target.
-- Timing: Full x1 simulation and real-bag results remain pending.
-- Commit: instrumentation commit precedes the final evaluation commit.
+  p95. Full x1 disabled mode is bit-exact with Checkpoint 0 on both bags. The
+  enabled backend delivered every sonar/IMU callback, dropped no jobs, rejected
+  all inconsistent candidates, and preserved identical trajectories and maps.
+- Blockers: the tested bags produced no graph-accepted loop, so corrected-map,
+  re-registration, and commit timing cannot be measured in an automatic run.
+  A drifted closed-loop bag is required. This x86_64 host is not a Jetson Orin
+  Nano, so target resource acceptance also remains open.
+- Timing: simulation scan p95 was 4.60 ms disabled and 4.39 ms enabled; real
+  scan p95 was 6.07 ms disabled and 6.11 ms enabled. Enabled graph-append p95
+  was 0.754 ms (simulation) and 0.448 ms (real).
+- Commit: `cd356ce` adds instrumentation; this evaluation is committed
+  separately.
 
 ## Stop Conditions
 
