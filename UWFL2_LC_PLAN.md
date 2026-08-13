@@ -769,6 +769,23 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   0.0142 deg/scan mean absolute, confirming the ikd-tree/sonar path was not
   changed. Results are in `UWFL2_LC_RESULTS/zigzag_frontend_heading_mag_on_lc_off`
   and `zigzag_frontend_heading_dedup_lc_off_v2`. Visual map validation is pending.
+- A controlled `heading_cov_floor=0.05 rad^2` replay improved final relative-yaw
+  disagreement against the recorded `World -> base_link` odometry from 4.15 deg
+  to 0.06 deg, but mean/p95 disagreement did not improve. Since that odometry is
+  not ground truth, this candidate remains uncommitted pending visual map review.
+- Repeated-sample audit: DVL contained 2,574 distinct readings out of 2,574
+  messages (6.6 Hz), while pressure contained only 4,429 distinct readings out
+  of 81,633 messages (94.6% repeated republishes, about 10 Hz physical rate).
+  Pressure now follows the same one-physical-sample/one-update rule as magnetic
+  heading, including its 20-sample startup reference. Build and 2/2 tests pass.
+- Heading isolation: disabling DVL reduced return-leg anticlockwise heading pull
+  but worsened final heading and positional closure, so DVL is useful but was
+  overconfident. Its configured `5e-5 m^2/s^2` floor and prior NIS near 132 imply
+  about `0.0022 m^2/s^2` for a consistent 3D NIS near 3. Testing `0.0025` reduced
+  mean heading disagreement from 5.33 deg to 4.81 deg and closure from 1.35 m
+  to 0.94 m. Combining it with `heading_cov_floor=0.005 rad^2` reduced mean/p95
+  heading disagreement to 4.10/8.43 deg and return-wall disagreement near 360 s
+  from 4.49 deg to 0.79 deg. These YAML values remain pending visual validation.
 
 ## Stop Conditions
 

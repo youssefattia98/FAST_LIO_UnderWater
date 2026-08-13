@@ -1119,8 +1119,20 @@ private:
             pressure_init_samples_collected_ = 0;
             pressure_ref_finalized_ = false;
             pressure_reference_pose_ready_ = false;
+            last_pressure_raw_ = 0.0;
+            last_pressure_raw_valid_ = false;
         }
         last_timestamp_pressure_ = timestamp;
+        // The pressure driver can republish one hardware reading with fresh
+        // ROS timestamps. Do not treat those correlated copies as independent
+        // reference samples or Kalman measurements.
+        if (last_pressure_raw_valid_ &&
+            msg->fluid_pressure == last_pressure_raw_)
+        {
+            return;
+        }
+        last_pressure_raw_ = msg->fluid_pressure;
+        last_pressure_raw_valid_ = true;
         pressure_buffer_.push_back(msg);
     }
 
@@ -1544,6 +1556,8 @@ private:
     int pressure_init_samples_collected_ = 0;
     bool pressure_ref_finalized_ = false;
     bool pressure_reference_pose_ready_ = false;
+    double last_pressure_raw_ = 0.0;
+    bool last_pressure_raw_valid_ = false;
     double mag_cov_ = 1849.0;
     double mag_heading_cov_floor_ = 1e-6;
     double mag_innovation_gate_sigma_ = 3.0;
