@@ -848,6 +848,8 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   front-end timer. A post-change 20 s x5 smoke test published a 6,956-point
   snapshot and `/map_save` later wrote the same growing history at 17,949
   points; the final build and both CTest executables passed.
+- Implementation commit: `50e296e` (`feat: rebuild and publish corrected
+  history map`).
 - Failed/recovered tests: the first complete replay exceeded the existing
   3,000,000-point shadow budget (4,013,316 history points), so no correction
   committed. Voxelizing each owned submap at `max(filter_size_surf,
