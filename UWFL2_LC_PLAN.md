@@ -812,6 +812,7 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   60 s zigzag smoke replay at x5 published a nonempty 967-point active-tree
   snapshot. The first smoke command failed because ROS 2 Jazzy uses
   `--playback-duration`, not `--duration`; the corrected replay passed.
+  Implementation commit: `b940e94`.
 
 ## Stop Conditions
 
