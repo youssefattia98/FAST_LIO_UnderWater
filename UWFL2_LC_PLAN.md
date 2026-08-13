@@ -731,6 +731,14 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   pending because this real bag has no ground truth.
 - Commit: `cf5b722` records the zigzag tuning evidence. The active YAML remains
   in the user's existing uncommitted config worktree for visual x1 validation.
+- Zigzag reproducibility check: a later x5 default-config replay produced zero
+  proposals (115 keyframes, 90 descriptor and 25 geometry rejections). Comparing
+  resolved parameters against the successful run found one estimator change:
+  `magnetometer.heading_cov_floor` was 1.0 instead of `1.0e-6`. This changed the
+  heading trajectory/keyframe clouds and reduced final overlap below 0.80.
+  `default.yaml` was restored to `1.0e-6`; loop thresholds were not weakened to
+  compensate for the changed front-end trajectory. Artifacts are retained in
+  `UWFL2_LC_RESULTS/zigzag_default_verify_x5`.
 
 ## Stop Conditions
 
