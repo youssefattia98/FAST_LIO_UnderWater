@@ -1392,7 +1392,9 @@ public:
         else
         {
             auto lidar_qos = rclcpp::QoS(rclcpp::KeepLast(200000));
-            lidar_qos.reliability_best_available();
+            // Best-effort subscriptions match both best-effort and reliable
+            // sensor publishers and are supported by ROS 2 Humble and newer.
+            lidar_qos.best_effort();
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 lid_topic, lidar_qos, standard_pcl_cbk, lidar_options);
         }
@@ -1486,7 +1488,7 @@ public:
                 "/uwfl2_lc/inject_loop",
                 std::bind(&LaserMappingNode::inject_loop_callback, this,
                           std::placeholders::_1, std::placeholders::_2),
-                rclcpp::ServicesQoS(), backend_callback_group_);
+                rmw_qos_profile_services_default, backend_callback_group_);
         }
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
