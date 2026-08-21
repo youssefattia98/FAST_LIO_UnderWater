@@ -865,6 +865,18 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   (14.2 MB) to 73,160 points (2.34 MB); peak RSS dropped from 618.6 MB to
   531.5 MB. Latest-scan registration remained valid and reduced its residual.
 - Implementation commit: `b25f6ad` (`perf: compact corrected map output`).
+- Visualization output simplification: obsolete `/cloud_registered` and
+  `/uwfl2/active_map` publishers, callbacks, state, and parameters were removed
+  completely. All configs now expose only `publish.map_en` and
+  `publish.corrected_map_interval_s` for map visualization. Each processed
+  sonar scan marks corrected history dirty; the backend publishes at most once
+  per configured interval (0.2 s, therefore up to 5 Hz) and never resends an
+  unchanged map. The user's RViz configuration was intentionally not modified.
+- Validation: isolated build under `/tmp/uwfl2_build` passed and both CTest
+  executables passed. Repository search found no remaining registered-cloud or
+  active-map code/config symbols. A ROS graph runtime check was attempted but
+  this managed environment denied DDS sockets and ROS log writes; no claim is
+  made from that failed runtime attempt.
 - Failed/recovered tests: the first complete replay exceeded the existing
   3,000,000-point shadow budget (4,013,316 history points), so no correction
   committed. Voxelizing each owned submap at `max(filter_size_surf,

@@ -78,7 +78,6 @@
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV_DEFAULT (0.001)
-#define PUBFRAME_PERIOD     (20)
 double LASER_POINT_COV_XY = LASER_POINT_COV_DEFAULT;
 double LASER_POINT_COV_Z = LASER_POINT_COV_DEFAULT;
 
@@ -116,11 +115,10 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double last_processed_time = -1.0, lidar_timeout = 0.25, imu_rate_hz = 100.0;
 double gravity_m_s2 = G_m_s2;
-int    effct_feat_num = 0, scan_count = 0, publish_count = 0;
+int    effct_feat_num = 0, scan_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
-bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 bool    is_first_lidar = true;
 bool auxiliary_fusion_enabled = false;
 
@@ -337,7 +335,6 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
     ++imu_callbacks_received;
-    publish_count ++;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
     msg->angular_velocity.x *= imu_gyro_scale.x();
@@ -592,82 +589,6 @@ void map_incremental()
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
 std::mutex mapping_output_mutex;
-void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
-{
-    if(scan_pub_en || pcd_save_en)
-    {
-        if(scan_pub_en)
-        {
-            PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
-            int size = laserCloudFullRes->points.size();
-            PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
-
-            for (int i = 0; i < size; i++)
-            {
-                RGBpointBodyToWorld(&laserCloudFullRes->points[i],
-                                    &laserCloudWorld->points[i]);
-            }
-
-            sensor_msgs::msg::PointCloud2 laserCloudmsg;
-            pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
-            // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-            laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-            laserCloudmsg.header.frame_id = "camera_init";
-            pubLaserCloudFull->publish(laserCloudmsg);
-            publish_count -= PUBFRAME_PERIOD;
-        }
-    }
-
-    /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. noted that pcd save will influence the real-time performences **/
-    /*
-    if (pcd_save_en)
-    {
-        int size = feats_undistort->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
-
-        for (int i = 0; i < size; i++)
-        {
-            RGBpointBodyToWorld(&feats_undistort->points[i], \
-                                &laserCloudWorld->points[i]);
-        }
-        *pcl_wait_save += *laserCloudWorld;
-
-        static int scan_wait_num = 0;
-        scan_wait_num ++;
-        if (pcl_wait_save->size() > 0 && pcd_save_interval > 0  && scan_wait_num >= pcd_save_interval)
-        {
-            pcd_index ++;
-            string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
-            pcl::PCDWriter pcd_writer;
-            pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
-            pcl_wait_save->clear();
-            scan_wait_num = 0;
-        }
-    }
-    */
-}
-
-void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
-{
-    int size = feats_undistort->points.size();
-    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
-
-    for (int i = 0; i < size; i++)
-    {
-        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
-                            &laserCloudIMUBody->points[i]);
-    }
-
-    sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
-    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "body";
-    pubLaserCloudFull_body->publish(laserCloudmsg);
-    publish_count -= PUBFRAME_PERIOD;
-}
 
 void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
 {
@@ -683,34 +604,6 @@ void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shar
     laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
     laserCloudFullRes3.header.frame_id = "camera_init";
     pubLaserCloudEffect->publish(laserCloudFullRes3);
-}
-
-void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap)
-{
-    PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
-    int size = laserCloudFullRes->points.size();
-    PointCloudXYZI::Ptr laserCloudWorld( \
-                    new PointCloudXYZI(size, 1));
-
-    for (int i = 0; i < size; i++)
-    {
-        RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
-                            &laserCloudWorld->points[i]);
-    }
-    *pcl_wait_pub += *laserCloudWorld;
-
-    sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
-    // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "camera_init";
-    pubLaserCloudMap->publish(laserCloudmsg);
-
-    // sensor_msgs::msg::PointCloud2 laserCloudMap;
-    // pcl::toROSMsg(*featsFromMap, laserCloudMap);
-    // laserCloudMap.header.stamp = get_ros_time(lidar_end_time);
-    // laserCloudMap.header.frame_id = "camera_init";
-    // pubLaserCloudMap->publish(laserCloudMap);
 }
 
 void save_to_pcd(const PointCloudXYZI &map)
@@ -1071,10 +964,7 @@ public:
         this->declare_parameter<bool>("publish.path_en", true);
         this->declare_parameter<bool>("publish.effect_map_en", false);
         this->declare_parameter<bool>("publish.map_en", false);
-        this->declare_parameter<double>("publish.active_map_interval_s", 1.0);
-        this->declare_parameter<bool>("publish.scan_publish_en", true);
-        this->declare_parameter<bool>("publish.dense_publish_en", true);
-        this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
+        this->declare_parameter<double>("publish.corrected_map_interval_s", 0.2);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/points_raw");
@@ -1170,12 +1060,9 @@ public:
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
-        this->get_parameter_or<double>("publish.active_map_interval_s",
-                                       active_map_interval_s_, 1.0);
-        active_map_interval_s_ = std::max(0.1, active_map_interval_s_);
-        this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
-        this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
-        this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+        this->get_parameter_or<double>("publish.corrected_map_interval_s",
+                                       corrected_map_interval_s_, 0.2);
+        corrected_map_interval_s_ = std::max(0.05, corrected_map_interval_s_);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/points_raw");
@@ -1512,11 +1399,8 @@ public:
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk, sensor_options);
         aux_fusion_.create_subscriptions(*this, sensor_callback_group_);
-        pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         if (map_pub_en)
         {
-            pubActiveMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-                "/uwfl2/active_map", rclcpp::QoS(1).transient_local().reliable());
             pubCorrectedMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 "/uwfl2/corrected_map", rclcpp::QoS(1).transient_local().reliable());
         }
@@ -1576,7 +1460,7 @@ public:
         {
             const auto corrected_map_period = std::chrono::duration_cast<
                 std::chrono::milliseconds>(std::chrono::duration<double>(
-                std::max(0.1, active_map_interval_s_)));
+                corrected_map_interval_s_));
             corrected_map_timer_ = this->create_wall_timer(
                 corrected_map_period,
                 std::bind(&LaserMappingNode::maybe_publish_corrected_map, this),
@@ -1617,7 +1501,6 @@ private:
     void timer_callback()
     {
         try_commit_loop_correction();
-        maybe_publish_active_map();
         maybe_publish_loop_visualization();
         bool imu_only_measure = false;
         bool has_measurement = false;
@@ -1868,8 +1751,6 @@ private:
             submit_loop_keyframe(Measures.lidar_end_time);
             t5 = omp_get_wtime();
             
-            /******* Publish points *******/
-            if (scan_pub_en || pcd_save_en)      publish_frame_world(pubLaserCloudFull_);
             finish_scan_timing("lidar_update");
         }
     }
@@ -2007,6 +1888,10 @@ private:
         {
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
             *pcl_wait_pub += compact_world;
+        }
+        if (map_pub_en)
+        {
+            corrected_map_publish_requested_.store(true);
         }
     }
 
@@ -2345,7 +2230,6 @@ private:
             position_last = state_point.pos;
             loop_closure_->notify_correction_result(
                 true, elapsed_ms(), "committed");
-            active_map_publish_requested_ = true;
             if (corrected_mapping_output.cloud)
             {
                 std::lock_guard<std::mutex> lock(mapping_output_mutex);
@@ -2369,63 +2253,6 @@ private:
                       state_point.rot * state_point.offset_T_L_I;
             reject("transaction_exception_rollback");
         }
-    }
-
-    void maybe_publish_active_map()
-    {
-        if (!map_pub_en || !pubActiveMap_ || !ikdtree || !ikdtree->Root_Node)
-        {
-            return;
-        }
-        if (pubActiveMap_->get_subscription_count() == 0 &&
-            pubActiveMap_->get_intra_process_subscription_count() == 0)
-        {
-            return;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (!active_map_publish_requested_ && now < next_active_map_publish_)
-        {
-            return;
-        }
-
-        PointVector tree_points;
-        tree_points.reserve(static_cast<std::size_t>(std::max(0, ikdtree->validnum())));
-        BoxPointType bounds = ikdtree->tree_range();
-        constexpr float boundary_margin = 1.0e-3F;
-        for (int axis = 0; axis < 3; ++axis)
-        {
-            bounds.vertex_min[axis] -= boundary_margin;
-            bounds.vertex_max[axis] += boundary_margin;
-        }
-        ikdtree->Box_Search(bounds, tree_points);
-
-        constexpr std::size_t maximum_visualization_points = 250000;
-        const std::size_t stride = std::max<std::size_t>(
-            1, (tree_points.size() + maximum_visualization_points - 1) /
-                   maximum_visualization_points);
-        PointCloudXYZI active_map;
-        active_map.points.reserve((tree_points.size() + stride - 1) / stride);
-        for (std::size_t index = 0; index < tree_points.size(); index += stride)
-        {
-            active_map.points.push_back(tree_points[index]);
-        }
-        active_map.width = static_cast<std::uint32_t>(active_map.points.size());
-        active_map.height = 1;
-        active_map.is_dense = false;
-
-        sensor_msgs::msg::PointCloud2 message;
-        pcl::toROSMsg(active_map, message);
-        message.header.stamp = lidar_end_time > 0.0
-                                   ? get_ros_time(lidar_end_time)
-                                   : this->get_clock()->now();
-        message.header.frame_id = "camera_init";
-        pubActiveMap_->publish(message);
-
-        active_map_publish_requested_ = false;
-        next_active_map_publish_ = now + std::chrono::duration_cast<
-            std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(active_map_interval_s_));
     }
 
     void maybe_publish_corrected_map()
@@ -2750,8 +2577,6 @@ private:
     std::atomic<std::uint64_t> aux_late_pressure_{0};
     std::atomic<std::uint64_t> aux_late_magnetometer_{0};
     std::atomic<std::uint64_t> timed_scans_{0};
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubActiveMap_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubCorrectedMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
@@ -2773,10 +2598,8 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
-    bool active_map_publish_requested_ = true;
     std::atomic<bool> corrected_map_publish_requested_{true};
-    double active_map_interval_s_ = 1.0;
-    std::chrono::steady_clock::time_point next_active_map_publish_{};
+    double corrected_map_interval_s_ = 0.2;
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;

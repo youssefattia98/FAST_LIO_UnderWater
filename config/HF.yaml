@@ -96,11 +96,8 @@
 
         publish:
             map_en: true
-            active_map_interval_s: 1.0
+            corrected_map_interval_s: 0.2
             path_en:  false
-            scan_publish_en:  true
-            dense_publish_en: true
-            scan_bodyframe_pub_en: true
 
         pcd_save:
             pcd_save_en: true

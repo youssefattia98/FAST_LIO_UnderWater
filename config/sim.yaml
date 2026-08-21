@@ -82,19 +82,22 @@
 
         publish:
             map_en: true
-            active_map_interval_s: 1.0
+            corrected_map_interval_s: 0.2
             path_en:  false
-            scan_publish_en:  true
-            dense_publish_en: true
-            scan_bodyframe_pub_en: true
 
         pcd_save:
             pcd_save_en: true
             interval: -1
 
         loop_closure:
-            enable: false
-            automatic_detection_enable: false
+            enable: true
+            automatic_detection_enable: true
             visualization_enable: true
+            # Ignore revisits shorter than the expected survey return time.
+            std_minimum_loop_duration_s: 300.0
+            std_overlap_minimum: 0.20
+            std_required_confirmations: 2
+            std_single_detection_overlap_minimum: 0.80
+            std_accepted_loop_cooldown_s: 30.0
             # 95% chi-square consistency threshold for a full-SE(3) innovation.
             loop_maximum_initial_nis: 12.592
