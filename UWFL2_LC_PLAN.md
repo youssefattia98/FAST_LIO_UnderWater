@@ -885,6 +885,25 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   newest graph snapshot, allowing the accepted loop to complete without
   blocking the front end.
 
+### ROS 2 Humble / Jetson Portability
+
+- [x] Replace Jazzy-only LiDAR QoS and service-construction APIs with APIs
+  supported by both ROS 2 Humble and Jazzy. The LiDAR subscriber is explicitly
+  best-effort, which remains compatible with reliable and best-effort sensor
+  publishers; the loop-injection service uses the default RMW service profile.
+- [x] Local Jazzy build passed in 1 min 59 s:
+  `cd ~/ros2_ws && colcon build --packages-select fast_lio --symlink-install`.
+- [x] Local CTest passed 2/2 tests:
+  `ctest --test-dir ~/ros2_ws/build/fast_lio --output-on-failure`.
+- [x] Clean Jetson Orin Nano ROS 2 Humble/aarch64 build passed in 9 min 11 s:
+  `rm -rf ~/ros2_ws/build/fast_lio ~/ros2_ws/install/fast_lio && cd ~/ros2_ws && colcon build --packages-select fast_lio --symlink-install`.
+- [x] Jetson CTest passed 2/2 tests in 1.11 s:
+  `ctest --test-dir ~/ros2_ws/build/fast_lio --output-on-failure`.
+- Implementation commit: `ebd3d82` (`fix: support ROS 2 Humble QoS APIs`).
+  One pre-build verification command stopped intentionally because it compared
+  against an incorrectly expanded commit hash; the exact hash was then read
+  from Git and the clean build proceeded without source changes.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
