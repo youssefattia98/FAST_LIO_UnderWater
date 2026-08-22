@@ -325,6 +325,7 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
 
 ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
 {
+    const auto build_started = Clock::now();
     ShadowMapResult result;
     result.graph_version = request.graph.version;
     result.graph_loop_factor_count = request.graph.loop_factor_count;
@@ -338,6 +339,7 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
         if (filtered.empty())
         {
             result.reason = "corrected_map_empty";
+            result.total_time_ms = milliseconds(build_started, Clock::now());
             return result;
         }
         ShadowMapConfig history_config = config_;
@@ -363,6 +365,7 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
     {
         result.reason = exception.what();
     }
+    result.total_time_ms = milliseconds(build_started, Clock::now());
     return result;
 }
 

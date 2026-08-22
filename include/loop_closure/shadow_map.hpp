@@ -46,6 +46,7 @@ struct ShadowMapResult
     double reconstruction_time_ms = 0.0;
     double downsample_time_ms = 0.0;
     double tree_build_time_ms = 0.0;
+    double total_time_ms = 0.0;
     bool valid = false;
     std::string reason;
     std::shared_ptr<ShadowTree> tree;

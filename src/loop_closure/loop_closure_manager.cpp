@@ -52,7 +52,7 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
         shadow_diagnostics_
             << "monotonic_s,graph_version,source_tree_generation,status,reason,selected_keyframes,"
                "input_points,filtered_points,reconstruction_time_ms,downsample_time_ms,"
-               "tree_build_time_ms,estimated_tree_bytes\n";
+               "tree_build_time_ms,total_time_ms,estimated_tree_bytes\n";
         registration_diagnostics_.open(
             config_.diagnostics_directory / "reregistrations.csv");
         registration_diagnostics_
@@ -132,9 +132,7 @@ void LoopClosureManager::run_shadow_builder()
     {
         ++shadow_builds_started_;
         ShadowMapResult result = shadow_map_builder_.build(*request);
-        const double elapsed_ms = result.reconstruction_time_ms +
-                                  result.downsample_time_ms +
-                                  result.tree_build_time_ms;
+        const double elapsed_ms = result.total_time_ms;
         double sum = shadow_build_time_ms_sum_.load();
         while (!shadow_build_time_ms_sum_.compare_exchange_weak(sum, sum + elapsed_ms))
         {
@@ -507,6 +505,7 @@ void LoopClosureManager::write_shadow_diagnostic(
                         << result.reconstruction_time_ms << ','
                         << result.downsample_time_ms << ','
                         << result.tree_build_time_ms << ','
+                        << result.total_time_ms << ','
                         << result.estimated_tree_bytes << '\n';
     shadow_diagnostics_.flush();
 }

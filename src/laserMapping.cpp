@@ -1364,7 +1364,10 @@ public:
             front_end_timing_
                 << "scan_timestamp,status,elapsed_ms,effective_features,"
                    "input_points,map_points,sonar_dx_roll_deg,"
-                   "sonar_dx_pitch_deg,sonar_dx_yaw_deg\n";
+                   "sonar_dx_pitch_deg,sonar_dx_yaw_deg,imu_aux_ms,"
+                   "fov_downsample_ms,lidar_iekf_ms,correspondence_ms,"
+                   "measurement_model_ms,odom_publish_ms,map_incremental_ms,"
+                   "loop_bookkeeping_ms\n";
         }
         if (loop_config.enabled)
         {
@@ -1500,6 +1503,18 @@ public:
     }
 
 private:
+    struct FrontEndStageTiming
+    {
+        double imu_aux_ms = 0.0;
+        double fov_downsample_ms = 0.0;
+        double lidar_iekf_ms = 0.0;
+        double correspondence_ms = 0.0;
+        double measurement_model_ms = 0.0;
+        double odom_publish_ms = 0.0;
+        double map_incremental_ms = 0.0;
+        double loop_bookkeeping_ms = 0.0;
+    };
+
     void timer_callback()
     {
         try_commit_loop_correction();
@@ -1520,13 +1535,14 @@ private:
         {
             const double scan_processing_started = omp_get_wtime();
             V3D sonar_attitude_correction = V3D::Zero();
+            FrontEndStageTiming stage_timing;
             const auto finish_scan_timing = [&](const char *status) {
                 if (!imu_only_measure)
                 {
                     write_front_end_timing(
                         Measures.lidar_end_time, status,
                         1000.0 * (omp_get_wtime() - scan_processing_started),
-                        sonar_attitude_correction);
+                        sonar_attitude_correction, stage_timing);
                 }
             };
             if (flg_first_scan)
@@ -1568,6 +1584,8 @@ private:
                 }
                 last_processed_time = Measures.lidar_end_time;
                 update_state_outputs();
+                stage_timing.imu_aux_ms =
+                    1000.0 * (omp_get_wtime() - t0);
                 finish_scan_timing("imu_initialization");
                 return;
             }
@@ -1624,6 +1642,7 @@ private:
             }
             last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
+            stage_timing.imu_aux_ms = 1000.0 * (omp_get_wtime() - t0);
 
             if (imu_only_measure)
             {
@@ -1664,12 +1683,15 @@ private:
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
             /*** Segment the map in lidar FOV ***/
+            const double fov_downsample_started = omp_get_wtime();
             lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
             downSizeFilterSurf.setInputCloud(feats_undistort);
             downSizeFilterSurf.filter(*feats_down_body);
             t1 = omp_get_wtime();
+            stage_timing.fov_downsample_ms =
+                1000.0 * (t1 - fov_downsample_started);
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
             if(ikdtree->Root_Node == nullptr)
@@ -1690,8 +1712,11 @@ private:
                         loop_closure_->notify_active_tree_generation(
                             active_tree_generation_);
                     }
+                    const double loop_bookkeeping_started = omp_get_wtime();
                     accumulate_mapping_output();
                     submit_loop_keyframe(Measures.lidar_end_time);
+                    stage_timing.loop_bookkeeping_ms =
+                        1000.0 * (omp_get_wtime() - loop_bookkeeping_started);
                 }
                 g_publish_mode = "kdtree_init";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
@@ -1735,23 +1760,36 @@ private:
             update_state_outputs();
 
             double t_update_end = omp_get_wtime();
+            stage_timing.lidar_iekf_ms =
+                1000.0 * (t_update_end - t_update_start);
+            stage_timing.correspondence_ms = 1000.0 * match_time;
+            stage_timing.measurement_model_ms = 1000.0 * solve_time;
 
             /******* Publish odometry *******/
+            const double odom_publish_started = omp_get_wtime();
             g_publish_mode = "lidar_update";
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+            stage_timing.odom_publish_ms =
+                1000.0 * (omp_get_wtime() - odom_publish_started);
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
             map_incremental();
+            const double map_incremental_finished = omp_get_wtime();
+            stage_timing.map_incremental_ms =
+                1000.0 * (map_incremental_finished - t3);
             if (loop_closure_)
             {
                 ++active_tree_generation_;
                 loop_closure_->notify_active_tree_generation(
                     active_tree_generation_);
             }
+            const double loop_bookkeeping_started = omp_get_wtime();
             accumulate_mapping_output();
             submit_loop_keyframe(Measures.lidar_end_time);
             t5 = omp_get_wtime();
+            stage_timing.loop_bookkeeping_ms =
+                1000.0 * (t5 - loop_bookkeeping_started);
             
             finish_scan_timing("lidar_update");
         }
@@ -1759,7 +1797,8 @@ private:
 
     void write_front_end_timing(double timestamp, const char *status,
                                 double elapsed_ms,
-                                const V3D &sonar_attitude_correction)
+                                const V3D &sonar_attitude_correction,
+                                const FrontEndStageTiming &stage_timing)
     {
         if (!front_end_timing_)
         {
@@ -1772,7 +1811,15 @@ private:
                           << (ikdtree ? ikdtree->validnum() : 0) << ','
                           << sonar_attitude_correction.x() * 180.0 / M_PI << ','
                           << sonar_attitude_correction.y() * 180.0 / M_PI << ','
-                          << sonar_attitude_correction.z() * 180.0 / M_PI << '\n';
+                          << sonar_attitude_correction.z() * 180.0 / M_PI << ','
+                          << stage_timing.imu_aux_ms << ','
+                          << stage_timing.fov_downsample_ms << ','
+                          << stage_timing.lidar_iekf_ms << ','
+                          << stage_timing.correspondence_ms << ','
+                          << stage_timing.measurement_model_ms << ','
+                          << stage_timing.odom_publish_ms << ','
+                          << stage_timing.map_incremental_ms << ','
+                          << stage_timing.loop_bookkeeping_ms << '\n';
         front_end_timing_.flush();
         ++timed_scans_;
     }

@@ -465,17 +465,44 @@ def timing_metrics(run: Path) -> dict[str, Any]:
     shadow_total = []
     for row in shadow:
         try:
-            shadow_total.append(
-                float(row["reconstruction_time_ms"])
-                + float(row["downsample_time_ms"])
-                + float(row["tree_build_time_ms"])
-            )
+            if row.get("total_time_ms") not in (None, ""):
+                shadow_total.append(float(row["total_time_ms"]))
+            else:
+                shadow_total.append(
+                    float(row["reconstruction_time_ms"])
+                    + float(row["downsample_time_ms"])
+                    + float(row["tree_build_time_ms"])
+                )
         except (KeyError, TypeError, ValueError):
             continue
     return {
         "front_end_scan_ms": numeric_column(front_end, "elapsed_ms"),
         "front_end_lidar_update_ms": numeric_column(
             front_end, "elapsed_ms", status="lidar_update"
+        ),
+        "front_end_imu_aux_ms": numeric_column(
+            front_end, "imu_aux_ms", status="lidar_update"
+        ),
+        "front_end_fov_downsample_ms": numeric_column(
+            front_end, "fov_downsample_ms", status="lidar_update"
+        ),
+        "front_end_lidar_iekf_ms": numeric_column(
+            front_end, "lidar_iekf_ms", status="lidar_update"
+        ),
+        "front_end_correspondence_ms": numeric_column(
+            front_end, "correspondence_ms", status="lidar_update"
+        ),
+        "front_end_measurement_model_ms": numeric_column(
+            front_end, "measurement_model_ms", status="lidar_update"
+        ),
+        "front_end_odom_publish_ms": numeric_column(
+            front_end, "odom_publish_ms", status="lidar_update"
+        ),
+        "front_end_map_incremental_ms": numeric_column(
+            front_end, "map_incremental_ms", status="lidar_update"
+        ),
+        "front_end_loop_bookkeeping_ms": numeric_column(
+            front_end, "loop_bookkeeping_ms", status="lidar_update"
         ),
         "graph_append_ms": numeric_column(keyframes, "graph_time_ms"),
         "graph_loop_optimization_ms": numeric_column(loops, "optimization_time_ms"),
