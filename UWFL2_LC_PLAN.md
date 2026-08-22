@@ -920,16 +920,22 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   `bag play --playback-duration`). The runner now uses Humble-compatible
   positional topics and an external duration fallback; no estimator run was
   started by the failed preflight.
-- [ ] The second Jetson smoke reached playback and telemetry, but its short
-  externally limited window ended before a usable sonar scan. `/map_save` then
-  exposed an existing empty-cloud PCL exception. The service now reports an
-  empty map without terminating the node; repeat with a longer smoke window.
-- [ ] Run `sim3` at x1 on the local workstation and Jetson Orin Nano with
-  RViz, loop markers, and corrected-map publication disabled.
-- [ ] Fix the benchmark parameters at `max_iteration=4`,
+- [x] The second Jetson smoke reached playback and telemetry, but its short
+  externally limited window ended before a usable sonar scan and exposed an
+  empty-cloud PCL exception in `/map_save`. The service now rejects empty maps
+  cleanly. A longer 200 s smoke then passed with 925 sonar scans, 47 keyframes,
+  a 15,477-point saved map, and valid 1 Hz `tegrastats` data.
+- [x] Complete the full local `sim3` x1 baseline with RViz, loop markers, and
+  corrected-map publication disabled. Commit `71df2fc`; all 5,948 sonar and
+  66,673 IMU messages arrived, and one automatic loop committed.
+- [ ] Complete the full Jetson Orin Nano `sim3` x1 baseline with the same
+  output settings. The first full run lost the initial 0.587 s during DDS
+  discovery (8 sonar and 89 IMU messages), which changed initialization and
+  prevented the final loop match. Repeat with a two-second playback delay.
+- [x] Fix the benchmark parameters at `max_iteration=4`,
   `filter_size_surf=0.3`, `filter_size_map=0.3`, and
   `cube_side_length=100.0` for every before/after comparison.
-- [ ] Record process and system CPU, GPU, RAM, scan latency, graph/STD time,
+- [ ] Analyze and record process and system CPU, GPU, RAM, scan latency, graph/STD time,
   shadow-tree rebuild time, registration/commit time, message delivery, loop
   events, Git/config/bag hashes, temperatures, and Jetson power at 1 Hz.
 

@@ -313,6 +313,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label", required=True)
     parser.add_argument("--domain-id", required=True, type=int)
     parser.add_argument("--rate", type=float, default=1.0)
+    parser.add_argument(
+        "--playback-delay",
+        type=float,
+        default=2.0,
+        help="Delay playback after rosbag publishers are created so DDS discovery completes.",
+    )
     parser.add_argument("--duration", type=float)
     parser.add_argument("--bag", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
@@ -343,6 +349,8 @@ def parse_args() -> argparse.Namespace:
 def validate_args(args: argparse.Namespace, source_root: Path) -> None:
     if args.rate <= 0.0:
         raise ValueError("--rate must be positive")
+    if args.playback_delay < 0.0:
+        raise ValueError("--playback-delay must be non-negative")
     if args.duration is not None and args.duration <= 0.0:
         raise ValueError("--duration must be positive")
     if args.max_iteration is not None and args.max_iteration <= 0:
@@ -420,6 +428,7 @@ def main() -> int:
         "runtime_config_sha256": sha256(runtime_config),
         "domain_id": args.domain_id,
         "rate": args.rate,
+        "playback_delay_s": args.playback_delay,
         "duration_limit_s": args.duration,
         "clock_mode": args.clock_mode,
         "drain_seconds": args.drain_seconds,
@@ -618,6 +627,8 @@ def main() -> int:
             str(args.bag),
             "--rate",
             str(args.rate),
+            "--delay",
+            str(args.playback_delay),
             "--disable-keyboard-controls",
         ]
         externally_limited_playback = args.duration is not None and ros_distro == "humble"
@@ -630,7 +641,9 @@ def main() -> int:
         player = start_process(player_command, cwd=args.output, env=env, log=player_log)
         if externally_limited_playback:
             try:
-                player_returncode = player.wait(timeout=args.duration / args.rate)
+                player_returncode = player.wait(
+                    timeout=args.playback_delay + args.duration / args.rate
+                )
             except subprocess.TimeoutExpired:
                 player_returncode = stop_process(player)
                 manifest["commands"]["playback_duration_fallback"] = (
