@@ -1051,6 +1051,20 @@ python3 tools/analyze_lc_run.py \
   trajectory/map accuracy, covariance validity, and message delivery while CPU,
   RAM, or latency improves measurably.
 
+P3 validation cadence:
+
+- Every focused commit: build, CTest, and the relevant deterministic unit or
+  component test. No full bag is required for a code path the test exercises
+  exactly.
+- Front-end-only changes: use the fixed 300 s `sim3` slice at x5 to compare
+  stage timing, callbacks, covariance validity, and queue behavior.
+- Full `sim3`: run only after a major group that can affect STD decisions or an
+  accepted-loop transaction (after P3.2, after P3.3/3.4 if changed, and once
+  for the final local candidate). Use x5 during development; reserve the
+  matched x1 replay for final local and Jetson validation.
+- Any changed loop decision, trajectory, map, or covariance forces a full x1
+  regression before the optimization can be accepted.
+
 Planned P3 order:
 
 - [ ] P3.1: move keyframe selection before pending-map compaction, share one
