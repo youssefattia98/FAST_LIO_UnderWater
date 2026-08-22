@@ -1046,8 +1046,8 @@ python3 tools/analyze_lc_run.py \
 
 ### P3: Local Optimization
 
-- [ ] Apply one focused optimization per commit and build/test each checkpoint.
-- [ ] Re-run the matched local benchmark and require unchanged loop decisions,
+- [x] Apply one focused optimization per commit and build/test each checkpoint.
+- [x] Re-run the matched local benchmark and require unchanged loop decisions,
   trajectory/map accuracy, covariance validity, and message delivery while CPU,
   RAM, or latency improves measurably.
 
@@ -1149,12 +1149,37 @@ P3.5 result:
 
 ### P4: Jetson Validation And Report
 
-- [ ] Clean-build and run the accepted implementation on the Jetson using the
+- [x] Clean-build and run the accepted implementation on the Jetson using the
   exact P1 bag and parameters.
-- [ ] Confirm real-time operation and compare initial/final CPU, GPU, RAM,
+- [x] Confirm real-time operation and compare initial/final CPU, GPU, RAM,
   temperatures, power, latency, loop spikes, timing, and dropped messages.
-- [ ] Write `UWFL2_LC_PERFORMANCE.md` as a one-page summary of baseline,
+- [x] Write `UWFL2_LC_PERFORMANCE.md` as a one-page summary of baseline,
   changes, final measurements, accuracy checks, and remaining bottlenecks.
+
+P4 result:
+
+- Final local artifact: `perf_optimized_local_sim3_x1_64b4cf2`. Final Jetson
+  artifact: `perf_optimized_jetson_sim3_x1_64b4cf2`; both use the P1 fixed
+  parameters and x1 replay, with the Jetson retaining the two-second discovery
+  delay.
+- Local scan mean/p95 improved from 3.40/4.81 to 3.03/4.18 ms, peak RSS from
+  341.5 to 310.2 MiB, and ATE RMSE/max/final from
+  0.0785/0.1747/0.0442 to 0.0783/0.1740/0.0442 m. All callbacks and loop
+  decisions matched; the maximum enabled-mode difference was 2.29 mm and
+  0.0028 deg due to the faster asynchronous commit instant.
+- Jetson scan mean/p95 improved from 31.12/43.63 to 18.69/25.28 ms, process
+  CPU mean from 42.1% to 39.2%, system CPU mean from 24.1% to 17.5%, process
+  RSS maximum from 317.3 to 287.1 MiB, and power mean from 7.71 to 7.61 W.
+  Temperatures remained below 52.6 C CPU and 54.2 C GPU.
+- The old Jetson run missed one sonar and 12 IMU callbacks; the final run
+  received all 5,948/66,673. Both emitted 5,945 odometry messages with equal
+  timestamps and no invalid pose, covariance, or nonmonotonic timestamp. The
+  input mismatch explains why their ATE values are not an exact regression
+  pair; the matched local result verifies estimator accuracy.
+- Final Jetson clean build used isolated `build_p4_clean`/`install_p4_clean`,
+  selected two correspondence workers automatically, completed in 8 min 8 s,
+  and passed CTest 2/2. Full results and remaining bottlenecks are in
+  `UWFL2_LC_PERFORMANCE.md`.
 
 ## Stop Conditions
 
