@@ -1076,7 +1076,7 @@ Planned P3 order:
   the radius-limited shadow tree from that pass.
 - [x] P3.4: optimize remaining registration allocations only if its remeasured
   accepted-loop time is material.
-- [ ] P3.5: test ARM OpenMP thread counts separately on Jetson; retain one
+- [x] P3.5: test ARM OpenMP thread counts separately on Jetson; retain one
   thread unless the complete CPU/power/latency result is better.
 
 P3.1 result:
@@ -1129,6 +1129,23 @@ P3.3/P3.4 result:
 - P3.4 requires no source change: latest-scan registration measured 21.11 ms
   once in the accepted-loop transaction and is no longer material relative to
   recurring front-end work or the shadow rebuild.
+
+P3.5 result:
+
+- Added build-time `UWFL2_MP_PROC_NUM`; an empty value preserves the selected
+  architecture default. ARM systems with more than three cores now use two
+  correspondence workers; smaller ARM systems retain one.
+- Jetson builds and CTest passed 2/2 for one and two workers. Matched 180 s x1
+  slices are retained as `p3_5_jetson_mp1_sim3_180s_x1` and
+  `p3_5_jetson_mp2_sim3_180s_x1`.
+- Two workers reduced scan mean/p95 from 29.38/37.47 to 19.49/24.13 ms and
+  correspondence mean/p95 from 21.32/30.01 to 11.35/15.85 ms. Process CPU
+  mean changed from 34.8% to 35.5%, system CPU mean from 18.7% to 17.1%, and
+  mean device power remained 7.66 W.
+- `compare_lc_runs.py` passed: map hash, timestamps, every pose, and every
+  rotation were exactly equal. Three workers were not tested because two
+  already meets the timing target while reserving four Jetson CPU cores for
+  other processes.
 
 ### P4: Jetson Validation And Report
 
