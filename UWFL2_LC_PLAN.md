@@ -915,6 +915,11 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   `sim3` smoke at x5 completed with RViz/map/marker output disabled and resolved
   the fixed parameters correctly. Python syntax and telemetry cadence checks
   passed. Smoke artifacts: `/tmp/uwfl2_benchmark_smoke_20260822`.
+- [x] The first Jetson smoke preflight found Humble CLI incompatibilities
+  before playback (`bag record --topics`, `param dump --timeout`, and
+  `bag play --playback-duration`). The runner now uses Humble-compatible
+  positional topics and an external duration fallback; no estimator run was
+  started by the failed preflight.
 - [ ] Run `sim3` at x1 on the local workstation and Jetson Orin Nano with
   RViz, loop markers, and corrected-map publication disabled.
 - [ ] Fix the benchmark parameters at `max_iteration=4`,

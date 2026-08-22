@@ -385,6 +385,7 @@ def main() -> int:
     if args.inject_loop is not None:
         args.inject_loop = args.inject_loop.expanduser().resolve()
     workspace_setup = args.workspace / "install" / "setup.bash"
+    ros_distro = args.ros_setup.parent.name
     validate_args(args, source_root)
 
     args.output.mkdir(parents=True)
@@ -440,6 +441,7 @@ def main() -> int:
             "cpu_physical": psutil.cpu_count(logical=False),
             "memory_bytes": psutil.virtual_memory().total,
         },
+        "ros_distro": ros_distro,
         "record_topics": list(RECORD_TOPICS),
         "commands": {},
         "exit_codes": {},
@@ -555,8 +557,6 @@ def main() -> int:
                     "dump",
                     "/laser_mapping",
                     "--no-daemon",
-                    "--timeout",
-                    "10",
                 ],
                 args.ros_setup,
                 workspace_setup,
@@ -587,20 +587,17 @@ def main() -> int:
 
         recorder_log = (logs / "record.log").open("w")
         opened_logs.append(recorder_log)
+        record_args = [
+            "ros2", "bag", "record", "--storage", "mcap", "--output",
+            str(args.output / "output_bag"),
+        ]
+        if ros_distro != "humble":
+            record_args.extend(
+                ("--node-name", f"uwfl2_benchmark_recorder_{args.domain_id}", "--topics")
+            )
+        record_args.extend(RECORD_TOPICS)
         recorder_command = sourced_command(
-            [
-                "ros2",
-                "bag",
-                "record",
-                "--storage",
-                "mcap",
-                "--output",
-                str(args.output / "output_bag"),
-                "--node-name",
-                f"uwfl2_benchmark_recorder_{args.domain_id}",
-                "--topics",
-                *RECORD_TOPICS,
-            ],
+            record_args,
             args.ros_setup,
             workspace_setup,
         )
@@ -623,16 +620,26 @@ def main() -> int:
             str(args.rate),
             "--disable-keyboard-controls",
         ]
-        if args.duration is not None:
+        externally_limited_playback = args.duration is not None and ros_distro == "humble"
+        if args.duration is not None and not externally_limited_playback:
             play_args.extend(("--playback-duration", str(args.duration)))
         if args.clock_mode == "generated":
             play_args.append("--clock")
         player_command = sourced_command(play_args, args.ros_setup, workspace_setup)
         manifest["commands"]["play"] = shlex.join(player_command)
         player = start_process(player_command, cwd=args.output, env=env, log=player_log)
-        player_returncode = player.wait()
+        if externally_limited_playback:
+            try:
+                player_returncode = player.wait(timeout=args.duration / args.rate)
+            except subprocess.TimeoutExpired:
+                player_returncode = stop_process(player)
+                manifest["commands"]["playback_duration_fallback"] = (
+                    "Humble wall-time stop after requested bag duration/rate"
+                )
+        else:
+            player_returncode = player.wait()
         manifest["exit_codes"]["play"] = player_returncode
-        if player_returncode != 0:
+        if player_returncode != 0 and not externally_limited_playback:
             raise RuntimeError(f"rosbag playback failed with {player_returncode}")
 
         if args.inject_loop is not None:
