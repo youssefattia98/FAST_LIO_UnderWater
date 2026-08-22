@@ -920,6 +920,10 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   `bag play --playback-duration`). The runner now uses Humble-compatible
   positional topics and an external duration fallback; no estimator run was
   started by the failed preflight.
+- [ ] The second Jetson smoke reached playback and telemetry, but its short
+  externally limited window ended before a usable sonar scan. `/map_save` then
+  exposed an existing empty-cloud PCL exception. The service now reports an
+  empty map without terminating the node; repeat with a longer smoke window.
 - [ ] Run `sim3` at x1 on the local workstation and Jetson Orin Nano with
   RViz, loop markers, and corrected-map publication disabled.
 - [ ] Fix the benchmark parameters at `max_iteration=4`,

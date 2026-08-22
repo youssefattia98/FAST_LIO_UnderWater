@@ -1841,10 +1841,26 @@ private:
         if (pcd_save_en)
         {
             const PointCloudXYZI snapshot = corrected_mapping_snapshot();
-            save_to_pcd(snapshot);
-            res->success = true;
-            res->message = "Corrected map saved with " +
-                           std::to_string(snapshot.size()) + " points.";
+            if (snapshot.empty())
+            {
+                res->success = false;
+                res->message = "Map is empty; no PCD was written.";
+            }
+            else
+            {
+                try
+                {
+                    save_to_pcd(snapshot);
+                    res->success = true;
+                    res->message = "Corrected map saved with " +
+                                   std::to_string(snapshot.size()) + " points.";
+                }
+                catch (const std::exception &error)
+                {
+                    res->success = false;
+                    res->message = std::string("Map save failed: ") + error.what();
+                }
+            }
         }
         else
         {
