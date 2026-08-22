@@ -1180,6 +1180,8 @@ P4 result:
   selected two correspondence workers automatically, completed in 8 min 8 s,
   and passed CTest 2/2. Full results and remaining bottlenecks are in
   `UWFL2_LC_PERFORMANCE.md`.
+- P3 implementation commits: `5ecc13b`, `9840454`, `036b50d`, `cc44af4`, and
+  `64b4cf2`. P4 performance-report commit: `8d48c58`.
 
 ## Stop Conditions
 
