@@ -928,16 +928,45 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
 - [x] Complete the full local `sim3` x1 baseline with RViz, loop markers, and
   corrected-map publication disabled. Commit `71df2fc`; all 5,948 sonar and
   66,673 IMU messages arrived, and one automatic loop committed.
-- [ ] Complete the full Jetson Orin Nano `sim3` x1 baseline with the same
+- [x] Complete the full Jetson Orin Nano `sim3` x1 baseline with the same
   output settings. The first full run lost the initial 0.587 s during DDS
   discovery (8 sonar and 89 IMU messages), which changed initialization and
-  prevented the final loop match. Repeat with a two-second playback delay.
+  prevented the final loop match. The accepted repeat used a two-second
+  playback delay and reproduced the local keyframe and loop decisions.
 - [x] Fix the benchmark parameters at `max_iteration=4`,
   `filter_size_surf=0.3`, `filter_size_map=0.3`, and
   `cube_side_length=100.0` for every before/after comparison.
-- [ ] Analyze and record process and system CPU, GPU, RAM, scan latency, graph/STD time,
+- [x] Analyze and record process and system CPU, GPU, RAM, scan latency, graph/STD time,
   shadow-tree rebuild time, registration/commit time, message delivery, loop
   events, Git/config/bag hashes, temperatures, and Jetson power at 1 Hz.
+
+#### P1 Results
+
+- [x] Jetson repeat passed with a two-second DDS discovery delay: 5,947/5,948
+  sonar and 66,661/66,673 IMU callbacks arrived; 358/358 keyframes were
+  processed with zero queue drops/failures, one loop was accepted, and one
+  correction committed. All runner processes exited zero.
+- [x] Baseline analysis completed. Local process CPU mean/p95/max was
+  15.0/19.8/66.6%, RSS max was 341.5 MiB, and scan p95/max was 4.81/20.46 ms.
+  The loop optimization, shadow rebuild, registration, and commit took
+  15.78, 113.72, 25.40, and 1.51 ms. ATE RMSE/max/final was
+  0.0785/0.1747/0.0442 m; GPU use during the loop window was 0%.
+- [x] Jetson process CPU mean/p95/max was 42.1/53.7/97.8%, RSS max was
+  317.3 MiB, and scan p95/max was 43.63/107.69 ms. The loop optimization,
+  shadow rebuild, registration max, and commit max took 94.68, 311.62, 56.27,
+  and 3.09 ms. ATE RMSE/max/final was 0.0638/0.1430/0.0248 m.
+- [x] Jetson `tegrastats`: GPU was 0%, total device power mean/p95/max was
+  7.71/7.76/9.33 W, RAM max was 1,824 MiB, and CPU/GPU temperatures stayed
+  below 53.4/54.2 C. In the +/-5 s loop window, UWFL2 process CPU peaked at
+  97.8%, RAM at 309.2 MiB, and device power at 8.59 W.
+- Local artifacts:
+  `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/perf_baseline_local_sim3_x1_71df2fc`.
+- Jetson artifacts:
+  `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/perf_baseline_jetson_sim3_x1_e0b0d07`.
+- Exact runner options for both: `--rate 1 --loop-closure true --detection true
+  --loop-visualization false --map-publication false --max-iteration 4
+  --filter-size-surf 0.3 --filter-size-map 0.3 --cube-side-length 100`; the
+  accepted Jetson run additionally records `--playback-delay 2`.
 
 ### P2: Profile And Select Changes
 
