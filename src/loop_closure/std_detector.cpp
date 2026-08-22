@@ -36,14 +36,12 @@ struct VoxelKey
 struct Keypoint
 {
     Eigen::Vector3d point = Eigen::Vector3d::Zero();
-    Eigen::Vector3d normal = Eigen::Vector3d::UnitZ();
     std::uint64_t binary = 0;
 };
 
 struct Triangle
 {
     std::array<Eigen::Vector3d, 3> vertices;
-    std::array<Eigen::Vector3d, 3> normals;
     std::array<std::uint64_t, 3> binary{};
     Eigen::Vector3d sides = Eigen::Vector3d::Zero();
 };
@@ -170,7 +168,8 @@ std::vector<Keypoint> extract_keypoints(const Keyframe &frame,
             covariance.noalias() += delta * delta.transpose();
         }
         covariance /= static_cast<double>(points.size());
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(
+            covariance, Eigen::EigenvaluesOnly);
         if (solver.info() != Eigen::Success)
         {
             continue;
@@ -183,7 +182,6 @@ std::vector<Keypoint> extract_keypoints(const Keyframe &frame,
         }
         Keypoint keypoint;
         keypoint.point = center;
-        keypoint.normal = solver.eigenvectors().col(0).normalized();
         keypoint.binary = binary_signature(center, all_points, config.voxel_size_m);
         ranked.push_back({keypoint,
                           static_cast<double>(points.size()) *
@@ -284,7 +282,6 @@ std::vector<Triangle> make_triangles(const std::vector<Keypoint> &keypoints,
                 {
                     const auto &keypoint = keypoints[indices[order[vertex]]];
                     triangle.vertices[vertex] = keypoint.point;
-                    triangle.normals[vertex] = keypoint.normal;
                     triangle.binary[vertex] = keypoint.binary;
                 }
                 triangles.push_back(std::move(triangle));
@@ -370,22 +367,39 @@ std::size_t triangle_inliers(const Pose3d &transform,
     return count;
 }
 
-double overlap(const Keyframe &current, const Keyframe &historical,
+struct HistoricalSearch
+{
+    explicit HistoricalSearch(const Keyframe &historical)
+        : target(new pcl::PointCloud<pcl::PointXYZ>())
+    {
+        if (!historical.sonar_points)
+        {
+            return;
+        }
+        target->reserve(historical.sonar_points->size());
+        for (const auto &point : *historical.sonar_points)
+        {
+            target->emplace_back(point.x, point.y, point.z);
+        }
+        if (!target->empty())
+        {
+            tree.setInputCloud(target);
+        }
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr target;
+    pcl::KdTreeFLANN<pcl::PointXYZ> tree;
+};
+
+double overlap(const Keyframe &current, HistoricalSearch &historical,
                const Pose3d &T_historical_sonar_current_sonar,
                double threshold)
 {
-    if (!current.sonar_points || !historical.sonar_points ||
-        current.sonar_points->empty() || historical.sonar_points->empty())
+    if (!current.sonar_points || current.sonar_points->empty() ||
+        historical.target->empty())
     {
         return 0.0;
     }
-    pcl::PointCloud<pcl::PointXYZ>::Ptr target(new pcl::PointCloud<pcl::PointXYZ>());
-    for (const auto &point : *historical.sonar_points)
-    {
-        target->emplace_back(point.x, point.y, point.z);
-    }
-    pcl::KdTreeFLANN<pcl::PointXYZ> tree;
-    tree.setInputCloud(target);
     std::size_t matched = 0;
     std::vector<int> index(1);
     std::vector<float> distance(1);
@@ -399,7 +413,7 @@ double overlap(const Keyframe &current, const Keyframe &historical,
         pcl::PointXYZ query(static_cast<float>(transformed.x()),
                             static_cast<float>(transformed.y()),
                             static_cast<float>(transformed.z()));
-        if (tree.nearestKSearch(query, 1, index, distance) == 1 &&
+        if (historical.tree.nearestKSearch(query, 1, index, distance) == 1 &&
             distance[0] <= squared_threshold)
         {
             ++matched;
@@ -409,22 +423,14 @@ double overlap(const Keyframe &current, const Keyframe &historical,
            static_cast<double>(current.sonar_points->size());
 }
 
-Pose3d refine_alignment(const Keyframe &current, const Keyframe &historical,
+Pose3d refine_alignment(const Keyframe &current, HistoricalSearch &historical,
                         Pose3d estimate, const StdConfig &config)
 {
-    if (!current.sonar_points || !historical.sonar_points ||
-        current.sonar_points->empty() || historical.sonar_points->empty())
+    if (!current.sonar_points || current.sonar_points->empty() ||
+        historical.target->empty())
     {
         return estimate;
     }
-    pcl::PointCloud<pcl::PointXYZ>::Ptr target(new pcl::PointCloud<pcl::PointXYZ>());
-    target->reserve(historical.sonar_points->size());
-    for (const auto &point : *historical.sonar_points)
-    {
-        target->emplace_back(point.x, point.y, point.z);
-    }
-    pcl::KdTreeFLANN<pcl::PointXYZ> tree;
-    tree.setInputCloud(target);
     const double threshold = std::max(
         0.5, 2.0 * config.geometric_overlap_distance_m);
     const double squared_threshold = threshold * threshold;
@@ -445,11 +451,13 @@ Pose3d refine_alignment(const Keyframe &current, const Keyframe &historical,
             const pcl::PointXYZ query(static_cast<float>(transformed.x()),
                                       static_cast<float>(transformed.y()),
                                       static_cast<float>(transformed.z()));
-            if (tree.nearestKSearch(query, 1, nearest_index, nearest_distance) == 1 &&
+            if (historical.tree.nearestKSearch(
+                    query, 1, nearest_index, nearest_distance) == 1 &&
                 nearest_distance[0] <= squared_threshold)
             {
                 source.push_back(transformed);
-                const auto &matched = target->points[nearest_index[0]];
+                const auto &matched =
+                    historical.target->points[nearest_index[0]];
                 destination.emplace_back(matched.x, matched.y, matched.z);
             }
         }
@@ -731,15 +739,16 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
         {
             continue;
         }
+        HistoricalSearch historical_search(historical.frame);
         const Pose3d descriptor_refined = refine_alignment(
-            keyframe, historical.frame, rough, impl_->config);
+            keyframe, historical_search, rough, impl_->config);
         const Pose3d prior_refined = refine_alignment(
-            keyframe, historical.frame, predicted_sonar, impl_->config);
+            keyframe, historical_search, predicted_sonar, impl_->config);
         const double descriptor_overlap = overlap(
-            keyframe, historical.frame, descriptor_refined,
+            keyframe, historical_search, descriptor_refined,
             impl_->config.geometric_overlap_distance_m);
         const double prior_overlap = overlap(
-            keyframe, historical.frame, prior_refined,
+            keyframe, historical_search, prior_refined,
             impl_->config.geometric_overlap_distance_m);
         const bool use_prior = prior_overlap > descriptor_overlap;
         const Pose3d verified_transform =

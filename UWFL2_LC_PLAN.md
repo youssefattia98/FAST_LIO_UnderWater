@@ -1070,7 +1070,7 @@ Planned P3 order:
 - [x] P3.1: move keyframe selection before pending-map compaction, share one
   immutable scan conversion between latest-scan registration and keyframes, and
   batch benchmark CSV flushing.
-- [ ] P3.2: reuse one historical search structure per STD candidate and remove
+- [x] P3.2: reuse one historical search structure per STD candidate and remove
   unused descriptor storage without changing candidate order or loop decisions.
 - [ ] P3.3: reconstruct corrected history once and derive both full history and
   the radius-limited shadow tree from that pass.
@@ -1095,6 +1095,20 @@ P3.1 result:
 - The benchmark runner now signals the ROS launch parent once on shutdown;
   ROS launch forwards the signal and node destructors flush batched diagnostics.
   A 30 s smoke run wrote all 6 keyframes/STD rows and the final summary.
+
+P3.2 result:
+
+- Each verified STD candidate now constructs one historical PCL search tree
+  shared by both refinement hypotheses and both overlap tests, instead of four
+  equivalent trees. Unused normals were removed from stored keypoints and
+  triangles, and planar extraction now requests eigenvalues only.
+- Build passed and CTest passed 2/2. Full replay:
+  `p3_2_full_local_sim3_x5`, domain 198, with the fixed P1 parameters.
+- All 5,948 sonar and 66,673 IMU callbacks arrived; 358/358 keyframes were
+  processed with zero failures/drops. Loop decisions matched P1 exactly:
+  14 proposals, one accepted/committed loop, and five graph rejections.
+- The x5 ATE RMSE/max/final was 0.0782/0.1738/0.0569 m. The P1 x1 result was
+  0.0785/0.1747/0.0442 m; final acceptance remains a matched x1 comparison.
 
 ### P4: Jetson Validation And Report
 
