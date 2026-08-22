@@ -904,6 +904,52 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
   against an incorrectly expanded commit hash; the exact hash was then read
   from Git and the clean build proceeded without source changes.
 
+## Jetson Performance Optimization
+
+### P1: Matched Baseline
+
+- [x] Add 1 Hz process/system/GPU telemetry and a diagnostic-only shared
+  monotonic timestamp for exact loop-event spike windows. The runner now
+  records the benchmark overrides in its manifest and runtime YAML.
+- [x] Instrumentation validation: local build and 2/2 CTests passed; a 20 s
+  `sim3` smoke at x5 completed with RViz/map/marker output disabled and resolved
+  the fixed parameters correctly. Python syntax and telemetry cadence checks
+  passed. Smoke artifacts: `/tmp/uwfl2_benchmark_smoke_20260822`.
+- [ ] Run `sim3` at x1 on the local workstation and Jetson Orin Nano with
+  RViz, loop markers, and corrected-map publication disabled.
+- [ ] Fix the benchmark parameters at `max_iteration=4`,
+  `filter_size_surf=0.3`, `filter_size_map=0.3`, and
+  `cube_side_length=100.0` for every before/after comparison.
+- [ ] Record process and system CPU, GPU, RAM, scan latency, graph/STD time,
+  shadow-tree rebuild time, registration/commit time, message delivery, loop
+  events, Git/config/bag hashes, temperatures, and Jetson power at 1 Hz.
+
+### P2: Profile And Select Changes
+
+- [ ] Rank measured front-end and loop-backend hotspots by total cost, p95,
+  maximum spike, memory growth, and effect during accepted loop corrections.
+- [ ] Inspect CPU allocation/copies, keyframe/descriptor storage, neighborhood
+  search, pose-graph work, historical reconstruction, voxel filtering, shadow
+  ikd-tree construction, registration, serialization, locks, and queues.
+- [ ] Evaluate CUDA only for measured data-parallel hotspots whose transfer and
+  synchronization cost can be amortized on the Jetson; retain a tested CPU path.
+
+### P3: Local Optimization
+
+- [ ] Apply one focused optimization per commit and build/test each checkpoint.
+- [ ] Re-run the matched local benchmark and require unchanged loop decisions,
+  trajectory/map accuracy, covariance validity, and message delivery while CPU,
+  RAM, or latency improves measurably.
+
+### P4: Jetson Validation And Report
+
+- [ ] Clean-build and run the accepted implementation on the Jetson using the
+  exact P1 bag and parameters.
+- [ ] Confirm real-time operation and compare initial/final CPU, GPU, RAM,
+  temperatures, power, latency, loop spikes, timing, and dropped messages.
+- [ ] Write `UWFL2_LC_PERFORMANCE.md` as a one-page summary of baseline,
+  changes, final measurements, accuracy checks, and remaining bottlenecks.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:

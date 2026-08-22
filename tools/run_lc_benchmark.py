@@ -27,7 +27,6 @@ import yaml
 
 RECORD_TOPICS = (
     "/Odometry",
-    "/cloud_registered",
     "/tf",
     "/tf_static",
     "/clock",
@@ -182,7 +181,10 @@ class ResourceSampler:
         with self.output.open("w", newline="") as stream:
             writer = csv.writer(stream)
             writer.writerow(
-                ("elapsed_s", "cpu_percent", "rss_mb", "threads", "processes")
+                (
+                    "monotonic_s", "elapsed_s", "cpu_percent", "rss_mb",
+                    "threads", "processes",
+                )
             )
             while not self.stop_event.is_set():
                 processes = self._processes()
@@ -206,6 +208,7 @@ class ResourceSampler:
                         continue
                 writer.writerow(
                     (
+                        f"{time.monotonic():.6f}",
                         f"{time.monotonic() - self.started:.6f}",
                         f"{cpu_percent:.3f}",
                         f"{rss_bytes / (1024.0 * 1024.0):.3f}",
@@ -269,6 +272,21 @@ def write_runtime_config(args: argparse.Namespace, output: Path) -> Path:
     loop_parameters["enable"] = args.loop_closure == "true"
     loop_parameters["automatic_detection_enable"] = args.detection == "true"
     loop_parameters["diagnostics_directory"] = str(output)
+    if args.loop_visualization is not None:
+        loop_parameters["visualization_enable"] = args.loop_visualization == "true"
+    for argument, parameter in (
+        (args.max_iteration, "max_iteration"),
+        (args.filter_size_surf, "filter_size_surf"),
+        (args.filter_size_map, "filter_size_map"),
+        (args.cube_side_length, "cube_side_length"),
+    ):
+        if argument is not None:
+            parameters[parameter] = argument
+    if args.map_publication is not None:
+        publish_parameters = parameters.setdefault("publish", {})
+        if not isinstance(publish_parameters, dict):
+            raise ValueError("publish must be a parameter mapping")
+        publish_parameters["map_en"] = args.map_publication == "true"
     runtime_config = output / "runtime_config.yaml"
     runtime_config.write_text(yaml.safe_dump(document, sort_keys=False))
     return runtime_config
@@ -301,6 +319,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--loop-closure", choices=("true", "false"), default="false")
     parser.add_argument("--detection", choices=("true", "false"), default="false")
+    parser.add_argument("--loop-visualization", choices=("true", "false"))
+    parser.add_argument("--map-publication", choices=("true", "false"))
+    parser.add_argument("--max-iteration", type=int)
+    parser.add_argument("--filter-size-surf", type=float)
+    parser.add_argument("--filter-size-map", type=float)
+    parser.add_argument("--cube-side-length", type=float)
     parser.add_argument("--rviz", action="store_true")
     parser.add_argument("--inject-loop", type=Path)
     parser.add_argument("--workspace", type=Path, default=Path("/home/attia/ros2_ws"))
@@ -321,6 +345,15 @@ def validate_args(args: argparse.Namespace, source_root: Path) -> None:
         raise ValueError("--rate must be positive")
     if args.duration is not None and args.duration <= 0.0:
         raise ValueError("--duration must be positive")
+    if args.max_iteration is not None and args.max_iteration <= 0:
+        raise ValueError("--max-iteration must be positive")
+    for value, name in (
+        (args.filter_size_surf, "--filter-size-surf"),
+        (args.filter_size_map, "--filter-size-map"),
+        (args.cube_side_length, "--cube-side-length"),
+    ):
+        if value is not None and value <= 0.0:
+            raise ValueError(f"{name} must be positive")
     for path, label in (
         (args.bag, "bag"),
         (args.config, "config"),
@@ -389,6 +422,15 @@ def main() -> int:
         "duration_limit_s": args.duration,
         "clock_mode": args.clock_mode,
         "drain_seconds": args.drain_seconds,
+        "benchmark_overrides": {
+            "max_iteration": args.max_iteration,
+            "filter_size_surf": args.filter_size_surf,
+            "filter_size_map": args.filter_size_map,
+            "cube_side_length": args.cube_side_length,
+            "map_publication": args.map_publication,
+            "loop_visualization": args.loop_visualization,
+            "rviz": args.rviz,
+        },
         "host": {
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
@@ -440,6 +482,7 @@ def main() -> int:
     launch: subprocess.Popen[str] | None = None
     recorder: subprocess.Popen[str] | None = None
     monitor: subprocess.Popen[str] | None = None
+    telemetry: subprocess.Popen[str] | None = None
     player: subprocess.Popen[str] | None = None
     sampler: ResourceSampler | None = None
     opened_logs: list[IO[str]] = []
@@ -470,6 +513,18 @@ def main() -> int:
         launch = start_process(launch_command, cwd=args.output, env=env, log=launch_log)
         sampler = ResourceSampler(launch.pid, args.output / "resource_samples.csv")
         sampler.start()
+        telemetry_log = (logs / "telemetry.log").open("w")
+        opened_logs.append(telemetry_log)
+        telemetry_command = [
+            "python3",
+            str(source_root / "tools" / "system_telemetry.py"),
+            "--output",
+            str(args.output),
+        ]
+        manifest["commands"]["telemetry"] = shlex.join(telemetry_command)
+        telemetry = start_process(
+            telemetry_command, cwd=args.output, env=env, log=telemetry_log
+        )
 
         if not wait_for_service(
             "/map_save",
@@ -640,6 +695,7 @@ def main() -> int:
     finally:
         manifest["exit_codes"]["record"] = stop_process(recorder, interrupt_timeout=90.0)
         manifest["exit_codes"]["monitor"] = stop_process(monitor)
+        manifest["exit_codes"]["telemetry"] = stop_process(telemetry)
         if launch is not None:
             manifest["exit_codes"]["launch"] = stop_process(launch)
         if sampler is not None:

@@ -6,6 +6,17 @@
 
 namespace uwfl2::loop_closure
 {
+namespace
+{
+
+double monotonic_seconds()
+{
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
 
 LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
     : config_(std::move(config)),
@@ -29,35 +40,35 @@ LoopClosureManager::LoopClosureManager(LoopClosureConfig config)
     {
         std::filesystem::create_directories(config_.diagnostics_directory);
         diagnostics_.open(config_.diagnostics_directory / "keyframes.csv");
-        diagnostics_ << "id,timestamp,tx,ty,tz,qw,qx,qy,qz,points,graph_version,graph_time_ms\n";
+        diagnostics_ << "monotonic_s,id,timestamp,tx,ty,tz,qw,qx,qy,qz,points,graph_version,graph_time_ms\n";
         loop_diagnostics_.open(config_.diagnostics_directory / "loops.csv");
         loop_diagnostics_
-            << "from_id,to_id,accepted,reason,graph_version,graph_error_before,"
+            << "monotonic_s,from_id,to_id,accepted,reason,graph_version,graph_error_before,"
                "graph_error_after,translation_error_before,translation_error_after,"
                "rotation_error_before_rad,rotation_error_after_rad,initial_nis,"
                "optimization_time_ms\n";
         shadow_diagnostics_.open(
             config_.diagnostics_directory / "shadow_rebuilds.csv");
         shadow_diagnostics_
-            << "graph_version,source_tree_generation,status,reason,selected_keyframes,"
+            << "monotonic_s,graph_version,source_tree_generation,status,reason,selected_keyframes,"
                "input_points,filtered_points,reconstruction_time_ms,downsample_time_ms,"
                "tree_build_time_ms,estimated_tree_bytes\n";
         registration_diagnostics_.open(
             config_.diagnostics_directory / "reregistrations.csv");
         registration_diagnostics_
-            << "graph_version,shadow_tree_generation,scan_generation,scan_timestamp,"
+            << "monotonic_s,graph_version,shadow_tree_generation,scan_generation,scan_timestamp,"
                "valid,converged,reason,initial_effective,final_effective,"
                "initial_mean_m,initial_p95_m,final_mean_m,final_p95_m,"
                "information_min_eigenvalue,information_condition,iterations,time_ms\n";
         std_diagnostics_.open(config_.diagnostics_directory / "std_detections.csv");
         std_diagnostics_
-            << "source_id,target_id,proposed,confirmed,reason,keypoints,triangles,"
+            << "monotonic_s,source_id,target_id,proposed,confirmed,reason,keypoints,triangles,"
                "matches,ransac_inliers,overlap,descriptor_ms,search_ms,verification_ms,"
                "graph_accepted,graph_reason\n";
         commit_diagnostics_.open(
             config_.diagnostics_directory / "atomic_commits.csv");
         commit_diagnostics_
-            << "committed,reason,elapsed_ms,graph_version,active_tree_generation\n";
+            << "monotonic_s,committed,reason,elapsed_ms,graph_version,active_tree_generation\n";
     }
     worker_ = std::thread(&LoopClosureManager::run, this);
     shadow_worker_ = std::thread(&LoopClosureManager::run_shadow_builder, this);
@@ -346,7 +357,8 @@ void LoopClosureManager::write_diagnostic(
     {
         std::lock_guard<std::mutex> lock(diagnostics_mutex_);
         const Pose3d pose = keyframe.T_local_vehicle.normalized();
-        diagnostics_ << keyframe.id << ',' << std::setprecision(17)
+        diagnostics_ << std::setprecision(17) << monotonic_seconds() << ','
+                     << keyframe.id << ','
                      << keyframe.timestamp << ',' << pose.translation.x() << ','
                      << pose.translation.y() << ',' << pose.translation.z() << ','
                      << pose.rotation.w() << ',' << pose.rotation.x() << ','
@@ -432,7 +444,8 @@ void LoopClosureManager::write_registration_diagnostic(
         return;
     }
     std::lock_guard<std::mutex> lock(diagnostics_mutex_);
-    registration_diagnostics_ << result.graph_version << ','
+    registration_diagnostics_ << std::setprecision(17) << monotonic_seconds() << ','
+                              << result.graph_version << ','
                               << result.shadow_tree_generation << ','
                               << result.scan_generation << ','
                               << std::setprecision(17) << result.scan_timestamp << ','
@@ -461,7 +474,8 @@ void LoopClosureManager::write_std_diagnostic(
         return;
     }
     std::lock_guard<std::mutex> lock(diagnostics_mutex_);
-    std_diagnostics_ << result.source_id << ',' << result.target_id << ','
+    std_diagnostics_ << std::setprecision(17) << monotonic_seconds() << ','
+                     << result.source_id << ',' << result.target_id << ','
                      << (result.proposed ? 1 : 0) << ','
                      << (result.confirmed ? 1 : 0) << ','
                      << std::quoted(result.reason) << ',' << result.keypoints << ','
@@ -484,7 +498,8 @@ void LoopClosureManager::write_shadow_diagnostic(
         return;
     }
     std::lock_guard<std::mutex> lock(diagnostics_mutex_);
-    shadow_diagnostics_ << result.graph_version << ','
+    shadow_diagnostics_ << std::setprecision(17) << monotonic_seconds() << ','
+                        << result.graph_version << ','
                         << result.source_tree_generation << ',' << status << ','
                         << std::quoted(result.reason) << ','
                         << result.selected_keyframes << ',' << result.input_points << ','
@@ -505,7 +520,8 @@ void LoopClosureManager::write_loop_diagnostic(
         return;
     }
     std::lock_guard<std::mutex> lock(diagnostics_mutex_);
-    loop_diagnostics_ << constraint.from_id << ',' << constraint.to_id << ','
+    loop_diagnostics_ << std::setprecision(17) << monotonic_seconds() << ','
+                      << constraint.from_id << ',' << constraint.to_id << ','
                       << (evaluation.accepted ? 1 : 0) << ','
                       << std::quoted(evaluation.reason) << ','
                       << evaluation.graph_version << ',' << std::setprecision(17)
@@ -602,7 +618,8 @@ void LoopClosureManager::notify_correction_result(
     if (commit_diagnostics_)
     {
         std::lock_guard<std::mutex> lock(diagnostics_mutex_);
-        commit_diagnostics_ << (committed ? 1 : 0) << ','
+        commit_diagnostics_ << std::setprecision(17) << monotonic_seconds() << ','
+                            << (committed ? 1 : 0) << ','
                             << std::quoted(reason) << ','
                             << std::setprecision(17) << elapsed_ms << ','
                             << graph_version_.load() << ','

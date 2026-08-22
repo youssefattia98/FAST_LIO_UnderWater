@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -307,6 +308,127 @@ def resource_metrics(path: Path) -> dict[str, Any]:
     }
 
 
+def normalized_tegra_rows(path: Path) -> list[dict[str, str]]:
+    output = []
+    for row in csv_rows(path):
+        raw = row.get("raw", "")
+        normalized = {
+            "monotonic_s": row.get("monotonic_s", ""),
+            "elapsed_s": row.get("elapsed_s", ""),
+        }
+        patterns = (
+            ("gpu_percent", r"GR3D_FREQ\s+(\d+(?:\.\d+)?)%"),
+            ("ram_used_mb", r"RAM\s+(\d+(?:\.\d+)?)/\d+MB"),
+            ("power_mw", r"VDD_IN\s+(\d+(?:\.\d+)?)mW"),
+            ("cpu_temperature_c", r"cpu@(\d+(?:\.\d+)?)C"),
+            ("gpu_temperature_c", r"gpu@(\d+(?:\.\d+)?)C"),
+        )
+        for name, pattern in patterns:
+            match = re.search(pattern, raw)
+            if match:
+                normalized[name] = match.group(1)
+        output.append(normalized)
+    return output
+
+
+def device_metrics(run: Path) -> dict[str, Any]:
+    system = csv_rows(run / "system_samples.csv")
+    gpu = csv_rows(run / "gpu_samples.csv")
+    tegra = normalized_tegra_rows(run / "tegrastats_samples.csv")
+    return {
+        "provider": read_json(run / "telemetry_summary.json").get("provider"),
+        "system_cpu_percent": numeric_column(system, "cpu_percent"),
+        "system_ram_used_mb": numeric_column(system, "ram_used_mb"),
+        "system_ram_available_mb": numeric_column(system, "ram_available_mb"),
+        "gpu_percent": (
+            numeric_column(tegra, "gpu_percent")
+            if tegra
+            else numeric_column(gpu, "gpu_percent")
+        ),
+        "gpu_memory_used_mb": numeric_column(gpu, "memory_used_mb"),
+        "gpu_power_w": numeric_column(gpu, "power_w"),
+        "jetson_ram_used_mb": numeric_column(tegra, "ram_used_mb"),
+        "jetson_power_mw": numeric_column(tegra, "power_mw"),
+        "jetson_cpu_temperature_c": numeric_column(tegra, "cpu_temperature_c"),
+        "jetson_gpu_temperature_c": numeric_column(tegra, "gpu_temperature_c"),
+    }
+
+
+def event_spike_metrics(run: Path, window_s: float = 5.0) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for row in csv_rows(run / "loops.csv"):
+        if row.get("accepted") == "1" and row.get("monotonic_s"):
+            events.append(
+                {
+                    "event": "loop_accepted",
+                    "monotonic_s": float(row["monotonic_s"]),
+                    "graph_version": row.get("graph_version"),
+                    "operation_ms": float(row.get("optimization_time_ms", 0.0)),
+                }
+            )
+    for row in csv_rows(run / "shadow_rebuilds.csv"):
+        if row.get("status") == "ready" and row.get("monotonic_s"):
+            events.append(
+                {
+                    "event": "shadow_ready",
+                    "monotonic_s": float(row["monotonic_s"]),
+                    "graph_version": row.get("graph_version"),
+                    "operation_ms": sum(
+                        float(row.get(column, 0.0))
+                        for column in (
+                            "reconstruction_time_ms", "downsample_time_ms",
+                            "tree_build_time_ms",
+                        )
+                    ),
+                }
+            )
+    for row in csv_rows(run / "atomic_commits.csv"):
+        if row.get("committed") == "1" and row.get("monotonic_s"):
+            events.append(
+                {
+                    "event": "atomic_commit",
+                    "monotonic_s": float(row["monotonic_s"]),
+                    "graph_version": row.get("graph_version"),
+                    "operation_ms": float(row.get("elapsed_ms", 0.0)),
+                }
+            )
+
+    sample_groups = {
+        "process": (
+            csv_rows(run / "resource_samples.csv"),
+            ("cpu_percent", "rss_mb"),
+        ),
+        "system": (
+            csv_rows(run / "system_samples.csv"),
+            ("cpu_percent", "ram_used_mb"),
+        ),
+        "gpu": (
+            csv_rows(run / "gpu_samples.csv"),
+            ("gpu_percent", "memory_used_mb", "power_w"),
+        ),
+        "jetson": (
+            normalized_tegra_rows(run / "tegrastats_samples.csv"),
+            ("gpu_percent", "ram_used_mb", "power_mw"),
+        ),
+    }
+    for event in events:
+        timestamp = event["monotonic_s"]
+        event["window_s"] = window_s
+        for group, (rows, columns) in sample_groups.items():
+            selected = []
+            for row in rows:
+                try:
+                    if abs(float(row["monotonic_s"]) - timestamp) <= window_s:
+                        selected.append(row)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            event[group] = {
+                column: numeric_column(selected, column) for column in columns
+            }
+    events.sort(key=lambda event: event["monotonic_s"])
+    return events
+
+
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text()) if path.exists() else {}
 
@@ -429,6 +551,8 @@ def main() -> int:
         "output_bag": metadata_metrics(output_bag / "metadata.yaml"),
         "trajectory": trajectory_metrics(read_trajectories(output_bag)),
         "resources": resource_metrics(run / "resource_samples.csv"),
+        "device": device_metrics(run),
+        "event_spikes": event_spike_metrics(run),
         "map": manifest.get("map", {}),
         "timing": timing_metrics(run),
         "delivery": input_delivery_metrics(run, manifest),
