@@ -970,13 +970,79 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
 
 ### P2: Profile And Select Changes
 
-- [ ] Rank measured front-end and loop-backend hotspots by total cost, p95,
+- [x] Rank measured front-end and loop-backend hotspots by total cost, p95,
   maximum spike, memory growth, and effect during accepted loop corrections.
-- [ ] Inspect CPU allocation/copies, keyframe/descriptor storage, neighborhood
+- [x] Inspect CPU allocation/copies, keyframe/descriptor storage, neighborhood
   search, pose-graph work, historical reconstruction, voxel filtering, shadow
   ikd-tree construction, registration, serialization, locks, and queues.
-- [ ] Evaluate CUDA only for measured data-parallel hotspots whose transfer and
+- [x] Evaluate CUDA only for measured data-parallel hotspots whose transfer and
   synchronization cost can be amortized on the Jetson; retain a tested CPU path.
+
+#### P2 Results And Decisions
+
+- [x] The steady front end is the dominant cost: 5,947 Jetson scans consumed
+  185.05 s cumulatively. The local stage profile attributes 49.2% of scan time
+  to the LiDAR IEKF (42.7% to correspondence work), 26.6% to IMU/aux
+  propagation, and 14.8% to LC bookkeeping.
+- [x] LC bookkeeping is the first avoidable front-end target. The current path
+  copies and voxel-filters pending map history before keyframe selection, so it
+  runs for all 5,948 scans although only 358 become keyframes. Jetson scan time
+  rises from 30.3 ms just after a keyframe to 36.5 ms at age 2--3 s; the local
+  stage profile measured LC bookkeeping at 0.51 ms mean and 1.58 ms p95.
+- [x] Automatic STD work is asynchronous but is the largest recurring backend
+  cost: Jetson cumulative descriptor/search/verification time was
+  0.61/1.97/0.85 s, with 4.50/31.63/104.61 ms maxima. Verification rebuilds
+  the same historical PCL k-d tree for two refinements and two overlap tests.
+- [x] The accepted-loop shadow rebuild is the largest one-shot backend task.
+  Its old 311.62 ms metric omitted the second full-history pass; monotonic event
+  timestamps show about 533 ms actual wall time. The builder transforms and
+  voxelizes history twice, first for the active tree and again for map output.
+- [x] Remaining accepted-loop work is smaller and asynchronous: graph
+  optimization was 94.68 ms, registration was 92.86 ms cumulatively with a
+  56.27 ms maximum, and the front-end atomic commit was 3.09 ms maximum.
+- [x] RSS grew from about 200 MiB after startup to 280 MiB before the loop and
+  317 MiB at completion. Stored STD triangles include unused normal vectors;
+  93,692 triangles in the local baseline make this a safe memory target.
+- [x] CUDA is not selected for P3. The measured hot path uses a mutable
+  pointer-based ikd-tree, small 6-by-6 solves, and irregular STD hash/k-d-tree
+  searches. The only strongly data-parallel task is the rare shadow rebuild,
+  where one CPU pass can first remove duplicated work without transfer,
+  synchronization, or a second map representation. Reconsider CUDA only if
+  the optimized CPU path still misses the Jetson timing budget.
+- [x] Jetson configuration was recorded as six online ARM cores, MAXN SUPER
+  power mode, and `schedutil`; the current build intentionally inherits
+  FAST-LIO2's ARM `MP_PROC_NUM=1`. A 2/3-thread OpenMP experiment is deferred
+  and will be accepted only if latency improves without higher average load,
+  power, dropped messages, or changed estimation results.
+- [x] Source-level `perf` sampling was unavailable because
+  `perf_event_paranoid=4` and non-interactive sudo is disabled. This is not a
+  blocker: benchmark-only stage timers now expose the relevant front-end
+  sections, and the failed profiler precondition is retained here.
+
+P2 validation commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+ctest --test-dir build/fast_lio --output-on-failure
+
+cd /home/attia/ros2_ws/src/FAST_LIO_UnderWater
+python3 tools/run_lc_benchmark.py \
+  --label p2_frontend_profile_local_sim3_300s_x5 --domain-id 195 \
+  --rate 5 --duration 300 --bag /home/attia/ros2_ws/bags/DONE/sim3 \
+  --config config/sim.yaml \
+  --output /home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/p2_frontend_profile_local_sim3_300s_x5 \
+  --loop-closure true --detection true --loop-visualization false \
+  --map-publication false --max-iteration 4 --filter-size-surf 0.3 \
+  --filter-size-map 0.3 --cube-side-length 100
+python3 tools/analyze_lc_run.py \
+  --run /home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/p2_frontend_profile_local_sim3_300s_x5
+```
+
+- Build passed in 1 min 32 s and CTest passed 2/2. The 300 s bag slice at x5
+  completed in 81.7 s with 1,513 sonar callbacks, 81/81 keyframes processed,
+  zero queue failures/drops, and valid state/covariance output.
+- Profiling instrumentation commit: `6d97126`
 
 ### P3: Local Optimization
 
@@ -984,6 +1050,20 @@ python3 "$UWFL2_SRC/tools/report_lc_evaluation.py" \
 - [ ] Re-run the matched local benchmark and require unchanged loop decisions,
   trajectory/map accuracy, covariance validity, and message delivery while CPU,
   RAM, or latency improves measurably.
+
+Planned P3 order:
+
+- [ ] P3.1: move keyframe selection before pending-map compaction, share one
+  immutable scan conversion between latest-scan registration and keyframes, and
+  batch benchmark CSV flushing.
+- [ ] P3.2: reuse one historical search structure per STD candidate and remove
+  unused descriptor storage without changing candidate order or loop decisions.
+- [ ] P3.3: reconstruct corrected history once and derive both full history and
+  the radius-limited shadow tree from that pass.
+- [ ] P3.4: optimize remaining registration allocations only if its remeasured
+  accepted-loop time is material.
+- [ ] P3.5: test ARM OpenMP thread counts separately on Jetson; retain one
+  thread unless the complete CPU/power/latency result is better.
 
 ### P4: Jetson Validation And Report
 
