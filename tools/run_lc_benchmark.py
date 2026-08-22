@@ -128,7 +128,10 @@ def stop_process(
     if process.poll() is not None:
         return process.returncode
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        # Let ros2 launch forward one interrupt to its children so node
+        # destructors can flush diagnostics. Signalling the whole process
+        # group delivers a second SIGINT when launch forwards the first one.
+        process.send_signal(signal.SIGINT)
         return process.wait(timeout=interrupt_timeout)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         pass

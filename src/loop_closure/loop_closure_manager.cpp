@@ -123,6 +123,7 @@ LoopClosureManager::~LoopClosureManager()
     {
         registration_worker_.join();
     }
+    flush_diagnostics();
     write_summary();
 }
 
@@ -314,7 +315,6 @@ void LoopClosureManager::run()
                 {
                     write_std_diagnostic(detection, nullptr);
                 }
-                write_summary();
             }
         }
         catch (const std::exception &)
@@ -363,9 +363,25 @@ void LoopClosureManager::write_diagnostic(
                      << pose.rotation.y() << ',' << pose.rotation.z() << ','
                      << keyframe.sonar_points->size() << ',' << version << ','
                      << graph_time_ms << '\n';
-        diagnostics_.flush();
+        if (++diagnostic_rows_since_flush_ >= 64)
+        {
+            diagnostics_.flush();
+            std_diagnostics_.flush();
+            diagnostic_rows_since_flush_ = 0;
+        }
     }
-    write_summary();
+}
+
+void LoopClosureManager::flush_diagnostics()
+{
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    diagnostics_.flush();
+    loop_diagnostics_.flush();
+    shadow_diagnostics_.flush();
+    registration_diagnostics_.flush();
+    std_diagnostics_.flush();
+    commit_diagnostics_.flush();
+    diagnostic_rows_since_flush_ = 0;
 }
 
 void LoopClosureManager::write_summary() const
@@ -460,7 +476,6 @@ void LoopClosureManager::write_registration_diagnostic(
                               << result.information_condition << ','
                               << result.iterations << ','
                               << result.registration_time_ms << '\n';
-    registration_diagnostics_.flush();
 }
 
 void LoopClosureManager::write_std_diagnostic(
@@ -484,7 +499,6 @@ void LoopClosureManager::write_std_diagnostic(
                      << ',' << (evaluation && evaluation->accepted ? 1 : 0) << ','
                      << std::quoted(evaluation ? evaluation->reason : "not_submitted")
                      << '\n';
-    std_diagnostics_.flush();
 }
 
 void LoopClosureManager::write_shadow_diagnostic(

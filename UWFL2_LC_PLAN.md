@@ -1067,7 +1067,7 @@ P3 validation cadence:
 
 Planned P3 order:
 
-- [ ] P3.1: move keyframe selection before pending-map compaction, share one
+- [x] P3.1: move keyframe selection before pending-map compaction, share one
   immutable scan conversion between latest-scan registration and keyframes, and
   batch benchmark CSV flushing.
 - [ ] P3.2: reuse one historical search structure per STD candidate and remove
@@ -1078,6 +1078,23 @@ Planned P3 order:
   accepted-loop time is material.
 - [ ] P3.5: test ARM OpenMP thread counts separately on Jetson; retain one
   thread unless the complete CPU/power/latency result is better.
+
+P3.1 result:
+
+- Build passed and CTest passed 2/2, including a new test proving that a
+  selected keyframe shares the immutable latest-scan snapshot and that an
+  unchanged pose is not selected again.
+- Fixed benchmark command matched P2, changing only the label/domain/output to
+  `p3_1_frontend_local_sim3_300s_x5`, domain 196, and its matching result path.
+- Loop bookkeeping improved from 0.512/1.586 ms mean/p95 to 0.103/0.493 ms;
+  total scan mean improved from 3.451 to 3.316 ms. All 1,513 sonar callbacks
+  were processed with no invalid state/covariance or queue failure.
+- The trajectory statistics were numerically identical to P2 and both saved
+  maps have SHA-256
+  `79cac8669571b2c7bf315883f6d3a0bf371d171ab7a3ba85878225c91fdddca8`.
+- The benchmark runner now signals the ROS launch parent once on shutdown;
+  ROS launch forwards the signal and node destructors flush batched diagnostics.
+  A 30 s smoke run wrote all 6 keyframes/STD rows and the final summary.
 
 ### P4: Jetson Validation And Report
 

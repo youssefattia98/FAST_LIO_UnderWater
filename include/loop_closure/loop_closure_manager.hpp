@@ -97,6 +97,8 @@ struct LoopVisualizationEvent
 class LoopClosureManager
 {
 public:
+    using PointSnapshot = std::shared_ptr<const std::vector<PointXYZI>>;
+
     explicit LoopClosureManager(LoopClosureConfig config);
     ~LoopClosureManager();
 
@@ -113,8 +115,7 @@ public:
         const MapPointRange &map_points_world,
         std::uint64_t tree_generation)
     {
-        if (!config_.enabled ||
-            !selector_.should_select(timestamp, T_local_vehicle, points.size()))
+        if (!should_select_keyframe(timestamp, T_local_vehicle, points.size()))
         {
             return false;
         }
@@ -135,6 +136,35 @@ public:
             }
         }
         if (local_points->size() < config_.keyframes.minimum_points)
+        {
+            ++failed_;
+            return false;
+        }
+
+        return try_submit_snapshot(
+            timestamp, T_local_vehicle, pose_covariance, T_vehicle_sonar,
+            std::shared_ptr<const std::vector<PointXYZI>>(std::move(local_points)),
+            map_points_world, tree_generation);
+    }
+
+    template <typename MapPointRange>
+    bool try_submit_snapshot(
+        double timestamp,
+        const Pose3d &T_local_vehicle,
+        const Matrix6d &pose_covariance,
+        const Pose3d &T_vehicle_sonar,
+        PointSnapshot local_points,
+        const MapPointRange &map_points_world,
+        std::uint64_t tree_generation)
+    {
+        if (!local_points ||
+            !should_select_keyframe(timestamp, T_local_vehicle,
+                                    local_points->size()))
+        {
+            return false;
+        }
+        if (!covariance_is_valid(pose_covariance) || !T_vehicle_sonar.finite() ||
+            local_points->size() < config_.keyframes.minimum_points)
         {
             ++failed_;
             return false;
@@ -171,6 +201,14 @@ public:
         return true;
     }
 
+    bool should_select_keyframe(double timestamp,
+                                const Pose3d &T_local_vehicle,
+                                std::size_t point_count) const
+    {
+        return config_.enabled &&
+               selector_.should_select(timestamp, T_local_vehicle, point_count);
+    }
+
     template <typename PointRange>
     bool try_submit(
         double timestamp,
@@ -201,17 +239,17 @@ public:
                                   const std::string &reason);
 
     template <typename PointRange>
-    void notify_latest_scan(double timestamp,
-                            std::uint64_t scan_generation,
-                            std::uint64_t tree_generation,
-                            const Pose3d &T_local_vehicle,
-                            const Pose3d &T_vehicle_sonar,
-                            const PointRange &points)
+    PointSnapshot notify_latest_scan(double timestamp,
+                                     std::uint64_t scan_generation,
+                                     std::uint64_t tree_generation,
+                                     const Pose3d &T_local_vehicle,
+                                     const Pose3d &T_vehicle_sonar,
+                                     const PointRange &points)
     {
         if (!std::isfinite(timestamp) || !T_local_vehicle.finite() ||
             !T_vehicle_sonar.finite())
         {
-            return;
+            return {};
         }
         auto copied = std::make_shared<std::vector<PointXYZI>>();
         copied->reserve(points.size());
@@ -225,7 +263,7 @@ public:
         }
         if (copied->empty())
         {
-            return;
+            return {};
         }
         auto scan = std::make_shared<LatestScanSnapshot>();
         scan->timestamp = timestamp;
@@ -237,6 +275,7 @@ public:
         std::atomic_store_explicit(
             &latest_scan_, std::shared_ptr<const LatestScanSnapshot>(scan),
             std::memory_order_release);
+        return scan->sonar_points;
     }
 
 private:
@@ -244,6 +283,7 @@ private:
     void write_diagnostic(const Keyframe &keyframe, std::uint64_t version,
                           double graph_time_ms);
     void write_summary() const;
+    void flush_diagnostics();
     void write_loop_diagnostic(const LoopConstraint &constraint,
                                const LoopEvaluation &evaluation);
     void run_shadow_builder();
@@ -274,6 +314,7 @@ private:
     std::ofstream std_diagnostics_;
     std::ofstream commit_diagnostics_;
     mutable std::mutex diagnostics_mutex_;
+    mutable std::size_t diagnostic_rows_since_flush_ = 0;
     mutable std::mutex shadow_result_mutex_;
     mutable std::mutex visualization_mutex_;
     std::deque<LoopVisualizationEvent> visualization_events_;

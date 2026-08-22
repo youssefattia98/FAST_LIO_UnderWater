@@ -292,6 +292,43 @@ TEST(LoopClosureManager, DrainsWorkerAndShutsDownCleanly)
     EXPECT_EQ(manager.graph_snapshot().node_count, 1U);
 }
 
+TEST(LoopClosureManager, PreselectsAndSharesLatestScanSnapshot)
+{
+    lc::LoopClosureConfig config;
+    config.enabled = true;
+    config.queue_capacity = 4;
+    config.keyframes.minimum_points = 3;
+    config.keyframes.minimum_interval_s = 0.0;
+    config.keyframes.translation_m = 1.0;
+    config.keyframes.rotation_rad = 1.0;
+    config.keyframes.maximum_interval_s = 5.0;
+    std::vector<lc::PointXYZI> points(3);
+    points[0].x = 1.0F;
+
+    lc::LoopClosureManager manager(config);
+    const auto snapshot = manager.notify_latest_scan(
+        1.0, 1, 0, lc::Pose3d{}, lc::Pose3d{}, points);
+    ASSERT_TRUE(snapshot);
+    ASSERT_TRUE(manager.should_select_keyframe(1.0, lc::Pose3d{},
+                                               snapshot->size()));
+    const std::vector<lc::PointXYZI> map_points;
+    ASSERT_TRUE(manager.try_submit_snapshot(
+        1.0, lc::Pose3d{}, lc::Matrix6d::Identity(), lc::Pose3d{}, snapshot,
+        map_points, 0));
+    for (int attempt = 0; attempt < 100 && manager.stats().processed == 0;
+         ++attempt)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    const auto graph = manager.graph_snapshot();
+    ASSERT_EQ(graph.node_count, 1U);
+    ASSERT_EQ(graph.keyframes.size(), 1U);
+    EXPECT_EQ(graph.keyframes.front().sonar_points.get(), snapshot.get());
+    EXPECT_FALSE(manager.should_select_keyframe(1.1, lc::Pose3d{},
+                                                snapshot->size()));
+}
+
 namespace
 {
 

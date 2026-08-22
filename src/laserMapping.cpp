@@ -1820,7 +1820,11 @@ private:
                           << stage_timing.odom_publish_ms << ','
                           << stage_timing.map_incremental_ms << ','
                           << stage_timing.loop_bookkeeping_ms << '\n';
-        front_end_timing_.flush();
+        if (++front_end_rows_since_flush_ >= 64)
+        {
+            front_end_timing_.flush();
+            front_end_rows_since_flush_ = 0;
+        }
         ++timed_scans_;
     }
 
@@ -1841,6 +1845,7 @@ private:
         if (front_end_timing_)
         {
             front_end_timing_.flush();
+            front_end_rows_since_flush_ = 0;
         }
         const auto output =
             benchmark_diagnostics_directory_ / "front_end_summary.json";
@@ -2618,13 +2623,19 @@ private:
         const auto pose_covariance =
             uwfl2::loop_closure::extract_graph_pose_covariance(kf.get_P());
         ++latest_scan_generation_;
-        loop_closure_->notify_latest_scan(
+        const auto scan_points = loop_closure_->notify_latest_scan(
             timestamp, latest_scan_generation_, active_tree_generation_,
             T_local_vehicle, T_vehicle_sonar, feats_down_body->points);
+        if (!scan_points ||
+            !loop_closure_->should_select_keyframe(
+                timestamp, T_local_vehicle, scan_points->size()))
+        {
+            return;
+        }
         const auto compact_map_points = compact_pending_map_points();
-        const bool submitted = loop_closure_->try_submit(
+        const bool submitted = loop_closure_->try_submit_snapshot(
             timestamp, T_local_vehicle, pose_covariance, T_vehicle_sonar,
-            feats_down_body->points, compact_map_points,
+            scan_points, compact_map_points,
             active_tree_generation_);
         if (submitted)
         {
@@ -2638,6 +2649,7 @@ private:
     std::filesystem::path benchmark_diagnostics_directory_;
     std::ofstream front_end_timing_;
     std::mutex front_end_diagnostics_mutex_;
+    std::size_t front_end_rows_since_flush_ = 0;
     std::atomic<std::uint64_t> aux_late_dvl_{0};
     std::atomic<std::uint64_t> aux_late_pressure_{0};
     std::atomic<std::uint64_t> aux_late_magnetometer_{0};
