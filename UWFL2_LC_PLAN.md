@@ -1072,9 +1072,9 @@ Planned P3 order:
   batch benchmark CSV flushing.
 - [x] P3.2: reuse one historical search structure per STD candidate and remove
   unused descriptor storage without changing candidate order or loop decisions.
-- [ ] P3.3: reconstruct corrected history once and derive both full history and
+- [x] P3.3: reconstruct corrected history once and derive both full history and
   the radius-limited shadow tree from that pass.
-- [ ] P3.4: optimize remaining registration allocations only if its remeasured
+- [x] P3.4: optimize remaining registration allocations only if its remeasured
   accepted-loop time is material.
 - [ ] P3.5: test ARM OpenMP thread counts separately on Jetson; retain one
   thread unless the complete CPU/power/latency result is better.
@@ -1109,6 +1109,26 @@ P3.2 result:
   14 proposals, one accepted/committed loop, and five graph rejections.
 - The x5 ATE RMSE/max/final was 0.0782/0.1738/0.0569 m. The P1 x1 result was
   0.0785/0.1747/0.0442 m; final acceptance remains a matched x1 comparison.
+
+P3.3/P3.4 result:
+
+- Corrected keyframe points are transformed once into deterministic full-history
+  and active-radius voxel accumulators. If the active selection is the complete
+  history, one accumulator is shared and only the compact result is copied for
+  active ikd-tree construction.
+- Build and CTest passed 2/2. The radius-limited test additionally verifies the
+  full corrected history point-for-point and every active voxel against the
+  independent reconstruction path.
+- Full replay `p3_3_full_local_sim3_x5`, domain 199, preserved all 358
+  keyframes, 14 loop proposals, one accepted/committed loop, five graph
+  rejections, all callbacks, and zero queue failures/drops.
+- Shadow rebuild fell from 203.34 to 104.24 ms and peak RSS from 334.2 to
+  306.9 MiB versus the matching P3.2 x5 run. ATE RMSE/max/final was
+  0.0781/0.1736/0.0261 m; the faster asynchronous commit changes its exact
+  scan, so the final comparison will use x1.
+- P3.4 requires no source change: latest-scan registration measured 21.11 ms
+  once in the accepted-loop transaction and is no longer material relative to
+  recurring front-end work or the shadow rebuild.
 
 ### P4: Jetson Validation And Report
 

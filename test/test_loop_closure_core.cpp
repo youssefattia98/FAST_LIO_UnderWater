@@ -422,6 +422,36 @@ TEST(ShadowMap, KeepsFullCorrectedHistoryOutsideTheLiveMapRadius)
     ASSERT_TRUE(result.corrected_history_points);
     ASSERT_EQ(result.corrected_history_points->size(), 2U);
 
+    lc::ShadowMapConfig history_config = config;
+    history_config.radius_m = 0.0;
+    history_config.maximum_keyframes = graph.keyframes.size();
+    const lc::ShadowMapRequest request{graph, 3};
+    const auto expected_history =
+        lc::ShadowMapBuilder::reconstruct_and_downsample(
+            request, history_config);
+    ASSERT_EQ(result.corrected_history_points->size(), expected_history.size());
+    for (std::size_t index = 0; index < expected_history.size(); ++index)
+    {
+        EXPECT_FLOAT_EQ((*result.corrected_history_points)[index].x,
+                        expected_history[index].x);
+        EXPECT_FLOAT_EQ((*result.corrected_history_points)[index].y,
+                        expected_history[index].y);
+        EXPECT_FLOAT_EQ((*result.corrected_history_points)[index].z,
+                        expected_history[index].z);
+    }
+    const auto expected_active =
+        lc::ShadowMapBuilder::reconstruct_and_downsample(request, config);
+    EXPECT_EQ(result.filtered_points, expected_active.size());
+    for (const auto &expected_point : expected_active)
+    {
+        lc::ShadowPointVector nearest;
+        std::vector<float> squared_distances;
+        result.tree->Nearest_Search(expected_point, 1, nearest,
+                                    squared_distances);
+        ASSERT_EQ(nearest.size(), 1U);
+        EXPECT_LT(squared_distances.front(), 1e-10F);
+    }
+
     const lc::Pose3d first_correction = lc::compose(
         graph.optimized_poses[0], lc::inverse(graph.raw_poses[0]));
     const auto &first_raw = graph.keyframes[0].map_points_world->front();

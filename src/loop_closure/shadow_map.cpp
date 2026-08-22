@@ -53,6 +53,9 @@ struct VoxelCandidate
     double center_distance_squared = std::numeric_limits<double>::infinity();
 };
 
+using VoxelMap =
+    std::unordered_map<VoxelKey, VoxelCandidate, VoxelKeyHash>;
+
 double milliseconds(Clock::time_point begin, Clock::time_point end)
 {
     return std::chrono::duration<double, std::milli>(end - begin).count();
@@ -180,37 +183,86 @@ ShadowPoint corrected_point(const ShadowMapRequest &request,
     return point;
 }
 
-ShadowPointVector reconstruct_points(
-    const ShadowMapRequest &request,
-    const std::vector<std::size_t> &indices,
-    std::size_t maximum_input_points)
+std::size_t count_input_points(const ShadowMapRequest &request,
+                               const std::vector<std::size_t> &indices,
+                               std::size_t maximum_input_points)
 {
     std::size_t total_points = 0;
     for (const std::size_t index : indices)
     {
         const auto &points = map_source(request.graph.keyframes[index]);
-        if (points.size() > maximum_input_points - total_points)
+        if (total_points > maximum_input_points ||
+            points.size() > maximum_input_points - total_points)
         {
             throw std::runtime_error("Shadow-map input point budget exceeded");
         }
         total_points += points.size();
     }
+    return total_points;
+}
 
-    ShadowPointVector reconstructed;
-    reconstructed.reserve(total_points);
-    for (const std::size_t index : indices)
+void accumulate_voxel(VoxelMap &voxels, const ShadowPoint &point,
+                      double voxel_size_m)
+{
+    const double inverse_leaf = 1.0 / voxel_size_m;
+    const Eigen::Vector3d world(point.x, point.y, point.z);
+    const VoxelKey key{
+        static_cast<std::int64_t>(std::floor(world.x() * inverse_leaf)),
+        static_cast<std::int64_t>(std::floor(world.y() * inverse_leaf)),
+        static_cast<std::int64_t>(std::floor(world.z() * inverse_leaf))};
+    const Eigen::Vector3d center(
+        (static_cast<double>(key.x) + 0.5) * voxel_size_m,
+        (static_cast<double>(key.y) + 0.5) * voxel_size_m,
+        (static_cast<double>(key.z) + 0.5) * voxel_size_m);
+    const double center_distance_squared = (world - center).squaredNorm();
+    auto [iterator, inserted] = voxels.try_emplace(
+        key, VoxelCandidate{point, center_distance_squared});
+    if (!inserted &&
+        (center_distance_squared <
+             iterator->second.center_distance_squared - 1e-15 ||
+         (std::abs(center_distance_squared -
+                   iterator->second.center_distance_squared) <= 1e-15 &&
+          lexicographically_less(point, iterator->second.point))))
     {
-        for (const PointXYZI &source : map_source(request.graph.keyframes[index]))
+        iterator->second = {point, center_distance_squared};
+    }
+}
+
+ShadowPointVector ordered_voxel_points(const VoxelMap &voxels)
+{
+    std::vector<std::pair<VoxelKey, ShadowPoint>> ordered;
+    ordered.reserve(voxels.size());
+    for (const auto &entry : voxels)
+    {
+        ordered.emplace_back(entry.first, entry.second.point);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto &lhs, const auto &rhs) {
+        return lhs.first < rhs.first;
+    });
+    ShadowPointVector filtered;
+    filtered.reserve(ordered.size());
+    for (const auto &entry : ordered)
+    {
+        filtered.push_back(entry.second);
+    }
+    return filtered;
+}
+
+bool selects_full_history(const std::vector<std::size_t> &selected,
+                          std::size_t keyframe_count)
+{
+    if (selected.size() != keyframe_count)
+    {
+        return false;
+    }
+    for (std::size_t index = 0; index < selected.size(); ++index)
+    {
+        if (selected[index] != index)
         {
-            const ShadowPoint point = corrected_point(request, index, source);
-            if (std::isfinite(point.x) && std::isfinite(point.y) &&
-                std::isfinite(point.z))
-            {
-                reconstructed.push_back(point);
-            }
+            return false;
         }
     }
-    return reconstructed;
+    return true;
 }
 
 }  // namespace
@@ -240,75 +292,29 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
         *selected_keyframe_count = selected.size();
     }
 
-    std::size_t total_points = 0;
-    for (const std::size_t index : selected)
-    {
-        total_points += map_source(request.graph.keyframes[index]).size();
-    }
+    const std::size_t total_points = count_input_points(
+        request, selected, config.maximum_input_points);
     if (input_point_count)
     {
         *input_point_count = total_points;
     }
 
-    struct WorldPoint
+    VoxelMap voxels;
+    voxels.reserve(total_points);
+    for (const std::size_t index : selected)
     {
-        ShadowPoint point;
-        VoxelKey voxel;
-        double center_distance_squared = 0.0;
-    };
-    const ShadowPointVector corrected =
-        reconstruct_points(request, selected, config.maximum_input_points);
-    std::vector<WorldPoint> reconstructed;
-    reconstructed.reserve(corrected.size());
-    const double inverse_leaf = 1.0 / config.voxel_size_m;
-    for (const ShadowPoint &point : corrected)
-    {
-        const Eigen::Vector3d world(point.x, point.y, point.z);
-        const VoxelKey key{
-            static_cast<std::int64_t>(std::floor(world.x() * inverse_leaf)),
-            static_cast<std::int64_t>(std::floor(world.y() * inverse_leaf)),
-            static_cast<std::int64_t>(std::floor(world.z() * inverse_leaf))};
-        const Eigen::Vector3d center(
-            (static_cast<double>(key.x) + 0.5) * config.voxel_size_m,
-            (static_cast<double>(key.y) + 0.5) * config.voxel_size_m,
-            (static_cast<double>(key.z) + 0.5) * config.voxel_size_m);
-        reconstructed.push_back(
-            {point, key, (world - center).squaredNorm()});
-    }
-    const auto reconstruction_finished = Clock::now();
-
-    std::unordered_map<VoxelKey, VoxelCandidate, VoxelKeyHash> voxels;
-    voxels.reserve(reconstructed.size());
-    for (const WorldPoint &point : reconstructed)
-    {
-        auto [iterator, inserted] = voxels.try_emplace(
-            point.voxel,
-            VoxelCandidate{point.point, point.center_distance_squared});
-        if (!inserted &&
-            (point.center_distance_squared <
-                 iterator->second.center_distance_squared - 1e-15 ||
-             (std::abs(point.center_distance_squared -
-                       iterator->second.center_distance_squared) <= 1e-15 &&
-              lexicographically_less(point.point, iterator->second.point))))
+        for (const PointXYZI &source : map_source(request.graph.keyframes[index]))
         {
-            iterator->second = {point.point, point.center_distance_squared};
+            const ShadowPoint point = corrected_point(request, index, source);
+            if (std::isfinite(point.x) && std::isfinite(point.y) &&
+                std::isfinite(point.z))
+            {
+                accumulate_voxel(voxels, point, config.voxel_size_m);
+            }
         }
     }
-    std::vector<std::pair<VoxelKey, ShadowPoint>> ordered;
-    ordered.reserve(voxels.size());
-    for (const auto &entry : voxels)
-    {
-        ordered.emplace_back(entry.first, entry.second.point);
-    }
-    std::sort(ordered.begin(), ordered.end(), [](const auto &lhs, const auto &rhs) {
-        return lhs.first < rhs.first;
-    });
-    ShadowPointVector filtered;
-    filtered.reserve(ordered.size());
-    for (const auto &entry : ordered)
-    {
-        filtered.push_back(entry.second);
-    }
+    const auto reconstruction_finished = Clock::now();
+    ShadowPointVector filtered = ordered_voxel_points(voxels);
     const auto downsample_finished = Clock::now();
     if (reconstruction_time_ms)
     {
@@ -333,21 +339,79 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
     result.shadow_tree_generation = request.graph.version;
     try
     {
-        ShadowPointVector filtered = reconstruct_and_downsample(
-            request, config_, &result.selected_keyframes, &result.input_points,
-            &result.reconstruction_time_ms, &result.downsample_time_ms);
+        const auto reconstruction_started = Clock::now();
+        const std::vector<std::size_t> selected =
+            select_keyframes(request, config_);
+        result.selected_keyframes = selected.size();
+        if (selected.empty())
+        {
+            result.reason = "corrected_map_empty";
+            result.total_time_ms = milliseconds(build_started, Clock::now());
+            return result;
+        }
+        result.input_points = count_input_points(
+            request, selected, config_.maximum_input_points);
+        std::vector<std::size_t> full_indices(request.graph.keyframes.size());
+        for (std::size_t index = 0; index < full_indices.size(); ++index)
+        {
+            full_indices[index] = index;
+        }
+        const std::size_t full_input_points = count_input_points(
+            request, full_indices, config_.maximum_input_points);
+        const bool active_is_full =
+            selects_full_history(selected, full_indices.size());
+        std::vector<bool> active_keyframe(full_indices.size(), false);
+        for (const std::size_t index : selected)
+        {
+            active_keyframe[index] = true;
+        }
+
+        VoxelMap history_voxels;
+        history_voxels.reserve(full_input_points);
+        VoxelMap active_voxels;
+        if (!active_is_full)
+        {
+            active_voxels.reserve(result.input_points);
+        }
+        for (const std::size_t index : full_indices)
+        {
+            for (const PointXYZI &source :
+                 map_source(request.graph.keyframes[index]))
+            {
+                const ShadowPoint point = corrected_point(request, index, source);
+                if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                    !std::isfinite(point.z))
+                {
+                    continue;
+                }
+                accumulate_voxel(history_voxels, point, config_.voxel_size_m);
+                if (!active_is_full && active_keyframe[index])
+                {
+                    accumulate_voxel(active_voxels, point,
+                                     config_.voxel_size_m);
+                }
+            }
+        }
+        const auto reconstruction_finished = Clock::now();
+        ShadowPointVector corrected_history =
+            ordered_voxel_points(history_voxels);
+        ShadowPointVector filtered = active_is_full
+                                         ? corrected_history
+                                         : ordered_voxel_points(active_voxels);
+        const auto downsample_finished = Clock::now();
+        result.reconstruction_time_ms = milliseconds(
+            reconstruction_started, reconstruction_finished);
+        result.downsample_time_ms = milliseconds(
+            reconstruction_finished, downsample_finished);
+        result.corrected_history_points =
+            std::make_shared<const ShadowPointVector>(
+                std::move(corrected_history));
         if (filtered.empty())
         {
             result.reason = "corrected_map_empty";
             result.total_time_ms = milliseconds(build_started, Clock::now());
             return result;
         }
-        ShadowMapConfig history_config = config_;
-        history_config.radius_m = 0.0;
-        history_config.maximum_keyframes = request.graph.keyframes.size();
-        result.corrected_history_points =
-            std::make_shared<const ShadowPointVector>(
-                reconstruct_and_downsample(request, history_config));
         const auto tree_started = Clock::now();
         auto tree = std::make_shared<ShadowTree>();
         tree->set_downsample_param(static_cast<float>(config_.voxel_size_m));
