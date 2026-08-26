@@ -330,6 +330,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detection", choices=("true", "false"), default="false")
     parser.add_argument("--loop-visualization", choices=("true", "false"))
     parser.add_argument("--map-publication", choices=("true", "false"))
+    parser.add_argument(
+        "--map-save",
+        choices=("true", "false"),
+        default="true",
+        help="Call /map_save after playback; disable for configurations without sonar.",
+    )
     parser.add_argument("--max-iteration", type=int)
     parser.add_argument("--filter-size-surf", type=float)
     parser.add_argument("--filter-size-map", type=float)
@@ -441,6 +447,7 @@ def main() -> int:
             "filter_size_map": args.filter_size_map,
             "cube_side_length": args.cube_side_length,
             "map_publication": args.map_publication,
+            "map_save": args.map_save == "true",
             "loop_visualization": args.loop_visualization,
             "rviz": args.rviz,
         },
@@ -690,28 +697,29 @@ def main() -> int:
                 raise RuntimeError("manual loop service did not accept the constraint")
 
         time.sleep(args.drain_seconds)
-        map_save_result = command_output(
-            sourced_command(
-                [
-                    "ros2",
-                    "service",
-                    "call",
-                    "/map_save",
-                    "std_srvs/srv/Trigger",
-                    "{}",
-                ],
-                args.ros_setup,
-                workspace_setup,
-            ),
-            cwd=args.output,
-            env=env,
-            timeout=120.0,
-        )
-        manifest["commands"]["map_save"] = map_save_result
-        if map_save_result.get("returncode") != 0 or "success=True" not in map_save_result.get(
-            "output", ""
-        ):
-            raise RuntimeError("map_save service did not report success")
+        if args.map_save == "true":
+            map_save_result = command_output(
+                sourced_command(
+                    [
+                        "ros2",
+                        "service",
+                        "call",
+                        "/map_save",
+                        "std_srvs/srv/Trigger",
+                        "{}",
+                    ],
+                    args.ros_setup,
+                    workspace_setup,
+                ),
+                cwd=args.output,
+                env=env,
+                timeout=120.0,
+            )
+            manifest["commands"]["map_save"] = map_save_result
+            if map_save_result.get("returncode") != 0 or "success=True" not in map_save_result.get(
+                "output", ""
+            ):
+                raise RuntimeError("map_save service did not report success")
     except BaseException as exc:
         failure = f"{type(exc).__name__}: {exc}"
         manifest["failure"] = failure
