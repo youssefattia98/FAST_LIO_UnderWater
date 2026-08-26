@@ -226,21 +226,23 @@ def trajectory_metrics(data: dict[str, Any]) -> dict[str, Any]:
     eval_times = odom_times[mask]
     slam = odom_poses[mask]
     truth = nearest_poses(gt_times, gt_poses, eval_times)
-    slam_relative_position = slam[:, :3, 3] - slam[0, :3, 3]
-    gt_relative_position = truth[:, :3, 3] - truth[0, :3, 3]
-    translation_errors = np.linalg.norm(
-        slam_relative_position - gt_relative_position, axis=1
+    # FAST-LIO estimates in its startup-local frame. Align that complete frame
+    # to the first matched ground-truth pose; subtracting positions alone leaves
+    # the initial heading/tilt mismatch in every later translation error.
+    world_from_estimator = truth[0] @ np.linalg.inv(slam[0])
+    slam_aligned = np.einsum("ij,njk->nik", world_from_estimator, slam)
+    translation_error_vectors = (
+        slam_aligned[:, :3, 3] - truth[:, :3, 3]
     )
-    z_errors = np.abs(slam[:, 2, 3] - truth[:, 2, 3])
+    translation_errors = np.linalg.norm(translation_error_vectors, axis=1)
+    z_errors = np.abs(translation_error_vectors[:, 2])
 
-    slam_start_rotation = slam[0, :3, :3]
-    gt_start_rotation = truth[0, :3, :3]
-    attitude_errors = []
-    for slam_pose, gt_pose in zip(slam, truth):
-        slam_relative = slam_start_rotation.T @ slam_pose[:3, :3]
-        gt_relative = gt_start_rotation.T @ gt_pose[:3, :3]
-        attitude_errors.append(rotation_angle(gt_relative.T @ slam_relative))
-    attitude_errors = np.asarray(attitude_errors)
+    attitude_errors = np.asarray(
+        [
+            rotation_angle(gt_pose[:3, :3].T @ slam_pose[:3, :3])
+            for slam_pose, gt_pose in zip(slam_aligned, truth)
+        ]
+    )
 
     rpe_translation = []
     rpe_rotation = []
