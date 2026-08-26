@@ -31,8 +31,9 @@
             gyr_cov: 1.4641e-6
             b_acc_cov: 4.0e-8
             b_gyr_cov: 4.0e-10
-            laser_point_cov_xy: 0.2
-            laser_point_cov_z: 0.2
+            # Includes sonar scan-matching/model error, not only point noise.
+            laser_point_cov_xy: 0.005
+            laser_point_cov_z: 0.005
             fov_degree:    90.0
             det_range:     15.0
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
