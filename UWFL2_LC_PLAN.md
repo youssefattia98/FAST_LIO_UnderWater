@@ -1242,6 +1242,50 @@ Result:
   accumulates much more heading error before its verified return. Since sim3
   passed at x15, the conditional x1 rerun was not required.
 
+### Corrected-Clock Docking Validation
+
+- [x] Replay corrected-clock `sim_docking_station` with UWFL2 and UWFL2-LC.
+- [x] Compare the matched pair with the retained `sim3` UWFL2/UWFL2-LC pair.
+- [x] Diagnose and correct the simulation-only sensor-model mismatch.
+- [x] Build, test, and rerun both corrected configurations at x5.
+
+Result:
+
+- Input bag metadata hash: `3b2ac4ab0f668dcd8cd0528b053aefe882582c0ff43ac148d30c0611bec382f8`.
+  It contains 3,815 sonar and 190,718 IMU messages over 677.00 s, with no
+  timestamp regression or missing callback in any replay.
+- The first matched pair used config hash `5603d3e86a3f6eb1a61a50bf1faddfadeae7ff865ca6bab5e24f02e835586300`.
+  UWFL2 produced RMSE/max/final 3.072/7.418/7.389 m and attitude RMSE/final
+  9.014/16.424 deg. UWFL2-LC was identical: STD confirmed one candidate, but
+  the graph correctly rejected its 8.81 m, 27.95 deg innovation at NIS 1142.8.
+- Root cause was simulation configuration, not the corrected clock or loop
+  graph. Isaac Sim publishes SI tesla with hard/soft-iron distortion disabled,
+  while `sim.yaml` applied real-robot microtesla calibration values. The
+  resulting calibrated vector was dominated by a unit-inconsistent offset and
+  provided effectively no heading information. `sim.yaml` now uses zero offset,
+  identity calibration, `2.56e-14 T^2`, a conservative scalar heading floor,
+  and the recorded 300 Hz IMU rate. Implementation commit: `9f6eb9a`.
+- Corrected config hash `c6efce05af81f290d5dfca486abae0bede3800dcba4a65a43f84fdbedb49e552`:
+  UWFL2 RMSE/max/final is 0.886/1.377/0.413 m, with attitude RMSE/final
+  1.960/1.595 deg. UWFL2-LC RMSE/max/final is 0.879/1.377/0.253 m, with
+  attitude RMSE/final 1.941/1.489 deg. Two loop factors were accepted and one
+  atomic correction committed; the second end-of-bag factor could not obtain a
+  fresh registration before shutdown and therefore did not change live state.
+- Retained `sim3` x5 references remain better because it is a different,
+  denser bag: UWFL2 RMSE/max/final 0.0700/0.1559/0.0807 m; UWFL2-LC
+  0.0694/0.1559/0.0230 m with one committed closure. The docking bag starts at
+  World z=-0.75 m while UWFL2 starts its local datum at zero, so its analyzer's
+  absolute-z metric is not directly comparable to `sim3`; translation ATE is
+  startup-relative and remains valid.
+- Commands: `colcon build --packages-select fast_lio --symlink-install`;
+  `colcon test --packages-select fast_lio --event-handlers console_direct+`;
+  `colcon test-result --verbose`; and `tools/run_lc_benchmark.py` at x5 in ROS
+  domains 163--166, followed by `tools/analyze_lc_run.py`. Build passed and 35
+  tests passed. Artifacts are `sim_docking_clock_fixed_uwfl2_x5`,
+  `sim_docking_clock_fixed_uwfl2_lc_x5`,
+  `sim_docking_clock_fixed_mag_si_uwfl2_x5`, and
+  `sim_docking_clock_fixed_mag_si_uwfl2_lc_x5`.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
