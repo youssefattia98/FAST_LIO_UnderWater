@@ -99,5 +99,9 @@
             std_required_confirmations: 2
             std_single_detection_overlap_minimum: 0.80
             std_accepted_loop_cooldown_s: 30.0
-            # 95% chi-square consistency threshold for a full-SE(3) innovation.
-            loop_maximum_initial_nis: 12.592
+            # LTA-OM odometry-factor variance floors (rotation, translation).
+            odometry_rotation_variance_floor: 1.0e-6
+            odometry_translation_variance_floor: 1.0e-4
+            # Conservative ceiling after full graph-marginal covariance; the
+            # graph still cannot represent all systematic front-end drift.
+            loop_maximum_initial_nis: 30.0

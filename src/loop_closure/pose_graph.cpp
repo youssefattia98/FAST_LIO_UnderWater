@@ -6,9 +6,11 @@
 #include <stdexcept>
 
 #include <Eigen/Eigenvalues>
+#include <gtsam/base/numericalDerivative.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/NoiseModel.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/Marginals.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
 
@@ -228,22 +230,54 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
     {
         return reject("initial_loop_residual_too_large");
     }
-    const gtsam::Pose3 predicted =
-        estimate_.at<gtsam::Pose3>(from_key).between(
-            estimate_.at<gtsam::Pose3>(to_key));
-    const gtsam::Vector6 innovation =
-        gtsam::Pose3::Logmap(measurement.between(predicted));
-    const Matrix6d innovation_covariance = force_positive_definite(
-        constraint.covariance + sanitized_odometry_covariance(
-            from_iterator->pose_covariance, to_iterator->pose_covariance,
-            config_),
-        config_);
-    const Eigen::LDLT<Matrix6d> innovation_solver(innovation_covariance);
-    if (innovation_solver.info() != Eigen::Success)
+    try
     {
-        return reject("loop_innovation_factorization_failed");
+        const gtsam::Pose3 from_pose = estimate_.at<gtsam::Pose3>(from_key);
+        const gtsam::Pose3 to_pose = estimate_.at<gtsam::Pose3>(to_key);
+        const std::function<gtsam::Vector6(const gtsam::Pose3 &,
+                                           const gtsam::Pose3 &)>
+            innovation_function = [&measurement](const gtsam::Pose3 &from,
+                                                  const gtsam::Pose3 &to) {
+                return gtsam::Pose3::Logmap(
+                    measurement.between(from.between(to)));
+            };
+        const gtsam::Vector6 innovation = innovation_function(from_pose, to_pose);
+        const Matrix6d H_from =
+            gtsam::numericalDerivative21<gtsam::Vector6, gtsam::Pose3,
+                                         gtsam::Pose3>(
+                innovation_function, from_pose, to_pose);
+        const Matrix6d H_to =
+            gtsam::numericalDerivative22<gtsam::Vector6, gtsam::Pose3,
+                                         gtsam::Pose3>(
+                innovation_function, from_pose, to_pose);
+
+        // NIS must use the relative-pose marginal from the complete graph.
+        // Summing only the two endpoint IKF covariances omits accumulated
+        // odometry uncertainty and their strong cross-correlation.
+        const gtsam::JointMarginal joint =
+            gtsam::Marginals(graph_, estimate_)
+                .jointMarginalCovariance({from_key, to_key});
+        Matrix6d predicted_covariance =
+            H_from * joint(from_key, from_key) * H_from.transpose() +
+            H_from * joint(from_key, to_key) * H_to.transpose() +
+            H_to * joint(to_key, from_key) * H_from.transpose() +
+            H_to * joint(to_key, to_key) * H_to.transpose();
+        predicted_covariance =
+            0.5 * (predicted_covariance + predicted_covariance.transpose());
+        const Matrix6d innovation_covariance = force_positive_definite(
+            constraint.covariance + predicted_covariance, config_);
+        const Eigen::LDLT<Matrix6d> innovation_solver(innovation_covariance);
+        if (innovation_solver.info() != Eigen::Success)
+        {
+            return reject("loop_innovation_factorization_failed");
+        }
+        result.initial_nis = innovation.dot(innovation_solver.solve(innovation));
     }
-    result.initial_nis = innovation.dot(innovation_solver.solve(innovation));
+    catch (const std::exception &exception)
+    {
+        return reject(std::string("loop_innovation_covariance_exception: ") +
+                      exception.what());
+    }
     if (!constraint.test_override &&
         (!std::isfinite(result.initial_nis) ||
          result.initial_nis > config_.loop_maximum_initial_nis))

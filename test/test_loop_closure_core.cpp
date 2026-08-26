@@ -197,6 +197,32 @@ TEST(FullSe3PoseGraph, RejectsStatisticallyInconsistentLoop)
     EXPECT_EQ(graph.snapshot().loop_factor_count, 0U);
 }
 
+TEST(FullSe3PoseGraph, NisIncludesAccumulatedRelativePoseUncertainty)
+{
+    lc::FullSe3PoseGraph graph;
+    constexpr std::uint64_t final_id = 39;
+    for (std::uint64_t id = 0; id <= final_id; ++id)
+    {
+        ASSERT_EQ(graph.append_keyframe(keyframe(
+                      id, pose({1.02 * static_cast<double>(id), 0.0, 0.0},
+                               Eigen::Vector3d::UnitZ(), 0.0))),
+                  id + 1);
+    }
+
+    lc::LoopConstraint loop;
+    loop.from_id = 0;
+    loop.to_id = final_id;
+    loop.T_from_to = pose({static_cast<double>(final_id), 0.0, 0.0},
+                          Eigen::Vector3d::UnitZ(), 0.0);
+    loop.covariance = lc::Matrix6d::Identity() * 1e-3;
+    const auto evaluation = graph.try_add_loop(loop);
+
+    ASSERT_TRUE(evaluation.accepted) << evaluation.reason;
+    EXPECT_LT(evaluation.initial_nis, 12.592);
+    EXPECT_LT(evaluation.loop_translation_error_after,
+              evaluation.loop_translation_error_before);
+}
+
 TEST(FullSe3PoseGraph, RejectedLoopLeavesCommittedGraphUnchanged)
 {
     lc::FullSe3PoseGraph graph;
