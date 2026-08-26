@@ -1318,7 +1318,7 @@ Result:
   `sim_docking_station` bag.
 - [x] Tune one shared sonar covariance without changing the sensor set between
   FL2, INS, and UWFL2.
-- [x] Replay FL2, INS, UWFL2, FL2-LC, and UWFL2-LC at x15 in isolated ROS
+- [x] Replay FL2, INS, UWFL2, FL2-LC, and UWFL2-LC at x5 in isolated ROS
   domains and regenerate the numerical and map comparisons.
 - [x] Build and run the complete test suite after the estimator change.
 
@@ -1331,37 +1331,47 @@ Decision and result:
   the auxiliary-sensor enable state.
 - The second cause was `laser_point_cov_xy/z=0.2`, which weakened the 6 Hz
   sonar correction enough for FL2 to diverge. A shared sweep tested `0.001`,
-  `0.003`, `0.004`, `0.005`, and `0.01`; `0.005 m^2` is retained because it
-  gives a useful margin without the instability observed at `0.01`.
-- Final startup-aligned translation RMSE/max/final [m] is
-  UWFL2 `0.357/0.451/0.305`, INS `0.400/0.694/0.431`, and FL2
-  `1.500/3.091/3.091`. Thus the requested strict ordering is satisfied in all
-  three metrics. Every run received all 195,575 IMU messages; sonar-enabled
-  runs received all 3,914 scans, with no invalid pose or covariance.
-- UWFL2-LC accepted three loop factors and rebuilt three corrected historical
-  maps. At x15, all 15 latest-scan transactions became stale before the safe
-  front-end commit, so the recorded online trajectory equals UWFL2 by design.
-  The saved graph-corrected map contains 38,185 points (SHA-256
-  `7fa2faf82317b6c64be4baf2a9be61bc8aa32aced5e6b69e8cb96c04bea7c689`).
-  Online LC improvement must be evaluated at x5 or x1, where the asynchronous
-  registration can finish before the next 6 Hz scan is compressed by replay.
+  `0.003`, `0.004`, `0.005`, and `0.01`. The original comparison removed only
+  startup translation and therefore left an initial frame rotation inside the
+  trajectory error. Both analyzers now apply one complete startup SE(3)
+  alignment. Under the corrected metric, `0.003 m^2` is the retained common
+  sonar covariance.
+- This bag starts at World `[0,0,-1.75]`, not the FAST-LIO startup origin.
+  Every final runtime config therefore publishes that exact fixed
+  `World -> camera_init` translation, and the plots confirm that ground truth
+  and each estimate begin together. The alignment implementation was also
+  checked synthetically at zero numerical position error.
+- Final startup-SE(3)-aligned translation RMSE/max/final [m] is UWFL2
+  `0.317/0.621/0.268`, INS `0.466/0.713/0.431`, and FL2
+  `1.310/2.791/1.157`. Thus the requested strict non-LC ordering is satisfied
+  in all three metrics. Every run received all 195,575 IMU messages;
+  sonar-enabled runs received all 3,914 scans, with no invalid pose or
+  covariance.
+- At the matched x5 rate, UWFL2-LC accepted three loop factors and committed
+  two corrections. Its RMSE/final decreased from `0.317/0.268 m` to
+  `0.302/0.150 m`; its maximum is unchanged because the accepted loops occur
+  after that earlier peak. FL2-LC committed three corrections and reduced
+  FL2 RMSE/final from `1.310/1.157 m` to `1.211/0.154 m`. Loop closure does not
+  force zero endpoint error: registration and graph factors have finite noise,
+  and motion after the last commit accumulates a new short drift segment.
+  The saved graph-corrected map contains 37,418 points (SHA-256
+  `516f9a678a13ca46e42da13053937b62459466e5a50d572e0fe926667b4908d7`).
 - Input metadata SHA-256 is
   `15cdb2dee37883e92695337628c55c04015e6144c4a461dc30abd7b2f7e2110c`.
-  Config hashes are FL2 `26478fafa5db67e3066a73cce7c64128921ecff3335764e82ae064ebbbacde70`,
-  INS `b0254dc74c7e7711f1deeb731b4b0d6d87a51ca574f19b9154321d1485bbe265`,
-  and UWFL2 `9e60ac8d77d0224c5dbdc6d2b45bcc2954e7db66a45964ec90ac648b76b11643`.
-  Runs used base Git HEAD `0b3e201` plus the documented estimator diff SHA-256
-  `59ab78b63388f39c1ded43602abd984ad5081df7cfffdb10526a32c07fa8a675`.
-  The identical tested sources are retained in commits `83b0924` (IMU-update
-  independence), `be59b1d` (shared sonar tuning), and `1c3f5fb` (benchmark
-  map-save control).
+  Config hashes are FL2 `c8a69979a2a5c44fc8aa07c6f78d851f3575782d8c78fbaad1c41ff0455154ff`,
+  INS `9a37814c321285eb46910e5958ddf7237b7f99a4e650e1e1556dfe76d8194f2f`,
+  and UWFL2 `b98bd837ce7d08d2525cccfc7e7f431a5b45a6900d19ce3b8c67ce4f7b742e90`.
+  Runs used Git HEAD `452afdf`; implementation history is `83b0924`
+  (IMU-update independence), `be59b1d` (superseded first sonar tuning), and
+  `1c3f5fb` (benchmark map-save control). The corrected analyzer and retained
+  tuning are commits `4f465a7` and `4f8bee5` respectively.
 - Commands: `colcon build --packages-select fast_lio --symlink-install`;
   `colcon test --packages-select fast_lio --event-handlers console_direct+`;
   `colcon test-result --verbose`; `SLAMOUTPUT4/run_experiments.sh`; and the
   `compareSim.py`/`plot_map_odom_top_view.py` analysis scripts. Build passed and
   all 35 tests passed. Outputs are in
-  `/home/attia/ros2_ws/bags/SLAMOUTPUT4`; superseded `0.001` outputs remain in
-  `pre_final_1e-3` and all rejected tuning runs remain available.
+  `/home/attia/ros2_ws/bags/SLAMOUTPUT4`; superseded `0.001` and `0.005/x15`
+  outputs remain archived and all rejected tuning runs remain available.
 
 ## Stop Conditions
 
