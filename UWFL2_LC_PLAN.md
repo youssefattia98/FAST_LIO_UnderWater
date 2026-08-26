@@ -1183,6 +1183,52 @@ P4 result:
 - P3 implementation commits: `5ecc13b`, `9840454`, `036b50d`, `cc44af4`, and
   `64b4cf2`. P4 performance-report commit: `8d48c58`.
 
+### Docking-Station Loop Validation
+
+- [x] Reproduce the rejected final return from `sim_docking_station` at x15.
+- [x] Verify proposed constraints against simulation ground truth.
+- [x] Correct the loop NIS covariance and add a focused regression test.
+- [x] Build/test and validate graph acceptance, re-registration, and atomic
+  commit on the same bag.
+
+Result:
+
+- Baseline artifact `sim_docking_lc_diagnostic_x15` processed all 3,899 sonar
+  and 194,901 IMU messages. STD proposed 14 candidates and confirmed six, with
+  0.806--0.899 overlap, but the graph rejected all at NIS 188.5--578.0 versus
+  12.592. Ground truth showed these were real returns: paired poses were only
+  0.17--0.26 m apart with zero relative rotation, while the front end had
+  accumulated 2.08--2.66 m and 3.31--8.77 deg error.
+- Root cause: NIS summed only the endpoint IKF covariances. It omitted the
+  complete graph's accumulated relative-pose uncertainty and endpoint
+  cross-correlation. NIS now propagates the full joint graph marginal through
+  finite-difference Jacobians of the exact full-SE(3) innovation. A 40-node
+  regression test proves that accumulated uncertainty admits a consistent
+  closure while the existing inconsistent-loop test remains rejected.
+- With the corrected marginal, candidate NIS fell to 29.7--43.2. `sim.yaml`
+  now uses LTA-OM's odometry-factor variance floors (`1e-6` rotation and
+  `1e-4` translation), reducing the uncorrected values to 19.0--28.4. A narrow
+  NIS ceiling of 30 retains descriptor, RANSAC, overlap, residual, optimizer,
+  registration, and atomic-commit validation. A temporary 600 ceiling was
+  diagnostic only and was not retained.
+- x15 artifact `sim_docking_lc_final_x15` accepted the correct graph factors,
+  but 11 ms wall-time scan spacing made each 21--40 ms registration stale, as
+  designed. Final validation therefore used x5, whose 33 ms effective scan
+  spacing still accelerates the bag while allowing the asynchronous safety
+  transaction to finish.
+- Final artifact `sim_docking_lc_final_x5` accepted four true docking factors,
+  committed three corrections, delivered every sonar/IMU callback, and had no
+  backend drops or failures. Translation RMSE/final improved from
+  1.096/2.254 m to 0.878/0.159 m; attitude RMSE/final improved from
+  2.242/4.537 deg to 1.881/0.990 deg. Registration reduced each committed scan
+  residual and atomic commit took at most 3.17 ms.
+- Commands: `colcon build --packages-select fast_lio --symlink-install`;
+  `colcon test --packages-select fast_lio --event-handlers console_direct+`;
+  `colcon test-result --verbose`; and `tools/run_lc_benchmark.py` with
+  `config/sim.yaml`, domains 155--160, x15 diagnostics, and final x5 replay.
+  Build passed and all 35 tests passed with zero failures.
+- Implementation commit: `5bc85e7`.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
