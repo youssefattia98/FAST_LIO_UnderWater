@@ -18,7 +18,7 @@
                                       0.0, 1.0, 0.0,
                                       0.0, 0.0, 1.0 ]
 
-            imu_rate_hz: 150.0
+            imu_rate_hz: 300.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.8100004196167
 
@@ -71,12 +71,16 @@
             extrinsic_R: [ 1.0, 0.0, 0.0,
                            0.0, 1.0, 0.0,
                            0.0, 0.0, 1.0 ]
-            hard_iron_offset: [ -0.30, -19.96, 86.70 ]
-            soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
-                                 0.000000, -1.257623, 0.000000,
-                                 0.000000,  0.000000, -1.000000 ]
-            mag_cov: 100.0
-            heading_cov_floor: 1.0e-6
+            # Isaac Sim publishes SI tesla and has hard/soft-iron distortion
+            # disabled, so no real-robot calibration is applied here.
+            hard_iron_offset: [ 0.0, 0.0, 0.0 ]
+            soft_iron_matrix: [ 1.0, 0.0, 0.0,
+                                0.0, 1.0, 0.0,
+                                0.0, 0.0, 1.0 ]
+            # 0.0256 uT^2 converted to T^2. The scalar floor includes the
+            # simulator's temporally correlated magnetic model uncertainty.
+            mag_cov: 2.56e-14
+            heading_cov_floor: 2.5e-3
             innovation_gate_sigma: 3.0
             mag_timeout: 0.25
 
