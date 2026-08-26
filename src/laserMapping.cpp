@@ -1633,12 +1633,15 @@ private:
 
                 p_imu->Process(Measures, kf, feats_undistort,
                                timed_measurement_stamps, apply_timed_measurement);
-                if (!Measures.imu.empty())
-                {
-                    apply_imu_orientation_update(Measures.imu.back());
-                    apply_accel_attitude_update(Measures.imu.back());
-                }
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+            }
+            // These are IMU observations, not auxiliary-sensor observations.
+            // Apply them once after either propagation path so disabling DVL,
+            // pressure, and magnetometer cannot silently change IMU behavior.
+            if (!Measures.imu.empty())
+            {
+                apply_imu_orientation_update(Measures.imu.back());
+                apply_accel_attitude_update(Measures.imu.back());
             }
             last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
