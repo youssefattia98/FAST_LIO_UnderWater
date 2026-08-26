@@ -1228,6 +1228,19 @@ Result:
   `config/sim.yaml`, domains 155--160, x15 diagnostics, and final x5 replay.
   Build passed and all 35 tests passed with zero failures.
 - Implementation commit: `5bc85e7`.
+- Base-front-end regression check: current `sim3` x15 artifacts
+  `sim3_current_no_lc_x15` and `sim3_current_lc_x15` received every 5,948
+  sonar and 66,673 IMU callback. No-LC RMSE/final was 0.0768/0.0867 m; LC
+  RMSE/final was 0.0767/0.0863 m. The x15 LC run accepted the valid final
+  factor but deliberately did not commit its stale registration, so these
+  matching trajectories also verify that merely enabling the backend does not
+  alter UWFL2.
+- The docking error is bag-specific, not an x15 or front-end regression. Both
+  bags traverse about 284 m, but the docking trajectory spans 649 s with 3,899
+  sonar scans, versus 444 s and 5,948 scans for `sim3`; it also records 145
+  late magnetic samples versus 38. The slower, less scan-dense survey therefore
+  accumulates much more heading error before its verified return. Since sim3
+  passed at x15, the conditional x1 rerun was not required.
 
 ## Stop Conditions
 
