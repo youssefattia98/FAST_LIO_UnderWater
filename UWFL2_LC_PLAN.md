@@ -1285,6 +1285,32 @@ Result:
   `sim_docking_clock_fixed_uwfl2_lc_x5`,
   `sim_docking_clock_fixed_mag_si_uwfl2_x5`, and
   `sim_docking_clock_fixed_mag_si_uwfl2_lc_x5`.
+- Follow-up bag-content analysis explains why docking remains harder than
+  `sim3`. Both paths are about 284 m, but `sim3` covers it in 444.3 s using
+  5,948 scans at 13.38 Hz and 2,756 points/scan, while docking takes 635.7 s
+  using 3,815 scans at 6 Hz and 2,029 points/scan on average. The docking
+  magnetic field transformed by ground-truth attitude has 5.30 deg p95 and
+  3.32 deg final horizontal-direction error, versus 3.63/0.65 deg in `sim3`.
+  DVL remains consistent in both bags (velocity-residual p95 0.0237 versus
+  0.0198 m/s) and is not the dominant cause.
+- Most docking ATE is a simulation-path/pressure-domain problem. `sim3` stays
+  at or below the water surface (`z` from -0.983 to 0 m), giving 0.021 m
+  pressure-relative depth RMSE. Docking rises from -0.75 to +1.261 m. The
+  physically correct simulated pressure model clamps depth to zero above the
+  surface and therefore cannot observe the remaining ascent. Docking UWFL2
+  relative x/y/z RMSE is 0.497/0.290/0.674 m and z reaches 1.250 m error; LC
+  leaves this historical z error unchanged because the vehicle returns below
+  the surface before the final loop.
+- A current-code/current-SI-config `sim3` check (`sim3_mag_si_uwfl2_x15`,
+  config hash `c6efce05af81f290d5dfca486abae0bede3800dcba4a65a43f84fdbedb49e552`)
+  gives RMSE/max/final 0.140/0.244/0.093 m. Thus the retained 0.070 m result was
+  partly optimistic because the old unit-mismatched settings made magnetic
+  fusion effectively inactive, but `sim3` remains substantially easier.
+- Report online odometry ATE and final optimized-graph ATE separately. A loop
+  accepted near the end can correct the live endpoint and historical map, but
+  cannot rewrite already recorded `/Odometry` messages; consequently docking
+  LC improves final error from 0.413 to 0.253 m while whole-run online RMSE
+  changes only from 0.886 to 0.879 m.
 
 ## Stop Conditions
 
