@@ -4,7 +4,7 @@
 
 - Branch: `feature/uwfl2-ltaom-loop-closure`
 - Plan status: approved and active
-- Implementation status: Checkpoints 0--3 complete; Checkpoint 4 in progress
+- Implementation status: Checkpoints 0--7 complete; follow-up validation logged below
 - Estimator source-code changes through Checkpoint 0: none
 - UWFL2 baseline commit: `27d71770951cc495efc36398fbde937efa0b060a`
 - Pre-existing worktree change: `config/default.yaml` selects sonar plus IMU only. It is not part of loop-closure work and must not be silently committed.
@@ -1311,6 +1311,57 @@ Result:
   cannot rewrite already recorded `/Odometry` messages; consequently docking
   LC improves final error from 0.413 to 0.253 m while whole-run online RMSE
   changes only from 0.886 to 0.879 m.
+
+### SLAMOUTPUT4 Five-Configuration Validation
+
+- [x] Diagnose the current FL2 divergence on the corrected
+  `sim_docking_station` bag.
+- [x] Tune one shared sonar covariance without changing the sensor set between
+  FL2, INS, and UWFL2.
+- [x] Replay FL2, INS, UWFL2, FL2-LC, and UWFL2-LC at x15 in isolated ROS
+  domains and regenerate the numerical and map comparisons.
+- [x] Build and run the complete test suite after the estimator change.
+
+Decision and result:
+
+- A cleanup regression made the IMU orientation and gravity-direction
+  observations conditional on auxiliary fusion. Therefore FL2 silently lost
+  two IMU observations when DVL, pressure, and magnetometer were disabled.
+  They now run once after either propagation path and remain independent of
+  the auxiliary-sensor enable state.
+- The second cause was `laser_point_cov_xy/z=0.2`, which weakened the 6 Hz
+  sonar correction enough for FL2 to diverge. A shared sweep tested `0.001`,
+  `0.003`, `0.004`, `0.005`, and `0.01`; `0.005 m^2` is retained because it
+  gives a useful margin without the instability observed at `0.01`.
+- Final startup-aligned translation RMSE/max/final [m] is
+  UWFL2 `0.357/0.451/0.305`, INS `0.400/0.694/0.431`, and FL2
+  `1.500/3.091/3.091`. Thus the requested strict ordering is satisfied in all
+  three metrics. Every run received all 195,575 IMU messages; sonar-enabled
+  runs received all 3,914 scans, with no invalid pose or covariance.
+- UWFL2-LC accepted three loop factors and rebuilt three corrected historical
+  maps. At x15, all 15 latest-scan transactions became stale before the safe
+  front-end commit, so the recorded online trajectory equals UWFL2 by design.
+  The saved graph-corrected map contains 38,185 points (SHA-256
+  `7fa2faf82317b6c64be4baf2a9be61bc8aa32aced5e6b69e8cb96c04bea7c689`).
+  Online LC improvement must be evaluated at x5 or x1, where the asynchronous
+  registration can finish before the next 6 Hz scan is compressed by replay.
+- Input metadata SHA-256 is
+  `15cdb2dee37883e92695337628c55c04015e6144c4a461dc30abd7b2f7e2110c`.
+  Config hashes are FL2 `26478fafa5db67e3066a73cce7c64128921ecff3335764e82ae064ebbbacde70`,
+  INS `b0254dc74c7e7711f1deeb731b4b0d6d87a51ca574f19b9154321d1485bbe265`,
+  and UWFL2 `9e60ac8d77d0224c5dbdc6d2b45bcc2954e7db66a45964ec90ac648b76b11643`.
+  Runs used base Git HEAD `0b3e201` plus the documented estimator diff SHA-256
+  `59ab78b63388f39c1ded43602abd984ad5081df7cfffdb10526a32c07fa8a675`.
+  The identical tested sources are retained in commits `83b0924` (IMU-update
+  independence), `be59b1d` (shared sonar tuning), and `1c3f5fb` (benchmark
+  map-save control).
+- Commands: `colcon build --packages-select fast_lio --symlink-install`;
+  `colcon test --packages-select fast_lio --event-handlers console_direct+`;
+  `colcon test-result --verbose`; `SLAMOUTPUT4/run_experiments.sh`; and the
+  `compareSim.py`/`plot_map_odom_top_view.py` analysis scripts. Build passed and
+  all 35 tests passed. Outputs are in
+  `/home/attia/ros2_ws/bags/SLAMOUTPUT4`; superseded `0.001` outputs remain in
+  `pre_final_1e-3` and all rejected tuning runs remain available.
 
 ## Stop Conditions
 
