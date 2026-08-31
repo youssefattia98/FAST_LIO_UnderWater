@@ -1373,6 +1373,99 @@ Decision and result:
   `/home/attia/ros2_ws/bags/SLAMOUTPUT4`; superseded `0.001` and `0.005/x15`
   outputs remain archived and all rejected tuning runs remain available.
 
+### AgriLiRa4D NJTerrC05 Replay Checkpoint (2026-08-31)
+
+Implementation commit: `27b4453` (`fix: support AgriLiRa odometry and mapping`).
+
+- [x] Verify the generated ROS 2 bag, topic rates, frames, dropouts, and ground-truth topics.
+- [x] Confirm that empty sonar frames propagate odometry without updating the map.
+- [x] Restore bounded IMU/auxiliary-only odometry during a complete sonar outage.
+- [x] Make `publish.map_en` sufficient to accumulate and publish the corrected map.
+- [x] Diagnose the dominant estimator divergence against evaluation-only ground truth.
+- [x] Rebuild, run all tests, replay the complete bag, and test a deliberate no-sonar replay.
+
+Decision and result:
+
+- The playable bag is
+  `/home/attia/ros2_ws/bags/AgriLiRa4D/processed/NJTerrC05_sonar3d15lf`;
+  the parent `processed` directory is not a bag. Regeneration now clips the
+  native IMU to the FINS ground-truth interval so that no unsupported tail is
+  emitted. Validation passes with 721 sonar frames (11 deliberately empty),
+  28,808 IMU messages, 1,213 DVL messages, and 14,147 pressure,
+  magnetometer, and ground-truth messages. The 64 DVL dropout intervals are
+  intentional simulation output.
+- `/auv/pose_actual` and `/aircraft_pose_flu` are identical transformed FLU
+  ground truth and remain evaluation-only. They are not fused because the
+  emulated DVL, pressure, and magnetic observations were generated from that
+  same reference.
+- Empty `PointCloud2` scans already followed the propagation-only path and
+  skipped map insertion. The missing case was a complete sonar-stream outage:
+  after the stream had been seen, no IMU-only packets were synchronized.
+  Timeout fallback is restored without pre-empting a pending scan. Before the
+  first scan, it waits one configured lidar timeout; after an established
+  stream, it activates only when IMU time is at least that timeout beyond the
+  last lidar timestamp. It retains one timeout of history so the first
+  returning delayed scan remains usable. `common.odometry_publish_rate_hz`
+  now caps fallback output at 100 Hz using real IMU timestamps.
+- A deliberate no-sonar x10 replay produced 2,717 unique odometry messages
+  over a 27.185 s sensor-time window (99.910 Hz average, 9.995 ms median
+  interval), with no non-positive timestamps or intervals below 7.5 ms. A
+  complete x5 replay received all 721 scans and 28,808 IMU samples with zero
+  timestamp regressions, buffer clears, or stale lidar packets.
+- `publish.map_en: true` previously did not accumulate points unless loop
+  closure or PCD saving was also enabled. The accumulation guard now includes
+  map publication. A 35 s controlled replay published 34 map snapshots and
+  grew the corrected map from 16 to 21,034 points. RViz now uses the universal
+  `camera_init` fixed frame and displays `/auv/pose_actual`; the initial
+  estimator body agrees with ground truth within 9 mm and 0.085 degrees.
+- The generated Janus DVL covariance is anisotropic: x/y are
+  `2.55025e-5 m^2/s^2`, while z is `2.18777e-6 m^2/s^2`. The first UAV YAML
+  incorrectly used the smallest z value as an isotropic covariance. Using the
+  conservative largest diagonal reduced the same 35 s position RMSE/max/final
+  from `8.184/16.374/16.374 m` to `3.743/7.704/7.704 m`, and attitude
+  RMSE/max/final from `17.859/21.397/20.824 deg` to
+  `8.490/12.437/10.164 deg`.
+- The retained full x5 ground-truth replay spans 142.344 s and gives
+  position RMSE/max/final `6.311/9.984/3.320 m` and attitude
+  RMSE/max/final `8.843/12.242/6.062 deg`. It received 715 sonar callbacks
+  with zero timestamp regressions, buffer clears, or stale scans. Initial
+  World/body alignment error is 9.5 mm and 0.057 degrees.
+- A main-IKF fixed-lag attempt to publish continuously between scans was
+  rejected. The bag stores sonar records about 50.01 ms after their header
+  timestamps; the experiment averaged only 74.252 Hz because each scan crossed
+  the held interval and worsened position/attitude RMSE to
+  `6.124 m/15.088 deg`. Constant high-rate output with an active sonar stream
+  therefore requires a separate prediction-only odometry state, not advancing
+  the live scan-matching IKF ahead of delayed scans.
+- The original three-sigma magnetic innovation gate rejected 12,427 of 14,122
+  attempted magnetic updates and accepted none after approximately 30 s. The
+  emulated field is consistent with ground-truth attitude, so this was an
+  estimator lockout after early drift rather than bad bag data. The retained
+  UAV config disables that hard gate and uses a conservative `1.0e-4` heading
+  covariance floor. In a paired full x5 replay it reduced translation
+  RMSE/max/final from the original `30.289/66.128/66.128 m` to
+  `10.723/15.483/7.083 m`, and attitude RMSE/max/final from
+  `80.561/136.655/136.655 deg` to `13.278/18.141/10.183 deg`.
+  A `1.0e-5` floor produced only a small additional change and was rejected as
+  unjustified confidence.
+- The remaining drift is real and should not be hidden with ground-truth
+  fusion. A downward 90 by 40 degree agricultural crop provides weak yaw and
+  lateral geometry compared with the underwater simulation bags. The bag is
+  now functionally processed correctly, but it is not yet suitable for a
+  high-accuracy claim without a better observable sensor/model combination.
+- `world_to_camera_init_T/R` is the first ground-truth pose and places the
+  estimator-local `camera_init` frame in `world_flu`; initializing the IKF
+  state to that global pose as well would apply the transform twice.
+- Commands: `colcon build --packages-select fast_lio --symlink-install
+  --cmake-args -DCMAKE_BUILD_TYPE=Release`; `colcon test --packages-select
+  fast_lio --event-handlers console_direct+`; `colcon test-result --verbose`;
+  and
+  `/home/attia/ros2_ws/.venv-agrilira4d-inspect/bin/python
+  /home/attia/ros2_ws/bags/AgriLiRa4D/tools/validate_njterrc05_underwater_bag.py`.
+  The Release build passed, all 35 tests passed, and bag validation passed.
+  These changes are intentionally left in the uncommitted working tree for
+  user review.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
