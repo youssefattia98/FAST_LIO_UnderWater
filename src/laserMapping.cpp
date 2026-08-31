@@ -114,6 +114,7 @@ ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double last_processed_time = -1.0, lidar_timeout = 0.25, imu_rate_hz = 100.0;
+double odometry_publish_rate_hz = 100.0;
 double gravity_m_s2 = G_m_s2;
 int    effct_feat_num = 0, scan_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
@@ -144,6 +145,7 @@ std::atomic<std::uint64_t> imu_timestamp_regressions{0};
 std::atomic<std::uint64_t> lidar_buffer_messages_cleared{0};
 std::atomic<std::uint64_t> imu_buffer_messages_cleared{0};
 std::atomic<std::uint64_t> stale_lidar_scans_discarded{0};
+std::atomic<std::uint64_t> imu_only_packets_processed{0};
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -373,7 +375,12 @@ double expected_imu_timeout()
 
 double imu_only_packet_duration()
 {
-    return std::max(5.0 * expected_imu_period(), std::min(lidar_timeout, 0.25));
+    const double requested_period = odometry_publish_rate_hz > 0.0
+                                        ? 1.0 / odometry_publish_rate_hz
+                                        : lidar_timeout;
+    // Target the requested cadence and finish on the nearest real IMU sample.
+    return std::max(expected_imu_period(),
+                    std::min(lidar_timeout, requested_period));
 }
 
 bool auxiliary_callbacks_ready(double target_time, double latest_imu_time)
@@ -476,23 +483,32 @@ bool sync_packages(MeasureGroup &meas)
 
 bool sync_imu_only_packages(MeasureGroup &meas)
 {
-    // An empty topic explicitly selects INS mode. Preserve the established
-    // misspelled/unavailable-topic test as well: if no LiDAR message has ever
-    // arrived, propagate IMU and auxiliary measurements without scans. Once a
-    // real LiDAR stream has started, temporary gaps remain scan-bounded so a
-    // delayed scan cannot become an out-of-sequence measurement.
+    // An empty topic explicitly selects INS mode. A misspelled/unavailable
+    // topic also enters INS mode, and an established LiDAR stream enters the
+    // same propagation path only after its configured timeout. Normal scan
+    // intervals remain scan-bounded. The auxiliary reorder window below keeps
+    // fallback propagation behind the newest sensor time, allowing an on-time
+    // scan callback to take priority before its timestamp is crossed.
     const bool explicit_ins_mode = lid_topic.empty();
     const bool no_lidar_received = is_first_lidar;
-    if ((!explicit_ins_mode && !no_lidar_received) ||
-        !lidar_buffer.empty() || lidar_pushed || imu_buffer.empty()) {
+    if (!lidar_buffer.empty() || lidar_pushed || imu_buffer.empty()) {
         return false;
     }
 
     const double latest_imu_time = get_time_sec(imu_buffer.back()->header.stamp);
+    const double first_imu_time = get_time_sec(imu_buffer.front()->header.stamp);
+    const bool lidar_timed_out =
+        last_timestamp_lidar > 0.0 &&
+        latest_imu_time - last_timestamp_lidar >= lidar_timeout;
+    const bool initial_lidar_timed_out =
+        no_lidar_received && latest_imu_time - first_imu_time >= lidar_timeout;
+    if (!explicit_ins_mode && !lidar_timed_out && !initial_lidar_timed_out)
+    {
+        return false;
+    }
     if (last_processed_time > 0.0 && latest_imu_time <= last_processed_time + 1e-6) {
         return false;
     }
-    const double first_imu_time = get_time_sec(imu_buffer.front()->header.stamp);
     meas.imu.clear();
     meas.lidar.reset(new PointCloudXYZI());
     double packet_begin_time = last_processed_time > 0.0 ? last_processed_time : first_imu_time;
@@ -501,7 +517,14 @@ bool sync_imu_only_packages(MeasureGroup &meas)
         packet_begin_time = first_imu_time;
     }
     const double target_packet_end_time = packet_begin_time + imu_only_packet_duration();
-    if (latest_imu_time < target_packet_end_time - 1e-6)
+    // Once a LiDAR stream has been established, retain one timeout of IMU
+    // history during an outage. A returning scan can then still be fused at
+    // its sensor timestamp instead of being discarded as out of sequence.
+    const double propagation_horizon =
+        (!explicit_ins_mode && last_timestamp_lidar > 0.0)
+            ? latest_imu_time - lidar_timeout
+            : latest_imu_time;
+    if (propagation_horizon < target_packet_end_time - 1e-6)
     {
         return false;
     }
@@ -521,10 +544,14 @@ bool sync_imu_only_packages(MeasureGroup &meas)
             imu_buffer.pop_front();
             continue;
         }
-        if (imu_time > target_packet_end_time + 1e-6) break;
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
         last_included_imu_time = imu_time;
+        // Select the real IMU sample nearest the requested output epoch.
+        // Without the half-sample tolerance, a 200.078 Hz stream misses the
+        // exact 10 ms boundary by a few microseconds and is decimated by
+        // three samples (about 66.7 Hz) instead of two (about 100 Hz).
+        if (imu_time >= target_packet_end_time - 0.5 * expected_imu_period()) break;
     }
 
     if (meas.imu.empty())
@@ -974,7 +1001,8 @@ public:
         this->declare_parameter<vector<double>>("common.world_to_camera_init_R",
                              {1.0, 0.0, 0.0,
                               0.0, 1.0, 0.0,
-                              0.0, 0.0, 1.0});
+                                                 0.0, 0.0, 1.0});
+        this->declare_parameter<double>("common.odometry_publish_rate_hz", 100.0);
         this->declare_parameter<double>("common.imu_rate_hz", 100.0);
         this->declare_parameter<double>("common.lidar_timeout", 0.25);
         this->declare_parameter<double>("common.gravity_m_s2", G_m_s2);
@@ -1080,6 +1108,8 @@ public:
                              0.0, 0.0, 1.0});
         this->get_parameter_or<double>("common.imu_rate_hz", imu_rate_hz, 100.0);
         this->get_parameter_or<double>("common.lidar_timeout", lidar_timeout, 0.25);
+        this->get_parameter_or<double>("common.odometry_publish_rate_hz",
+                                       odometry_publish_rate_hz, 100.0);
         this->get_parameter_or<double>("common.gravity_m_s2", gravity_m_s2, G_m_s2);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
@@ -1137,6 +1167,12 @@ public:
         {
             RCLCPP_WARN(this->get_logger(), "common.imu_rate_hz must be positive. Falling back to 100 Hz.");
             imu_rate_hz = 100.0;
+        }
+        if (odometry_publish_rate_hz <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "common.odometry_publish_rate_hz must be positive. Falling back to 100 Hz.");
+            odometry_publish_rate_hz = 100.0;
         }
         if (gravity_m_s2 <= 0.0)
         {
@@ -1649,6 +1685,7 @@ private:
 
             if (imu_only_measure)
             {
+                ++imu_only_packets_processed;
                 if (lid_topic.empty())
                 {
                     // Intentional no-lidar mode. Startup already reported this once.
@@ -1870,6 +1907,8 @@ private:
                 << imu_buffer_messages_cleared.load() << ",\n"
                 << "  \"stale_lidar_scans_discarded\": "
                 << stale_lidar_scans_discarded.load() << ",\n"
+                << "  \"imu_only_packets_processed\": "
+                << imu_only_packets_processed.load() << ",\n"
                 << "  \"aux_late_dvl\": " << aux_late_dvl_.load() << ",\n"
                 << "  \"aux_late_pressure\": "
                 << aux_late_pressure_.load() << ",\n"
@@ -1930,7 +1969,8 @@ private:
         // Loop closure always needs keyframe-owned map history. With loop
         // closure disabled, retain FAST-LIO2's original behavior and only
         // accumulate history when PCD saving is enabled.
-        if ((!loop_closure_ && !pcd_save_en) || !feats_down_body ||
+        if ((!loop_closure_ && !pcd_save_en && !map_pub_en) ||
+            !feats_down_body ||
             feats_down_body->empty())
         {
             return;
