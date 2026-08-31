@@ -1466,6 +1466,45 @@ Decision and result:
   These changes are intentionally left in the uncommitted working tree for
   user review.
 
+### AgriLiRa4D Three-Way Sensor-Fusion Comparison (2026-08-31)
+
+- [x] Generate FL2, INS, and UWFL2 configs from one canonical YAML.
+- [x] Build and replay the same complete bag sequentially at x5.
+- [x] Check callback counts, timestamps, config differences, and ground-truth alignment.
+- [x] Compute position, depth, and full-SO(3) attitude errors without trajectory fitting.
+
+Decision and result:
+
+- Tested source commit: `308b6bb8ece99db1c601d085e1749be22e973824`.
+- Outputs and analysis are retained under
+  `/home/attia/ros2_ws/bags/SLAMOUTPUT5`. FL2 is sonar+IMU, INS is
+  IMU+DVL+pressure+magnetometer, and UWFL2 combines all five sensors. A
+  structured config diff confirms those enablements are the only estimator
+  differences. Loop closure and map publication were disabled.
+- The source bag was replayed sequentially at x5 in domains 221--223. Every
+  sonar-enabled run received all 721 sonar and 28,808 IMU callbacks with zero
+  timestamp regressions, stale scans, or buffer clears. INS produced 14,360
+  100-Hz fallback samples; sonar-enabled runs produced 719 scan-rate samples.
+- Position RMSE/max/final are `16408.659/34014.347/34014.347 m` for FL2,
+  `10.949/17.424/5.639 m` for INS, and `7.627/11.955/3.829 m` for UWFL2.
+  Attitude RMSE is `68.346/14.921/10.247 deg`, respectively. Thus the requested
+  UWFL2 < INS < FL2 ordering holds for RMSE, maximum, final, and attitude error.
+- FL2 is catastrophically unobservable rather than merely less accurate. Its
+  error exceeds 10 m at 5.82 s and the active map grows to 834,893 points,
+  while UWFL2 remains bounded. The 70-degree-downward sonar sees mainly ground,
+  leaving horizontal motion and heading weakly constrained; auxiliary sensors
+  keep UWFL2 inside scan matching's convergence region. Since all callbacks
+  arrived, this is not x5 playback starvation.
+- Exact command pattern: `python3 tools/run_lc_benchmark.py --rate 5 --bag
+  /home/attia/ros2_ws/bags/AgriLiRa4D/processed/NJTerrC05_sonar3d15lf
+  --config <case.yaml> --output <case-output> --loop-closure false --detection
+  false --map-publication false --map-save false --domain-id <221|222|223>`;
+  analysis: `cd /home/attia/ros2_ws/bags/SLAMOUTPUT5 && python3 compareAgri.py`.
+- Build command `colcon build --packages-select fast_lio --symlink-install`
+  passed. An initial infrastructure launch using domain 251 failed before
+  playback because Fast DDS domain ports support at most 232; the failed
+  artifact was retained rather than hidden.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
