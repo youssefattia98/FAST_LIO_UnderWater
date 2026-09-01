@@ -1505,6 +1505,42 @@ Decision and result:
   playback because Fast DDS domain ports support at most 232; the failed
   artifact was retained rather than hidden.
 
+### AgriLiRa4D IMU/Sonar Consistency Follow-up (2026-09-01)
+
+- [x] Diagnose the instantaneous accelerometer attitude update against ground truth.
+- [x] Make gravity-direction observations rate-independent across scan and INS modes.
+- [x] Correct the gravity-direction Jacobian to its rank-two tangent space.
+- [x] Screen motion gates and sonar covariance on short runs.
+- [x] Validate the selected configuration over complete sequential x5 replays.
+
+Decision and result:
+
+- Instantaneous acceleration samples accepted by the old norm gate disagreed
+  with gravity by `31.86 deg` mean and `65.61 deg` p95. A 0.2 s average reduced
+  this to `3.44/7.97 deg`. Each non-overlapping window is now used once, so the
+  100 Hz INS fallback cannot reuse gravity evidence more often than the 5 Hz
+  scan path.
+- The old identity attitude Jacobian falsely conditioned heading. It is replaced
+  by `I-gg^T`, preserving the unobservable heading direction. The first build
+  failed because the patch matched the adjacent orientation update; placement
+  was corrected, after which the build and all 35 tests passed.
+- The generated DVL was verified against the exact smoothed trajectory and
+  lever-arm model: 3D velocity RMS error is `0.00726 m/s`, consistent with its
+  covariance. An earlier `0.567 m/s` diagnostic was rejected because it
+  differentiated unsmoothed quantized ground truth.
+- Selected canonical settings are `accel_attitude_norm_gate: 0.1` and
+  `laser_point_cov_xy/z: 0.02`. Complete x5 position RMSE/max/final are
+  `136.129/222.981/211.921 m` (FL2), `4.718/9.294/0.230 m` (INS), and
+  `2.696/4.883/1.793 m` (UWFL2). UWFL2 also has the lowest depth and attitude
+  RMSE. FL2 remains physically underconstrained by the 5 Hz, downward,
+  ground-dominated pseudo-sonar and must not be made artificially competitive
+  with a mode-specific estimator configuration.
+- Commands: `colcon build --packages-select fast_lio --symlink-install`;
+  `colcon test --packages-select fast_lio`; and sequential
+  `tools/run_lc_benchmark.py --rate 5` replays retained under
+  `/home/attia/ros2_ws/bags/SLAMOUTPUT5`.
+- Commit: `13a14c4` (`fix: make gravity attitude updates observable`).
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
