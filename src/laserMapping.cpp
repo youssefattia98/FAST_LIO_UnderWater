@@ -110,6 +110,9 @@ Eigen::Quaterniond imu_orientation_ref = Eigen::Quaterniond::Identity();
 bool accel_attitude_ref_ready = false;
 double accel_attitude_cov = 1.2184697e-3;  // (2 deg)^2
 double accel_attitude_norm_gate = 2.0;
+std::deque<std::pair<double, V3D>> accel_attitude_window;
+double accel_attitude_last_stamp = -1.0;
+double accel_attitude_last_update_stamp = -1.0;
 ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -735,17 +738,56 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
     return true;
 }
 
-bool apply_accel_attitude_update(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg)
+bool apply_accel_attitude_update(
+    const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs)
 {
-    if (!imu_msg)
+    constexpr double averaging_window_s = 0.2;
+    for (const auto &imu_msg : imu_msgs)
+    {
+        if (!imu_msg)
+        {
+            continue;
+        }
+        const double timestamp = get_time_sec(imu_msg->header.stamp);
+        if (timestamp <= accel_attitude_last_stamp + 1e-9)
+        {
+            continue;
+        }
+        accel_attitude_window.emplace_back(
+            timestamp,
+            V3D(imu_msg->linear_acceleration.x,
+                imu_msg->linear_acceleration.y,
+                imu_msg->linear_acceleration.z));
+        accel_attitude_last_stamp = timestamp;
+    }
+    if (accel_attitude_window.empty())
     {
         return false;
     }
+    const double newest_stamp = accel_attitude_window.back().first;
+    if (accel_attitude_last_update_stamp > 0.0 &&
+        newest_stamp - accel_attitude_last_update_stamp <
+            averaging_window_s - 1e-6)
+    {
+        return false;
+    }
+    const double oldest_allowed =
+        accel_attitude_window.back().first - averaging_window_s;
+    while (accel_attitude_window.size() > 1 &&
+           accel_attitude_window.front().first < oldest_allowed)
+    {
+        accel_attitude_window.pop_front();
+    }
+
+    V3D acc_meas = V3D::Zero();
+    for (const auto &sample : accel_attitude_window)
+    {
+        acc_meas += sample.second;
+    }
+    acc_meas /= static_cast<double>(accel_attitude_window.size());
+    accel_attitude_last_update_stamp = newest_stamp;
 
     state_ikfom state = kf.get_x();
-    V3D acc_meas(imu_msg->linear_acceleration.x,
-                 imu_msg->linear_acceleration.y,
-                 imu_msg->linear_acceleration.z);
     acc_meas -= V3D(state.ba[0], state.ba[1], state.ba[2]);
     const double acc_norm = acc_meas.norm();
     if (!std::isfinite(acc_norm) || acc_norm < 1e-6 ||
@@ -787,7 +829,13 @@ bool apply_accel_attitude_update(const sensor_msgs::msg::Imu::ConstSharedPtr &im
     MainEkf::cov P = kf.get_P();
     Eigen::Matrix<double, 3, state_ikfom::DOF> H =
         Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
-    H.block<3, 3>(0, 3).setIdentity();
+    // A normalized accelerometer constrains only tilt.  Using an identity
+    // attitude block would also condition the unobserved rotation about
+    // gravity as if its residual were zero, making heading spuriously
+    // overconfident.  The tangent-plane projector keeps that yaw gauge free.
+    const M3D tilt_projector =
+        M3D::Identity() - predicted * predicted.transpose();
+    H.block<3, 3>(0, 3) = tilt_projector;
     const M3D R = M3D::Identity() * std::max(1e-8, accel_attitude_cov);
     const M3D S = H * P * H.transpose() + R;
     Eigen::LDLT<M3D> ldlt(S);
@@ -1400,7 +1448,8 @@ public:
             front_end_timing_
                 << "scan_timestamp,status,elapsed_ms,effective_features,"
                    "input_points,map_points,sonar_dx_roll_deg,"
-                   "sonar_dx_pitch_deg,sonar_dx_yaw_deg,imu_aux_ms,"
+                   "sonar_dx_pitch_deg,sonar_dx_yaw_deg,sonar_dx_x_m,"
+                   "sonar_dx_y_m,sonar_dx_z_m,imu_aux_ms,"
                    "fov_downsample_ms,lidar_iekf_ms,correspondence_ms,"
                    "measurement_model_ms,odom_publish_ms,map_incremental_ms,"
                    "loop_bookkeeping_ms\n";
@@ -1571,6 +1620,7 @@ private:
         {
             const double scan_processing_started = omp_get_wtime();
             V3D sonar_attitude_correction = V3D::Zero();
+            V3D sonar_position_correction = V3D::Zero();
             FrontEndStageTiming stage_timing;
             const auto finish_scan_timing = [&](const char *status) {
                 if (!imu_only_measure)
@@ -1578,7 +1628,8 @@ private:
                     write_front_end_timing(
                         Measures.lidar_end_time, status,
                         1000.0 * (omp_get_wtime() - scan_processing_started),
-                        sonar_attitude_correction, stage_timing);
+                        sonar_attitude_correction, sonar_position_correction,
+                        stage_timing);
                 }
             };
             if (flg_first_scan)
@@ -1677,7 +1728,7 @@ private:
             if (!Measures.imu.empty())
             {
                 apply_imu_orientation_update(Measures.imu.back());
-                apply_accel_attitude_update(Measures.imu.back());
+                apply_accel_attitude_update(Measures.imu);
             }
             last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
@@ -1789,6 +1840,7 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            const V3D position_before_sonar = kf.get_x().pos;
             const M3D rotation_before_sonar = kf.get_x().rot.toRotationMatrix();
             const double lidar_update_cov =
                 auxiliary_fusion_enabled ? 1.0 : LASER_POINT_COV_XY;
@@ -1797,6 +1849,7 @@ private:
                 rotation_before_sonar.transpose() *
                 kf.get_x().rot.toRotationMatrix();
             sonar_attitude_correction = Log(sonar_rotation_delta);
+            sonar_position_correction = kf.get_x().pos - position_before_sonar;
             update_state_outputs();
 
             double t_update_end = omp_get_wtime();
@@ -1838,6 +1891,7 @@ private:
     void write_front_end_timing(double timestamp, const char *status,
                                 double elapsed_ms,
                                 const V3D &sonar_attitude_correction,
+                                const V3D &sonar_position_correction,
                                 const FrontEndStageTiming &stage_timing)
     {
         if (!front_end_timing_)
@@ -1846,12 +1900,15 @@ private:
         }
         std::lock_guard<std::mutex> lock(front_end_diagnostics_mutex_);
         front_end_timing_ << std::setprecision(17) << timestamp << ',' << status
-                          << ',' << elapsed_ms << ',' << effect_feat_num << ','
+                          << ',' << elapsed_ms << ',' << effct_feat_num << ','
                           << feats_down_size << ','
                           << (ikdtree ? ikdtree->validnum() : 0) << ','
                           << sonar_attitude_correction.x() * 180.0 / M_PI << ','
                           << sonar_attitude_correction.y() * 180.0 / M_PI << ','
                           << sonar_attitude_correction.z() * 180.0 / M_PI << ','
+                          << sonar_position_correction.x() << ','
+                          << sonar_position_correction.y() << ','
+                          << sonar_position_correction.z() << ','
                           << stage_timing.imu_aux_ms << ','
                           << stage_timing.fov_downsample_ms << ','
                           << stage_timing.lidar_iekf_ms << ','

@@ -42,11 +42,11 @@
             init_grav_cov: 0.00001
             imu_orientation_gate_sigma: 0.0
             accel_attitude_cov: 1.2184697e-3
-            accel_attitude_norm_gate: 2.0
+            accel_attitude_norm_gate: 0.1
             # Pseudo-sonar cells contain real LiDAR ranges but are angularly
             # quantized to the 256x64 virtual sonar grid.
-            laser_point_cov_xy: 0.2
-            laser_point_cov_z: 0.2
+            laser_point_cov_xy: 0.02
+            laser_point_cov_z: 0.02
             fov_degree: 90.0
             det_range: 15.0
             # T_IMU_SONAR and R_IMU_SONAR: p_imu = R * p_sonar + T.
