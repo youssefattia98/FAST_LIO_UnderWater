@@ -1541,6 +1541,56 @@ Decision and result:
   `/home/attia/ros2_ws/bags/SLAMOUTPUT5`.
 - Commit: `13a14c4` (`fix: make gravity attitude updates observable`).
 
+### Sparse-Sonar Fallback Checkpoint (2026-09-02)
+
+- [x] Add configurable pre-match and effective-feature scan thresholds with legacy defaults.
+- [x] Preserve the propagated IMU/auxiliary state when a scan is rejected.
+- [x] Prevent rejected scans from changing the map, keyframes, loop closure, or sonar-observability timing.
+- [x] Add compact rejection/correction/map-insertion diagnostics and focused tests.
+- [x] Screen three threshold pairs on the first 40 s of AgriLiRa.
+- [ ] Validate a selected pair on the full AgriLiRa bag.
+- [ ] Run `sim3` and `sim_docking_station` disabled/enabled loop-closure regressions after the major change.
+
+Decision: FL2 remains a strict sonar+IMU baseline. Weak scans are rejected as
+complete observations; UWFL2 keeps its timestamp-corrected auxiliary prior and
+FL2 keeps its IMU prior. Rejected geometry intentionally leaves a gap in the
+map. Continuous weak scans remain scan-rate, while 100 Hz fallback remains for
+an absent sonar stream. Threshold candidates are `(50,20)`, `(100,50)`, and
+`(250,100)` for downsampled/effective points.
+
+Implementation and test result:
+
+- Added `mapping.minimum_scan_points` and
+  `mapping.minimum_effective_features` with legacy defaults `5/1`. Rejected
+  updates restore both IKF state and covariance; map insertion, keyframes,
+  loop-closure notification, and sonar observability notification occur only
+  after an accepted update. Per-scan CSV rows now record the rejection reason,
+  input/effective counts, correction norms, and inserted-map count.
+- Build passed with `colcon build --packages-select fast_lio
+  --symlink-install`. `colcon test --packages-select fast_lio` passed all 42
+  reported tests, including six focused sparse/transaction tests. Implementation
+  commit: `e7e08ea` (`feat: reject weak sonar updates transactionally`).
+- Exact short-run command used `tools/run_lc_benchmark.py --rate 15
+  --duration 40 --loop-closure false --detection false --map-publication false
+  --map-save false`, sequentially in domains 210--215. Outputs and
+  `screen_metrics.csv` are under
+  `/home/attia/ros2_ws/bags/SLAMOUTPUT5/sparse_sonar_screens`.
+- Retained FL2 baseline first-40-s RMSE/max were `29.880/73.521 m`. Candidate
+  RMSE/max values were `42.627/119.645 m` for `50/20`, `35.254/98.021 m` for
+  `100/50`, and `48.478/137.426 m` for `250/100`. The corresponding UWFL2
+  RMSE values were `2.184`, `2.137`, and `2.259 m`, versus the retained
+  `1.799 m` baseline. Every candidate therefore failed both the FL2 50-percent
+  improvement and UWFL2 5-percent-change criteria.
+- All rejected rows reported zero inserted map points, and no covariance
+  validity warning occurred. This isolates the failed assumption: point count
+  alone cannot distinguish harmful from useful geometry, and even sparse
+  ground-dominated scans carry constraints that pure FL2 needs. No candidate
+  was selected; the AgriLiRa config remains at legacy `5/1`.
+- Stop condition reached as specified. Full AgriLiRa and sim/docking
+  regressions were not run because there is no passing threshold to validate.
+  Do not proceed to an observability-Hessian mechanism without a separately
+  reviewed checkpoint.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
