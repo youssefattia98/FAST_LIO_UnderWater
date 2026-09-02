@@ -161,6 +161,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_std_detector test/test_std_detector.cpp)
   target_include_directories(test_std_detector PRIVATE include)
   target_link_libraries(test_std_detector uwfl2_loop_closure)
+
+  ament_add_gtest(test_lidar_scan_quality test/test_lidar_scan_quality.cpp)
+  target_include_directories(test_lidar_scan_quality PRIVATE include)
 endif()
 
 # ---------------- Install --------------- #

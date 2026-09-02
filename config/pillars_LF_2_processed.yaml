@@ -31,6 +31,8 @@
             blind: 0.2
 
         mapping:
+            minimum_scan_points: 5
+            minimum_effective_features: 1
             noiseless_imu: false
             obs_manager_sonar_timeout: 0.0
             obs_manager_ramp_time: 0.0

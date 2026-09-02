@@ -72,6 +72,7 @@
 #include "auxiliary_sensor_fusion.hpp"
 #include "loop_closure/loop_closure_manager.hpp"
 #include "loop_closure/state_transport.hpp"
+#include "lidar_scan_quality.hpp"
 #include "observability_manager.hpp"
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -121,6 +122,9 @@ double odometry_publish_rate_hz = 100.0;
 double gravity_m_s2 = G_m_s2;
 int    effct_feat_num = 0, scan_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+int    lidar_update_max_effective_features = 0;
+int    minimum_scan_points = 5, minimum_effective_features = 1;
+uwfl2::LidarScanQualityPolicy lidar_scan_quality;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool    is_first_lidar = true;
@@ -480,7 +484,6 @@ bool sync_packages(MeasureGroup &meas)
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
-    obs_manager.notify_sonar_scan(meas.lidar_end_time);
     return true;
 }
 
@@ -567,7 +570,7 @@ bool sync_imu_only_packages(MeasureGroup &meas)
 }
 
 int process_increments = 0;
-void map_incremental()
+std::size_t map_incremental()
 {
     PointVector PointToAdd;
     PointVector PointNoNeedDownsample;
@@ -614,6 +617,7 @@ void map_incremental()
     ikdtree->Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
+    return static_cast<std::size_t>(add_point_size);
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
@@ -978,11 +982,14 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
             effct_feat_num ++;
         }
     }
+    lidar_update_max_effective_features =
+        std::max(lidar_update_max_effective_features, effct_feat_num);
     match_time  += omp_get_wtime() - match_start;
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    if (effct_feat_num < 1)
+    if (!lidar_scan_quality.features_are_sufficient(
+            static_cast<std::size_t>(effct_feat_num)))
     {
         ekfom_data.valid = false;
         return;
@@ -1075,6 +1082,8 @@ public:
         this->declare_parameter<vector<double>>("mapping.imu_gyro_scale", {1.0, 1.0, 1.0});
         ObservabilityManager::declare_parameters(*this);
         this->declare_parameter<double>("mapping.laser_point_cov", LASER_POINT_COV_DEFAULT);
+        this->declare_parameter<int>("mapping.minimum_scan_points", 5);
+        this->declare_parameter<int>("mapping.minimum_effective_features", 1);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.scan_line", 16);
         this->declare_parameter<int>("preprocess.timestamp_unit", US);
@@ -1193,6 +1202,15 @@ public:
         this->get_parameter_or<double>("mapping.laser_point_cov_z", LASER_POINT_COV_Z, legacy_laser_point_cov);
         LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
         LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
+        this->get_parameter_or<int>("mapping.minimum_scan_points",
+                                    minimum_scan_points, 5);
+        this->get_parameter_or<int>("mapping.minimum_effective_features",
+                                    minimum_effective_features, 1);
+        minimum_scan_points = std::max(1, minimum_scan_points);
+        minimum_effective_features = std::max(1, minimum_effective_features);
+        lidar_scan_quality = uwfl2::LidarScanQualityPolicy(
+            static_cast<std::size_t>(minimum_scan_points),
+            static_cast<std::size_t>(minimum_effective_features));
         imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
         imu_orientation_gate_sigma = std::max(0.0, imu_orientation_gate_sigma);
         accel_attitude_cov = std::max(1e-8, accel_attitude_cov);
@@ -1447,7 +1465,8 @@ public:
                 benchmark_diagnostics_directory_ / "front_end_timing.csv");
             front_end_timing_
                 << "scan_timestamp,status,elapsed_ms,effective_features,"
-                   "input_points,map_points,sonar_dx_roll_deg,"
+                   "input_points,scan_accepted,map_points_inserted,map_points,"
+                   "sonar_dx_rot_deg,sonar_dx_pos_m,sonar_dx_roll_deg,"
                    "sonar_dx_pitch_deg,sonar_dx_yaw_deg,sonar_dx_x_m,"
                    "sonar_dx_y_m,sonar_dx_z_m,imu_aux_ms,"
                    "fov_downsample_ms,lidar_iekf_ms,correspondence_ms,"
@@ -1621,6 +1640,10 @@ private:
             const double scan_processing_started = omp_get_wtime();
             V3D sonar_attitude_correction = V3D::Zero();
             V3D sonar_position_correction = V3D::Zero();
+            uwfl2::LidarUpdateResult lidar_update_result;
+            effct_feat_num = 0;
+            feats_down_size = 0;
+            add_point_size = 0;
             FrontEndStageTiming stage_timing;
             const auto finish_scan_timing = [&](const char *status) {
                 if (!imu_only_measure)
@@ -1629,7 +1652,7 @@ private:
                         Measures.lidar_end_time, status,
                         1000.0 * (omp_get_wtime() - scan_processing_started),
                         sonar_attitude_correction, sonar_position_correction,
-                        stage_timing);
+                        lidar_update_result, stage_timing);
                 }
             };
             if (flg_first_scan)
@@ -1765,7 +1788,8 @@ private:
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
-                g_publish_mode = aux_summary.updated() ? "aux_only" : "no_points";
+                lidar_update_result = lidar_scan_quality.reject_sparse_input(0);
+                g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
                 finish_scan_timing("no_points");
                 return;
@@ -1784,11 +1808,27 @@ private:
             stage_timing.fov_downsample_ms =
                 1000.0 * (t1 - fov_downsample_started);
             feats_down_size = feats_down_body->points.size();
+            if (!lidar_scan_quality.input_is_sufficient(
+                    static_cast<std::size_t>(feats_down_size)))
+            {
+                lidar_update_result = lidar_scan_quality.reject_sparse_input(
+                    static_cast<std::size_t>(feats_down_size));
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "Rejected sparse sonar scan: %d downsampled points (minimum %d).",
+                    feats_down_size, minimum_scan_points);
+                g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                finish_scan_timing(uwfl2::lidar_scan_status(
+                    lidar_update_result.reason));
+                return;
+            }
             /*** initialize the map kdtree ***/
             if(ikdtree->Root_Node == nullptr)
             {
                 RCLCPP_INFO(this->get_logger(), "Initialize the map kdtree");
-                if(feats_down_size > 5)
+                if(lidar_scan_quality.map_initialization_is_sufficient(
+                       static_cast<std::size_t>(feats_down_size)))
                 {
                     ikdtree->set_downsample_param(filter_size_map_min);
                     feats_down_world->resize(feats_down_size);
@@ -1797,6 +1837,12 @@ private:
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
                     ikdtree->Build(feats_down_world->points);
+                    lidar_update_result =
+                        lidar_scan_quality.accept_map_initialization(
+                            static_cast<std::size_t>(feats_down_size));
+                    lidar_update_result.map_points_inserted =
+                        static_cast<std::size_t>(ikdtree->validnum());
+                    obs_manager.notify_sonar_scan(Measures.lidar_end_time);
                     if (loop_closure_)
                     {
                         ++active_tree_generation_;
@@ -1809,24 +1855,26 @@ private:
                     stage_timing.loop_bookkeeping_ms =
                         1000.0 * (omp_get_wtime() - loop_bookkeeping_started);
                 }
-                g_publish_mode = "kdtree_init";
+                else
+                {
+                    lidar_update_result = lidar_scan_quality.reject_sparse_input(
+                        static_cast<std::size_t>(feats_down_size));
+                }
+                g_publish_mode = lidar_update_result.accepted
+                                     ? "kdtree_init"
+                                     : (aux_summary.updated() ? "aux_only"
+                                                              : "imu_only");
                 publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
-                finish_scan_timing("tree_initialization");
+                finish_scan_timing(lidar_update_result.accepted
+                                       ? "tree_initialization"
+                                       : uwfl2::lidar_scan_status(
+                                             lidar_update_result.reason));
                 return;
             }
             int featsFromMapNum = ikdtree->validnum();
             kdtree_size_st = ikdtree->size();
-            
+
             /*** ICP and iterated Kalman filter update ***/
-            if (feats_down_size < 5)
-            {
-                RCLCPP_WARN(this->get_logger(), "Too few points, publish IMU-only odometry for this scan.\n");
-                g_publish_mode = aux_summary.updated() ? "aux_only" : "few_points";
-                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
-                finish_scan_timing("few_points");
-                return;
-            }
-            
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
@@ -1844,7 +1892,35 @@ private:
             const M3D rotation_before_sonar = kf.get_x().rot.toRotationMatrix();
             const double lidar_update_cov =
                 auxiliary_fusion_enabled ? 1.0 : LASER_POINT_COV_XY;
-            kf.update_iterated_dyn_share_modified(lidar_update_cov, solve_H_time);
+            lidar_update_max_effective_features = 0;
+            uwfl2::LidarUpdateTransaction<MainEkf> lidar_transaction(kf);
+            const bool update_applied =
+                kf.update_iterated_dyn_share_modified(lidar_update_cov,
+                                                      solve_H_time);
+            lidar_update_result = lidar_scan_quality.evaluate_update(
+                static_cast<std::size_t>(feats_down_size),
+                static_cast<std::size_t>(lidar_update_max_effective_features),
+                update_applied);
+            lidar_transaction.finish(lidar_update_result);
+            if (!lidar_update_result.accepted)
+            {
+                update_state_outputs();
+                stage_timing.lidar_iekf_ms =
+                    1000.0 * (omp_get_wtime() - t_update_start);
+                stage_timing.correspondence_ms = 1000.0 * match_time;
+                stage_timing.measurement_model_ms = 1000.0 * solve_time;
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "Rejected sonar update: %d effective features (minimum %d).",
+                    lidar_update_max_effective_features,
+                    minimum_effective_features);
+                g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                finish_scan_timing(uwfl2::lidar_scan_status(
+                    lidar_update_result.reason));
+                return;
+            }
+            obs_manager.notify_sonar_scan(Measures.lidar_end_time);
             const M3D sonar_rotation_delta =
                 rotation_before_sonar.transpose() *
                 kf.get_x().rot.toRotationMatrix();
@@ -1867,7 +1943,7 @@ private:
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            map_incremental();
+            lidar_update_result.map_points_inserted = map_incremental();
             const double map_incremental_finished = omp_get_wtime();
             stage_timing.map_incremental_ms =
                 1000.0 * (map_incremental_finished - t3);
@@ -1892,6 +1968,7 @@ private:
                                 double elapsed_ms,
                                 const V3D &sonar_attitude_correction,
                                 const V3D &sonar_position_correction,
+                                const uwfl2::LidarUpdateResult &lidar_result,
                                 const FrontEndStageTiming &stage_timing)
     {
         if (!front_end_timing_)
@@ -1900,9 +1977,14 @@ private:
         }
         std::lock_guard<std::mutex> lock(front_end_diagnostics_mutex_);
         front_end_timing_ << std::setprecision(17) << timestamp << ',' << status
-                          << ',' << elapsed_ms << ',' << effct_feat_num << ','
-                          << feats_down_size << ','
+                          << ',' << elapsed_ms << ','
+                          << lidar_result.effective_features << ','
+                          << lidar_result.input_points << ','
+                          << (lidar_result.accepted ? 1 : 0) << ','
+                          << lidar_result.map_points_inserted << ','
                           << (ikdtree ? ikdtree->validnum() : 0) << ','
+                          << sonar_attitude_correction.norm() * 180.0 / M_PI << ','
+                          << sonar_position_correction.norm() << ','
                           << sonar_attitude_correction.x() * 180.0 / M_PI << ','
                           << sonar_attitude_correction.y() * 180.0 / M_PI << ','
                           << sonar_attitude_correction.z() * 180.0 / M_PI << ','

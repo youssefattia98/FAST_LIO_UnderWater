@@ -26,6 +26,8 @@
             blind: 0.2
 
         mapping:
+            minimum_scan_points: 5
+            minimum_effective_features: 1
             noiseless_imu: false
             acc_cov: 2.886601e-4
             gyr_cov: 1.4641e-6

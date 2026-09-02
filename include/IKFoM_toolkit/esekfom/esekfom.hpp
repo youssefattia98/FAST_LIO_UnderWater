@@ -1610,7 +1610,7 @@ public:
 	}
 	
 	//iterated error state EKF update modified for one specific system.
-	void update_iterated_dyn_share_modified(double R, double &solve_time) {
+	bool update_iterated_dyn_share_modified(double R, double &solve_time) {
 		
 		dyn_share_datastruct<scalar_type> dyn_share;
 		dyn_share.valid = true;
@@ -1963,10 +1963,11 @@ public:
 					}
 				//}
 				solve_time += omp_get_wtime() - solve_start;
-				return;
+				return true;
 			}
 			solve_time += omp_get_wtime() - solve_start;
 		}
+		return false;
 	}
 
 	void change_x(state &input_state)
