@@ -1591,6 +1591,64 @@ Implementation and test result:
   Do not proceed to an observability-Hessian mechanism without a separately
   reviewed checkpoint.
 
+### AgriLiRa FL2 Inertial Root-Cause Checkpoint (2026-09-02)
+
+- [x] Reuse retained covariance trials before starting new replays.
+- [x] Compare the processed IMU frame, timing, startup motion, and gyro bias
+  against the bag ground truth.
+- [x] Record IMU bias, gravity, velocity, and covariance evolution alongside
+  each sonar correction.
+- [x] Screen IMU process covariance and the non-FAST-LIO2 accelerometer tilt
+  observation over the first 40 s with the legacy `5/1` scan thresholds.
+- [x] Diagnose per-scan sonar attitude information and direct IMU-bias
+  corrections.
+- [x] Test a full-SE(3) attitude observability projection, disabled by default,
+  before considering any constrained-gain modification.
+- [x] Add and validate a physically consistent 20 s stationary prefix to the
+  derived AgriLiRa bag without changing estimator source code.
+- [ ] Validate only a configuration that improves FL2 without degrading UWFL2.
+
+Initial evidence: weakening sonar covariance from `0.02` to `0.2` reduced the
+retained full FL2 RMSE from `136.129 m` to `61.088 m`; weakening it much further
+or locking inertial covariance eventually diverged more. The first 2 s have
+only `0.044 m/s` mean ground-truth speed, and the initialized gyro mean is
+approximately `[-0.0082, 0.0148, 0.0091] rad/s`. Direct gyro integration with
+that startup mean gives about `6.2 deg` final attitude error, so an initial
+frame/sign failure is not supported. The next test isolates whether scan
+cross-covariance or the added acceleration-as-gravity observation corrupts the
+otherwise usable inertial prior.
+
+Process-noise screens at `0.1x` and `0.01x` changed the 40 s FL2 RMSE from
+`8.075 m` to `8.565 m` and `8.515 m`; disabling the acceleration tilt update
+worsened it to `19.291 m`. The baseline sonar update changed the yaw gyro bias
+by `+0.00518 rad/s` and reduced its covariance to `5.1e-9`, while the resulting
+attitude error reached `12.36 deg`. Direct gyro integration was only
+`2.88 deg` wrong at 40 s. Therefore IMU covariance tuning is rejected as the
+root fix: weak sonar geometry is falsely conditioning attitude and gyro bias
+through state cross-covariance. Raw and Schur-complement attitude-information
+projection did not materially improve the result and was removed. A tight
+startup gyro-bias covariance improved 40 s but caused severe full-run
+translation divergence, so it was also removed.
+
+Bag correction: the converter now prepends 20 s of fixed pose/sonar/pressure/
+magnetometer data, 15 Hz zero DVL velocity, and 200 Hz constant IMU data using
+the source sensor's estimated mean offset. IMU covariance fields remain zero;
+`UAV_bag.yaml` is authoritative. Conversion validation passed. An FL2 x15
+replay produced `0.025 m` stationary RMSE and `0.028 m` stationary final error,
+but motion-only RMSE remained `57.658 m`. This confirms that startup motion was
+a real bag defect, while the remaining failure is the weak-sonar attitude/
+gyro-bias conditioning already identified above.
+
+Commands:
+
+```bash
+/home/attia/ros2_ws/.venv-agrilira4d-inspect/bin/python \
+  /home/attia/ros2_ws/bags/AgriLiRa4D/tools/build_njterrc05_underwater_bag.py \
+  --overwrite
+/home/attia/ros2_ws/.venv-agrilira4d-inspect/bin/python \
+  /home/attia/ros2_ws/bags/AgriLiRa4D/tools/validate_njterrc05_underwater_bag.py
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
