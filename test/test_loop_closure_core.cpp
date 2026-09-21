@@ -197,6 +197,29 @@ TEST(FullSe3PoseGraph, RejectsStatisticallyInconsistentLoop)
     EXPECT_EQ(graph.snapshot().loop_factor_count, 0U);
 }
 
+TEST(FullSe3PoseGraph, SkipsStatisticallyInsignificantLoop)
+{
+    lc::PoseGraphConfig config;
+    config.loop_minimum_initial_nis = 1.0;
+    lc::FullSe3PoseGraph graph(config);
+    for (std::uint64_t id = 0; id < 8; ++id)
+    {
+        ASSERT_EQ(graph.append_keyframe(keyframe(
+                      id, pose({static_cast<double>(id), 0.0, 0.0},
+                               Eigen::Vector3d::UnitZ(), 0.0))),
+                  id + 1);
+    }
+    lc::LoopConstraint loop;
+    loop.from_id = 0;
+    loop.to_id = 7;
+    loop.T_from_to = pose({7.0, 0.0, 0.0}, Eigen::Vector3d::UnitZ(), 0.0);
+    loop.covariance = lc::Matrix6d::Identity() * 0.01;
+    const lc::LoopEvaluation evaluation = graph.try_add_loop(loop);
+    EXPECT_EQ(evaluation.reason, "initial_loop_nis_too_small");
+    EXPECT_LT(evaluation.initial_nis, config.loop_minimum_initial_nis);
+    EXPECT_EQ(graph.snapshot().loop_factor_count, 0U);
+}
+
 TEST(FullSe3PoseGraph, NisIncludesAccumulatedRelativePoseUncertainty)
 {
     lc::FullSe3PoseGraph graph;

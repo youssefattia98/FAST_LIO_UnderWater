@@ -278,9 +278,17 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
         return reject(std::string("loop_innovation_covariance_exception: ") +
                       exception.what());
     }
+    if (!constraint.test_override && !std::isfinite(result.initial_nis))
+    {
+        return reject("initial_loop_nis_non_finite");
+    }
     if (!constraint.test_override &&
-        (!std::isfinite(result.initial_nis) ||
-         result.initial_nis > config_.loop_maximum_initial_nis))
+        result.initial_nis < config_.loop_minimum_initial_nis)
+    {
+        return reject("initial_loop_nis_too_small");
+    }
+    if (!constraint.test_override &&
+        result.initial_nis > config_.loop_maximum_initial_nis)
     {
         return reject("initial_loop_nis_too_large");
     }

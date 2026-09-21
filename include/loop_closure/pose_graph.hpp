@@ -24,6 +24,7 @@ struct PoseGraphConfig
     std::size_t loop_minimum_keyframe_separation = 5;
     double loop_maximum_initial_translation_error_m = 10.0;
     double loop_maximum_initial_rotation_error_rad = 45.0 * 3.14159265358979323846 / 180.0;
+    double loop_minimum_initial_nis = 0.0;
     double loop_maximum_initial_nis = 12.592;
     double loop_maximum_pose_correction_translation_m = 20.0;
     double loop_maximum_pose_correction_rotation_rad = 45.0 * 3.14159265358979323846 / 180.0;

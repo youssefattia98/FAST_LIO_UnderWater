@@ -1726,6 +1726,19 @@ Pre-loop drift diagnosis:
   The valid INS output is `sim_docking_station_5_ins_x15_drain45`; the earlier
   `sim_docking_station_5_ins_x15` recording is incomplete because its recorder
   stopped before the x15 auxiliary-processing backlog drained.
+- [x] Measured the historical optimized UWFL2 path after the previously
+  accepted low-innovation loop. Although latest-scan re-registration protected
+  the live state, the loop increased optimized-path RMSE from `0.228 m` to
+  `0.668 m`; its fixed full-SE(3) constraint was overconfident for the nearly
+  planar terminal view. Added `loop_minimum_initial_nis` with a legacy-safe
+  default of `0.0` and selected `1.0` for the validated configs.
+- [x] At x5, UWFL2 terminal proposals with NIS `0.055` and `0.024` were skipped
+  as statistically insignificant. No correction committed, and online metrics
+  remained RMSE/max/final `0.218/0.541/0.050 m`. At x15, FL2's NIS `9.220`
+  loop remained accepted, reduced `3.217 m` to `0.023 m`, and committed.
+  Build passed and all 78 tests passed, including the focused insignificant-loop
+  transaction test. Outputs are `sim_docking_station_5_uwfl2_lc_significance_x5`
+  and `sim_docking_station_5_fl2_lc_significance_x15`.
 
 Pressure comparison outputs are under
 `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim_docking_station_5_uwfl2_lc_pressure_{off,on}_x15`;
