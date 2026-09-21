@@ -1717,6 +1717,15 @@ Pre-loop drift diagnosis:
 - [x] Sonar headers were monotonic at exactly `6 Hz`, with a stable phase of
   about `33 ms` relative to `/clock`. Together with identical x5/x15 loop
   residuals, this rejects playback speed and timestamp jitter as causes.
+- [x] Added a full-duration INS control using the same UWFL2 configuration
+  with only sonar, mapping, and loop closure disabled. FL2/INS/UWFL2 3D ATE
+  RMSE values were `0.674/1.159/0.218 m`; maximum errors were
+  `3.330/1.977/0.541 m`; final errors were `3.228/1.416/0.050 m`. INS avoids
+  the terminal planar-sonar scale loss but accumulates horizontal
+  dead-reckoning error over the full route. UWFL2 is best in all three metrics.
+  The valid INS output is `sim_docking_station_5_ins_x15_drain45`; the earlier
+  `sim_docking_station_5_ins_x15` recording is incomplete because its recorder
+  stopped before the x15 auxiliary-processing backlog drained.
 
 Pressure comparison outputs are under
 `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim_docking_station_5_uwfl2_lc_pressure_{off,on}_x15`;
