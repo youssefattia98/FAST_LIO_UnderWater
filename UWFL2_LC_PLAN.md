@@ -1649,6 +1649,37 @@ Commands:
   /home/attia/ros2_ws/bags/AgriLiRa4D/tools/validate_njterrc05_underwater_bag.py
 ```
 
+### Sim Docking Station 5 FL2-LC Validation (2026-09-21)
+
+- [x] Build current branch successfully with `colcon build
+  --packages-select fast_lio --symlink-install`.
+- [x] Run FL2-LC at x15 with RViz, auxiliary sensors disabled, and full-SE(3)
+  automatic loop closure enabled.
+- [x] Restrict detection to the terminal revisit with
+  `std_minimum_loop_duration_s: 500.0`.
+- [x] Confirm final graph loop, corrected-map rebuild, latest-scan
+  re-registration, and atomic state/tree commit.
+
+Run configuration:
+`/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/configs/sim_docking_station_5_fl2_lc.yaml`.
+Output:
+`/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim_docking_station_5_fl2_lc_terminal_x15`.
+The vehicle ground truth returned within `0.048 m` of its start at `540.1 s`.
+STD accepted one loop from keyframe 348 (`542.307 s`) to keyframe 0. Graph
+optimization reduced its translation residual from `3.217 m` to `0.023 m` and
+rotation residual from `0.719 deg` to `0.175 deg`. The shadow map rebuilt in
+`100.410 ms`; latest-scan registration passed and reduced mean residual from
+`0.0442 m` to `0.0355 m`; the correction committed at `546.640 s` in
+`1.491 ms`. All `3260` sonar and `162344` IMU callbacks arrived with no drops,
+timestamp regressions, or invalid covariance.
+
+The saved corrected map is `sim_docking_station_5_fl2_lc.pcd`. The final
+recorded `/Odometry` message precedes the asynchronous commit, so its endpoint
+still contains the pre-loop `3.23 m` error even though the internal state and
+saved map were corrected. `check_reregistration.py` passed. The generic
+`check_pose_graph.py` reported only `manual-loop request artifact is missing`;
+that assertion does not apply to this automatic-loop run.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
