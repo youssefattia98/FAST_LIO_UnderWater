@@ -1680,6 +1680,32 @@ saved map were corrected. `check_reregistration.py` passed. The generic
 `check_pose_graph.py` reported only `manual-loop request artifact is missing`;
 that assertion does not apply to this automatic-loop run.
 
+Playback-rate and pressure controls:
+
+- [x] Replayed the identical FL2-LC configuration at x5. The x5 and x15 runs
+  produced exactly the same pre-loop translation residual (`3.217350836 m`),
+  optimized residual (`0.023364802 m`), and initial loop NIS (`9.220384339`).
+  Thus x15 did not cause the accumulated front-end drift. The mismatch is
+  `1.14%` of the `282.3 m` estimated path length. x15 only exposed an
+  end-of-bag scheduling edge case when a correction became ready after the
+  final simulated-clock tick.
+- [x] Compared UWFL2-LC at x15 with identical configurations differing only in
+  `pressure.enable`. Pressure reduced 3D ATE RMSE from `0.2466 m` to
+  `0.2183 m` and depth RMSE from `0.1094 m` to `0.0454 m`; all `3260` sonar
+  and `162344` IMU callbacks arrived and covariance remained valid. It also
+  increased attitude RMSE from `0.5176 deg` to `0.6969 deg` and the maximum
+  3D error from `0.4344 m` to `0.5412 m`, so it improves position/depth RMSE
+  but not every metric.
+- [x] Replayed pressure-on UWFL2-LC at x5 to validate the complete asynchronous
+  pipeline. One terminal loop was accepted, latest-scan registration passed,
+  and one correction committed. Its 3D/depth RMSE remained
+  `0.2187/0.0454 m` with no invalid covariance.
+
+Pressure comparison outputs are under
+`/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim_docking_station_5_uwfl2_lc_pressure_{off,on}_x15`;
+the committed x5 pressure-on run is
+`sim_docking_station_5_uwfl2_lc_pressure_on_x5`.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
