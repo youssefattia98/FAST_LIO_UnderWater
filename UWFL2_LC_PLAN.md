@@ -1739,6 +1739,15 @@ Pre-loop drift diagnosis:
   Build passed and all 78 tests passed, including the focused insignificant-loop
   transaction test. Outputs are `sim_docking_station_5_uwfl2_lc_significance_x5`
   and `sim_docking_station_5_fl2_lc_significance_x15`.
+- [x] Rejected more-frequent loop tuning as a parameter-only solution. Reducing
+  `std_minimum_loop_duration_s` from `500` to `60 s` generated 87 proposals and
+  accepted one loop from keyframe 238 (`391.64 s`) to 301 (`492.64 s`, NIS
+  `1.60`). It worsened the keyframe-path RMSE/max from `0.228/0.537 m` to
+  `0.238/0.562 m` and did not reduce the online `0.541 m` peak at `500 s`.
+  Thirty-four shadow rebuilds became stale as subsequent keyframes advanced the
+  graph, so the correction committed only at the end. Keep `500 s` and NIS
+  `1.0`; future frequent closure requires degeneracy-aware loop uncertainty and
+  a shadow-map pipeline that can incorporate post-snapshot keyframes.
 
 Pressure comparison outputs are under
 `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim_docking_station_5_uwfl2_lc_pressure_{off,on}_x15`;
