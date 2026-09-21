@@ -1701,6 +1701,23 @@ Playback-rate and pressure controls:
   and one correction committed. Its 3D/depth RMSE remained
   `0.2187/0.0454 m` with no invalid covariance.
 
+Pre-loop drift diagnosis:
+
+- [x] The `3.217 m` loop residual is the terminal FL2 front-end error, not an
+  initial error. It is horizontal (`3.228 m` final 3D error versus only
+  `0.061 m` depth error and `0.469 deg` attitude error).
+- [x] Between `515--535 s`, FL2 estimated only `80.9--90.3%` of each true
+  five-second displacement. The sonar clouds in the same interval were nearly
+  planar (smallest point-cloud covariance eigenvalue `0.0037--0.0052`), so the
+  point-to-plane update weakly observes translation tangent to the seabed.
+- [x] UWFL2 with pressure disabled estimated `99.7--100.1%` of those same
+  displacements and ended near `0.10 m` error. This isolates DVL velocity as
+  the constraint that supplies the missing along-track information; pressure
+  is not responsible for the FL2 endpoint drift.
+- [x] Sonar headers were monotonic at exactly `6 Hz`, with a stable phase of
+  about `33 ms` relative to `/clock`. Together with identical x5/x15 loop
+  residuals, this rejects playback speed and timestamp jitter as causes.
+
 Pressure comparison outputs are under
 `/home/attia/ros2_ws/bags/UWFL2_LC_RESULTS/sim_docking_station_5_uwfl2_lc_pressure_{off,on}_x15`;
 the committed x5 pressure-on run is
