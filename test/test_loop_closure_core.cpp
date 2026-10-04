@@ -545,6 +545,35 @@ TEST(ShadowMap, GloballyCompactsOverlappingHistoricalSubmaps)
     EXPECT_EQ(result.corrected_history_points->size(), 1U);
 }
 
+TEST(ShadowMap, KeepsDenseHistoryIndependentOfActiveTreeResolution)
+{
+    lc::PoseGraphSnapshot graph;
+    graph.version = 4;
+    graph.ids = {0};
+    graph.timestamps = {1.0};
+    graph.raw_poses = {lc::Pose3d{}};
+    graph.optimized_poses = graph.raw_poses;
+    lc::Keyframe frame = keyframe(0, lc::Pose3d{});
+    frame.map_points_world =
+        std::make_shared<const std::vector<lc::PointXYZI>>(
+            std::initializer_list<lc::PointXYZI>{
+                {0.01F, 0.0F, 0.0F, 1.0F},
+                {0.06F, 0.0F, 0.0F, 2.0F}});
+    graph.keyframes = {frame};
+    graph.node_count = 1;
+
+    lc::ShadowMapConfig config;
+    config.radius_m = 10.0;
+    config.voxel_size_m = 0.2;
+    config.history_voxel_size_m = 0.02;
+    const auto result = lc::ShadowMapBuilder(config).build({graph, 1});
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    ASSERT_TRUE(result.corrected_history_points);
+    EXPECT_EQ(result.filtered_points, 1U);
+    EXPECT_EQ(result.corrected_history_points->size(), 2U);
+}
+
 TEST(ShadowMap, VoxelSelectionIsDeterministicAndMatchesCenterRule)
 {
     auto graph = shadow_graph(lc::Pose3d{});

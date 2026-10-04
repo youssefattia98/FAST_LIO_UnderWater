@@ -248,29 +248,18 @@ ShadowPointVector ordered_voxel_points(const VoxelMap &voxels)
     return filtered;
 }
 
-bool selects_full_history(const std::vector<std::size_t> &selected,
-                          std::size_t keyframe_count)
-{
-    if (selected.size() != keyframe_count)
-    {
-        return false;
-    }
-    for (std::size_t index = 0; index < selected.size(); ++index)
-    {
-        if (selected[index] != index)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 }  // namespace
 
 ShadowMapBuilder::ShadowMapBuilder(ShadowMapConfig config) : config_(config)
 {
+    if (config_.history_voxel_size_m <= 0.0)
+    {
+        config_.history_voxel_size_m = config_.voxel_size_m;
+    }
     if (!std::isfinite(config_.radius_m) || config_.radius_m < 0.0 ||
         !std::isfinite(config_.voxel_size_m) || config_.voxel_size_m <= 0.0 ||
+        !std::isfinite(config_.history_voxel_size_m) ||
+        config_.history_voxel_size_m <= 0.0 ||
         config_.maximum_keyframes == 0 || config_.maximum_input_points == 0)
     {
         throw std::invalid_argument("Invalid shadow-map configuration");
@@ -358,8 +347,6 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
         }
         const std::size_t full_input_points = count_input_points(
             request, full_indices, config_.maximum_input_points);
-        const bool active_is_full =
-            selects_full_history(selected, full_indices.size());
         std::vector<bool> active_keyframe(full_indices.size(), false);
         for (const std::size_t index : selected)
         {
@@ -369,10 +356,7 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
         VoxelMap history_voxels;
         history_voxels.reserve(full_input_points);
         VoxelMap active_voxels;
-        if (!active_is_full)
-        {
-            active_voxels.reserve(result.input_points);
-        }
+        active_voxels.reserve(result.input_points);
         for (const std::size_t index : full_indices)
         {
             for (const PointXYZI &source :
@@ -384,8 +368,9 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
                 {
                     continue;
                 }
-                accumulate_voxel(history_voxels, point, config_.voxel_size_m);
-                if (!active_is_full && active_keyframe[index])
+                accumulate_voxel(history_voxels, point,
+                                 config_.history_voxel_size_m);
+                if (active_keyframe[index])
                 {
                     accumulate_voxel(active_voxels, point,
                                      config_.voxel_size_m);
@@ -395,9 +380,7 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
         const auto reconstruction_finished = Clock::now();
         ShadowPointVector corrected_history =
             ordered_voxel_points(history_voxels);
-        ShadowPointVector filtered = active_is_full
-                                         ? corrected_history
-                                         : ordered_voxel_points(active_voxels);
+        ShadowPointVector filtered = ordered_voxel_points(active_voxels);
         const auto downsample_finished = Clock::now();
         result.reconstruction_time_ms = milliseconds(
             reconstruction_started, reconstruction_finished);

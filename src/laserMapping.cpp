@@ -52,6 +52,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
+#include "sensor_timestamp_policy.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -118,6 +119,9 @@ ObservabilityManager obs_manager;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double last_processed_time = -1.0, lidar_timeout = 0.25, imu_rate_hz = 100.0;
+double lidar_reorder_window_s = 0.0;
+double maximum_imu_gap_s = 0.0;
+double maximum_future_sensor_skew_s = 0.0;
 double odometry_publish_rate_hz = 100.0;
 double gravity_m_s2 = G_m_s2;
 int    effct_feat_num = 0, scan_count = 0;
@@ -153,6 +157,8 @@ std::atomic<std::uint64_t> lidar_buffer_messages_cleared{0};
 std::atomic<std::uint64_t> imu_buffer_messages_cleared{0};
 std::atomic<std::uint64_t> stale_lidar_scans_discarded{0};
 std::atomic<std::uint64_t> imu_only_packets_processed{0};
+std::atomic<std::uint64_t> imu_timestamp_corrections{0};
+rclcpp::Clock::SharedPtr sensor_clock;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -329,6 +335,8 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
         ++lidar_timestamp_regressions;
         lidar_buffer_messages_cleared.fetch_add(lidar_buffer.size());
         lidar_buffer.clear();
+        time_buffer.clear();
+        lidar_pushed = false;
     }
     if (is_first_lidar)
     {
@@ -351,6 +359,20 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     msg->angular_velocity.z *= imu_gyro_scale.z();
 
     double timestamp = get_time_sec(msg->header.stamp);
+    if (sensor_clock && maximum_future_sensor_skew_s > 0.0)
+    {
+        const rclcpp::Time arrival = sensor_clock->now();
+        const double arrival_timestamp =
+            uwfl2::usable_arrival_timestamp(arrival.seconds());
+        const auto decision = uwfl2::validate_sensor_timestamp(
+            timestamp, arrival_timestamp, maximum_future_sensor_skew_s);
+        if (decision.used_arrival_time)
+        {
+            msg->header.stamp = get_ros_time(decision.timestamp);
+            timestamp = decision.timestamp;
+            ++imu_timestamp_corrections;
+        }
+    }
 
     mtx_buffer.lock();
 
@@ -528,7 +550,7 @@ bool sync_imu_only_packages(MeasureGroup &meas)
     // its sensor timestamp instead of being discarded as out of sequence.
     const double propagation_horizon =
         (!explicit_ins_mode && last_timestamp_lidar > 0.0)
-            ? latest_imu_time - lidar_timeout
+            ? latest_imu_time - lidar_reorder_window_s
             : latest_imu_time;
     if (propagation_horizon < target_packet_end_time - 1e-6)
     {
@@ -1047,6 +1069,7 @@ public:
         this->declare_parameter<bool>("publish.effect_map_en", false);
         this->declare_parameter<bool>("publish.map_en", false);
         this->declare_parameter<double>("publish.corrected_map_interval_s", 0.2);
+        this->declare_parameter<double>("publish.corrected_map_voxel_size", 0.0);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/points_raw");
@@ -1060,6 +1083,9 @@ public:
         this->declare_parameter<double>("common.odometry_publish_rate_hz", 100.0);
         this->declare_parameter<double>("common.imu_rate_hz", 100.0);
         this->declare_parameter<double>("common.lidar_timeout", 0.25);
+        this->declare_parameter<double>("common.lidar_reorder_window_s", 0.0);
+        this->declare_parameter<double>("common.maximum_imu_gap_s", 0.0);
+        this->declare_parameter<double>("common.maximum_future_sensor_skew_s", 0.0);
         this->declare_parameter<double>("common.gravity_m_s2", G_m_s2);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
@@ -1148,6 +1174,8 @@ public:
         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
         this->get_parameter_or<double>("publish.corrected_map_interval_s",
                                        corrected_map_interval_s_, 0.2);
+        this->get_parameter_or<double>("publish.corrected_map_voxel_size",
+                                       corrected_map_voxel_size_, 0.0);
         corrected_map_interval_s_ = std::max(0.05, corrected_map_interval_s_);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
@@ -1166,12 +1194,23 @@ public:
                              0.0, 0.0, 1.0});
         this->get_parameter_or<double>("common.imu_rate_hz", imu_rate_hz, 100.0);
         this->get_parameter_or<double>("common.lidar_timeout", lidar_timeout, 0.25);
+        this->get_parameter_or<double>("common.lidar_reorder_window_s",
+                                       lidar_reorder_window_s, 0.0);
+        this->get_parameter_or<double>("common.maximum_imu_gap_s",
+                                       maximum_imu_gap_s, 0.0);
+        this->get_parameter_or<double>("common.maximum_future_sensor_skew_s",
+                                       maximum_future_sensor_skew_s, 0.0);
         this->get_parameter_or<double>("common.odometry_publish_rate_hz",
                                        odometry_publish_rate_hz, 100.0);
         this->get_parameter_or<double>("common.gravity_m_s2", gravity_m_s2, G_m_s2);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
+        if (!std::isfinite(corrected_map_voxel_size_) ||
+            corrected_map_voxel_size_ <= 0.0)
+        {
+            corrected_map_voxel_size_ = filter_size_map_min;
+        }
         this->get_parameter_or<double>("cube_side_length",cube_len,200.f);
         this->get_parameter_or<float>("mapping.det_range",DET_RANGE,300.f);
         this->get_parameter_or<double>("mapping.fov_degree",fov_deg,180.f);
@@ -1241,6 +1280,18 @@ public:
                         "common.odometry_publish_rate_hz must be positive. Falling back to 100 Hz.");
             odometry_publish_rate_hz = 100.0;
         }
+        if (!std::isfinite(lidar_reorder_window_s) ||
+            lidar_reorder_window_s <= 0.0)
+        {
+            // Preserve the previous behavior unless a longer transport/replay
+            // reserve is explicitly configured.
+            lidar_reorder_window_s = lidar_timeout;
+        }
+        if (!std::isfinite(maximum_future_sensor_skew_s) ||
+            maximum_future_sensor_skew_s < 0.0)
+        {
+            maximum_future_sensor_skew_s = 0.0;
+        }
         if (gravity_m_s2 <= 0.0)
         {
             RCLCPP_WARN(this->get_logger(), "common.gravity_m_s2 must be positive. Falling back to %.2f m/s^2.", G_m_s2);
@@ -1299,6 +1350,7 @@ public:
         Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
         p_imu->set_gravity(gravity_m_s2);
+        p_imu->set_maximum_imu_gap(maximum_imu_gap_s);
         p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
@@ -1440,6 +1492,7 @@ public:
         loop_config.std_detection.maximum_prior_rotation_rad =
             loop_config.pose_graph.loop_maximum_initial_rotation_error_rad;
         loop_config.shadow_map.voxel_size_m = filter_size_map_min;
+        loop_config.shadow_map.history_voxel_size_m = corrected_map_voxel_size_;
         loop_config.shadow_map.maximum_keyframes = static_cast<std::size_t>(
             std::max(1, corrected_map_maximum_keyframes));
         loop_config.shadow_map.maximum_input_points = static_cast<std::size_t>(
@@ -1485,6 +1538,9 @@ public:
         }
 
         /*** ROS subscribe initialization ***/
+        sensor_clock = this->get_clock();
+        aux_fusion_.configure_timestamp_guard(
+            sensor_clock, maximum_future_sensor_skew_s);
         sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         lidar_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         processing_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -1680,6 +1736,7 @@ private:
             t0 = omp_get_wtime();
 
             const double process_begin_time = last_processed_time > 0.0 ? last_processed_time : Measures.lidar_beg_time;
+            const std::size_t imu_gap_count_before = p_imu->imu_gap_count();
             if (!noiseless_imu && auxiliary_fusion_enabled)
             {
                 const double now = Measures.lidar_end_time;
@@ -1747,6 +1804,14 @@ private:
                 p_imu->Process(Measures, kf, feats_undistort,
                                timed_measurement_stamps, apply_timed_measurement);
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
+            }
+            if (p_imu->imu_gap_count() != imu_gap_count_before)
+            {
+                RCLCPP_ERROR_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 5000,
+                    "IMU acquisition gap detected (largest %.3f s; limit %.3f s). "
+                    "The unobserved interval was not integrated; pose and map were held until data resumed.",
+                    p_imu->maximum_observed_imu_gap(), maximum_imu_gap_s);
             }
             // These are IMU observations, not auxiliary-sensor observations.
             // Apply them once after either propagation path so disabling DVL,
@@ -2047,10 +2112,18 @@ private:
                 << lidar_buffer_messages_cleared.load() << ",\n"
                 << "  \"imu_buffer_messages_cleared\": "
                 << imu_buffer_messages_cleared.load() << ",\n"
+                << "  \"imu_timestamp_corrections\": "
+                << imu_timestamp_corrections.load() << ",\n"
+                << "  \"aux_timestamp_corrections\": "
+                << aux_fusion_.timestamp_correction_count() << ",\n"
                 << "  \"stale_lidar_scans_discarded\": "
                 << stale_lidar_scans_discarded.load() << ",\n"
                 << "  \"imu_only_packets_processed\": "
                 << imu_only_packets_processed.load() << ",\n"
+                << "  \"imu_acquisition_gaps\": "
+                << p_imu->imu_gap_count() << ",\n"
+                << "  \"maximum_imu_gap_s\": "
+                << p_imu->maximum_observed_imu_gap() << ",\n"
                 << "  \"aux_late_dvl\": " << aux_late_dvl_.load() << ",\n"
                 << "  \"aux_late_pressure\": "
                 << aux_late_pressure_.load() << ",\n"
@@ -2112,19 +2185,28 @@ private:
         // closure disabled, retain FAST-LIO2's original behavior and only
         // accumulate history when PCD saving is enabled.
         if ((!loop_closure_ && !pcd_save_en && !map_pub_en) ||
-            !feats_down_body ||
-            feats_down_body->empty())
+            !feats_undistort || feats_undistort->empty())
         {
             return;
         }
 
-        PointCloudXYZI compact_world;
-        compact_world.points.resize(feats_down_body->size());
-        for (std::size_t index = 0; index < feats_down_body->size(); ++index)
+        PointCloudXYZI::Ptr dense_world(new PointCloudXYZI());
+        dense_world->points.resize(feats_undistort->size());
+        for (std::size_t index = 0; index < feats_undistort->size(); ++index)
         {
-            RGBpointBodyToWorld(&feats_down_body->points[index],
-                                &compact_world.points[index]);
+            RGBpointBodyToWorld(&feats_undistort->points[index],
+                                &dense_world->points[index]);
         }
+        dense_world->width = static_cast<std::uint32_t>(dense_world->size());
+        dense_world->height = 1;
+        dense_world->is_dense = false;
+
+        PointCloudXYZI compact_world;
+        pcl::VoxelGrid<PointType> output_filter;
+        const float output_leaf = static_cast<float>(corrected_map_voxel_size_);
+        output_filter.setLeafSize(output_leaf, output_leaf, output_leaf);
+        output_filter.setInputCloud(dense_world);
+        output_filter.filter(compact_world);
         compact_world.width = static_cast<std::uint32_t>(compact_world.size());
         compact_world.height = 1;
         compact_world.is_dense = false;
@@ -2177,11 +2259,7 @@ private:
 
         PointCloudXYZI filtered;
         pcl::VoxelGrid<PointType> filter;
-        // LTA-OM retains voxelized keyframe submaps rather than every registered
-        // scan point. Use the live map resolution so the corrected history and
-        // replacement ikd-tree have the same spatial detail and memory scale.
-        const float leaf = static_cast<float>(
-            std::max({1e-3, filter_size_surf_min, filter_size_map_min}));
+        const float leaf = static_cast<float>(corrected_map_voxel_size_);
         filter.setLeafSize(leaf, leaf, leaf);
         filter.setInputCloud(input);
         filter.filter(filtered);
@@ -2237,8 +2315,7 @@ private:
         PointCloudXYZI::Ptr input(new PointCloudXYZI(snapshot));
         PointCloudXYZI filtered;
         pcl::VoxelGrid<PointType> filter;
-        const float leaf =
-            static_cast<float>(std::max(1e-3, filter_size_map_min));
+        const float leaf = static_cast<float>(corrected_map_voxel_size_);
         filter.setLeafSize(leaf, leaf, leaf);
         filter.setInputCloud(input);
         filter.filter(filtered);
@@ -2862,6 +2939,7 @@ private:
     bool effect_pub_en = false, map_pub_en = false;
     std::atomic<bool> corrected_map_publish_requested_{true};
     double corrected_map_interval_s_ = 0.2;
+    double corrected_map_voxel_size_ = 0.0;
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;
