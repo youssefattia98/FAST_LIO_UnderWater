@@ -1831,6 +1831,8 @@ corrections/gap handlers, and produced zero invalid poses or covariances. Its
 current-config ATE is not compared numerically with the older stored artifact
 because that artifact has a different Git revision and config hash.
 
+Checkpoint commit: `49ed878` (`Handle sensor clock faults and retain dense corrected maps`).
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
