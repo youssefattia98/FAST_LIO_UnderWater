@@ -1516,8 +1516,15 @@ public:
             // Best-effort subscriptions match both best-effort and reliable
             // sensor publishers and are supported by ROS 2 Humble and newer.
             lidar_qos.best_effort();
+            pubLiveSonar_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "/uwfl2/sonar_live", rclcpp::QoS(2).best_effort());
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                lid_topic, lidar_qos, standard_pcl_cbk, lidar_options);
+                lid_topic, lidar_qos,
+                [this](sensor_msgs::msg::PointCloud2::UniquePtr message) {
+                    publish_live_sonar(*message);
+                    standard_pcl_cbk(std::move(message));
+                },
+                lidar_options);
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk, sensor_options);
@@ -1564,6 +1571,23 @@ public:
         world_to_camera_init.transform.rotation.z = world_to_camera_init_quat.z();
         world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
+
+        // mapping.extrinsic_{R,T} maps sonar coordinates into the IMU/body
+        // frame, matching TF's parent<-child transform convention.
+        Eigen::Quaterniond body_to_sonar_quat(Lidar_R_wrt_IMU);
+        body_to_sonar_quat.normalize();
+        geometry_msgs::msg::TransformStamped body_to_sonar;
+        body_to_sonar.header.stamp = this->get_clock()->now();
+        body_to_sonar.header.frame_id = "body";
+        body_to_sonar.child_frame_id = "uwfl2_sonar";
+        body_to_sonar.transform.translation.x = Lidar_T_wrt_IMU.x();
+        body_to_sonar.transform.translation.y = Lidar_T_wrt_IMU.y();
+        body_to_sonar.transform.translation.z = Lidar_T_wrt_IMU.z();
+        body_to_sonar.transform.rotation.x = body_to_sonar_quat.x();
+        body_to_sonar.transform.rotation.y = body_to_sonar_quat.y();
+        body_to_sonar.transform.rotation.z = body_to_sonar_quat.z();
+        body_to_sonar.transform.rotation.w = body_to_sonar_quat.w();
+        static_tf_broadcaster_->sendTransform(body_to_sonar);
 
         // Inform the pressure model how camera_init sits in World, so pressure
         // constrains true World-vertical depth rather than tilted local z.
@@ -1621,6 +1645,20 @@ public:
     }
 
 private:
+    void publish_live_sonar(const sensor_msgs::msg::PointCloud2 &input)
+    {
+        if (!pubLiveSonar_ ||
+            (pubLiveSonar_->get_subscription_count() == 0 &&
+             pubLiveSonar_->get_intra_process_subscription_count() == 0))
+        {
+            return;
+        }
+
+        auto output = std::make_unique<sensor_msgs::msg::PointCloud2>(input);
+        output->header.frame_id = "uwfl2_sonar";
+        pubLiveSonar_->publish(std::move(output));
+    }
+
     struct FrontEndStageTiming
     {
         double imu_aux_ms = 0.0;
@@ -2164,7 +2202,9 @@ private:
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
             *pcl_wait_pub += compact_world;
         }
-        if (map_pub_en)
+        // In loop-closure mode, publish after this pending history becomes a
+        // committed keyframe submap. The live sonar topic carries every scan.
+        if (map_pub_en && !loop_closure_)
         {
             corrected_map_publish_requested_.store(true);
         }
@@ -2543,6 +2583,8 @@ private:
             return;
         }
 
+        // This is intentionally a compact historical snapshot. The raw live
+        // sonar topic carries motion between keyframe-triggered map refreshes.
         const PointCloudXYZI snapshot = corrected_mapping_snapshot();
         if (snapshot.empty())
         {
@@ -2855,6 +2897,7 @@ private:
     std::atomic<std::uint64_t> aux_late_magnetometer_{0};
     std::atomic<std::uint64_t> timed_scans_{0};
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubCorrectedMap_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLiveSonar_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
