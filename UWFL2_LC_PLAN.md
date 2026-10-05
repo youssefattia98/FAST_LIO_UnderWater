@@ -1840,7 +1840,8 @@ Implementation and validation:
 - The existing user-customized RViz display now selects
   `/uwfl2/sonar_live` with best-effort QoS. That already-dirty RViz file was
   deliberately not included in the focused implementation commit.
-- Implementation commit: `e385828`.
+- Implementation commits: `e385828` and the initial-publication correction
+  `2dcc574`. The final rebuild and 45-test package run passed after both.
 
 ## Stop Conditions
 
