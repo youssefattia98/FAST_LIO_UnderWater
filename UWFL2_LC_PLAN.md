@@ -1768,7 +1768,7 @@ the committed x5 pressure-on run is
 - [x] Build passed with
   `colcon build --packages-select fast_lio --symlink-install`; all 48 tests
   passed with `colcon test --packages-select fast_lio`.
-- Rollback commit: pending.
+- Rollback commit: `e964372`.
 
 ## Stop Conditions
 
