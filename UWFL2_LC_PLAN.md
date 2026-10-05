@@ -1770,6 +1770,20 @@ the committed x5 pressure-on run is
   passed with `colcon test --packages-select fast_lio`.
 - Rollback commit: `e964372`.
 
+### External-Driver Bag Conversion (2026-10-05)
+
+- [x] Added `tools/process_external_frd_bags.py` to rename external SINTEF
+  topics and convert IMU, magnetometer, DVL, and sonar data to UWFL2 frames.
+- [x] IMU/magnetometer use the exact `diag(-1,+1,-1)` mounting rotation from
+  `bluerov_core/bridge.cpp`; DVL and sonar use FRD-to-FLU `diag(+1,-1,-1)`.
+- [x] Preserved bag and message timestamps and copied unrelated topics without
+  modifying their measurements.
+- [x] Converted `mag_cal` and `pillars1--4_15mfar` into
+  `/home/attia/ros2_ws/bags2/processed`; topic counts and representative
+  nonzero numerical transforms passed.
+- Command: `tools/process_external_frd_bags.py --all`
+- Commit: pending.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
