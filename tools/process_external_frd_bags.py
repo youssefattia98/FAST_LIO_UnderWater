@@ -18,10 +18,8 @@ from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import Imu, MagneticField, PointCloud2, PointField
 
 
-# bridge.cpp converts the mounted ArduSub IMU and magnetometer into body FLU
-# with a 180 degree rotation about +Y. This is intentionally not the generic
-# FRD-to-FLU transform used for vectors already aligned with the vehicle axes.
-BRIDGE_IMU_SIGNS = (-1.0, 1.0, -1.0)
+# MAVLink/ArduPilot body vectors are forward-right-down. ROS REP-103 body
+# vectors are forward-left-up, a pi rotation about the common forward X axis.
 FRD_TO_FLU_SIGNS = (1.0, -1.0, -1.0)
 BODY_FRAME = "base_link"
 DVL_FRAME = "dvl_link"
@@ -49,8 +47,8 @@ def transform_vector(vector, signs: tuple[float, float, float]) -> None:
 
 def convert_imu(message: Imu) -> Imu:
     message.header.frame_id = BODY_FRAME
-    transform_vector(message.linear_acceleration, BRIDGE_IMU_SIGNS)
-    transform_vector(message.angular_velocity, BRIDGE_IMU_SIGNS)
+    transform_vector(message.linear_acceleration, FRD_TO_FLU_SIGNS)
+    transform_vector(message.angular_velocity, FRD_TO_FLU_SIGNS)
 
     # Match bridge.cpp: orientation and all IMU covariances are unknown. UWFL2
     # then uses the configured estimator covariances instead of invalid data.
@@ -66,7 +64,7 @@ def convert_imu(message: Imu) -> Imu:
 
 def convert_magnetometer(message: MagneticField) -> MagneticField:
     message.header.frame_id = BODY_FRAME
-    transform_vector(message.magnetic_field, BRIDGE_IMU_SIGNS)
+    transform_vector(message.magnetic_field, FRD_TO_FLU_SIGNS)
     message.magnetic_field_covariance = [-1.0] + [0.0] * 8
     return message
 

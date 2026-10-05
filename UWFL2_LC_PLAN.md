@@ -1774,15 +1774,23 @@ the committed x5 pressure-on run is
 
 - [x] Added `tools/process_external_frd_bags.py` to rename external SINTEF
   topics and convert IMU, magnetometer, DVL, and sonar data to UWFL2 frames.
-- [x] IMU/magnetometer use the exact `diag(-1,+1,-1)` mounting rotation from
-  `bluerov_core/bridge.cpp`; DVL and sonar use FRD-to-FLU `diag(+1,-1,-1)`.
+- [x] IMU, magnetometer, DVL, and sonar use the MAVLink aircraft-body FRD to
+  ROS REP-103 FLU transform `diag(+1,-1,-1)`. The earlier Y-axis rotation
+  `diag(-1,+1,-1)` was rejected after checking the MAVLink and MAVROS frame
+  definitions.
 - [x] Preserved bag and message timestamps and copied unrelated topics without
   modifying their measurements.
 - [x] Converted `mag_cal` and `pillars1--4_15mfar` into
   `/home/attia/ros2_ws/bags2/processed`; topic counts and representative
   nonzero numerical transforms passed.
+- [x] Rebuilt the `bridge` package after correcting its live `SCALED_IMU`
+  accel/gyro/magnetometer conversion and removing the unused, dimensionally
+  invalid `RAW_IMU` handler. Regenerated all five processed bags and verified
+  1000 IMU and 1000 magnetometer samples; stationary FLU acceleration had
+  median `z=+9.69 m/s^2`.
 - Command: `tools/process_external_frd_bags.py --all`
 - Commit: `9942a5f`.
+- Frame-correction commit: pending.
 
 ## Stop Conditions
 
