@@ -1792,6 +1792,56 @@ the committed x5 pressure-on run is
 - Commit: `9942a5f`.
 - Frame-correction commit: `c99225d`.
 
+### Live Sonar And Corrected-Map Publication (2026-10-05)
+
+- [x] Publish the incoming sonar scan in the estimator TF tree without changing
+  the estimator input or reintroducing the removed registered-cloud map.
+- [x] Publish corrected history only when committed keyframe history changes,
+  while retaining immediate publication after a loop-correction commit.
+- [x] Avoid per-scan whole-history work by refreshing the compact corrected map
+  only after committed keyframe history changes.
+- [x] Build, run the complete test suite, and perform a short ROS topic/TF
+  smoke test before completing this checkpoint.
+
+Decision: original FAST-LIO2 keeps real-time visualization responsive by
+publishing one current scan per frame and not publishing the accumulated map in
+its real-time loop. LTA-OM likewise separates current-scan publication from
+background corrected-history reconstruction. UWFL2-LC will mirror the raw
+input on `/uwfl2/sonar_live` in a private `uwfl2_sonar` frame attached to
+`body` by the configured sonar-to-IMU extrinsic. This avoids TF conflicts with
+recorded bags that already assign `sonar_frame` to another parent. The
+transient `/uwfl2/corrected_map` remains a historical snapshot, not a live
+vehicle-motion topic.
+
+Implementation and validation:
+
+- `/uwfl2/sonar_live` is a subscriber-aware best-effort mirror of the incoming
+  cloud with its original timestamp and an `uwfl2_sonar` frame. A static
+  `body -> uwfl2_sonar` transform uses `mapping.extrinsic_R/T`; the estimator
+  input, state, covariance, scan matching, and active ikd-tree are unchanged.
+- In loop-closure mode, corrected-map publication is requested after a
+  keyframe submap is committed and after an atomic loop correction, rather
+  than after every sonar scan. `publish.corrected_map_interval_s` remains the
+  maximum publication-rate limiter. Final global voxel compaction is retained
+  to keep RViz messages and `/map_save` compact.
+- `colcon build --packages-select fast_lio --symlink-install` passed. The
+  existing Boost and deprecated ROS service-QoS warnings remain. `colcon test
+  --packages-select fast_lio` passed: 45 tests, zero failures.
+- A 60-sensor-second smoke replay of `sim_docking_station_5` at x15 in ROS
+  domain 123 received 293 best-effort live scans and 16 monotonically growing
+  corrected-map snapshots. Both `camera_init -> body` and
+  `body -> uwfl2_sonar` were present. A separate x1 replay measured the live
+  stream at exactly 6.0 Hz, matching the bag sonar rate.
+- The first final smoke attempt used ROS domain 233 and failed before startup
+  because Fast DDS rejected a domain above its local port limit. Repeating in
+  domain 123 passed. Earlier smoke launch wrappers in isolated domains 231 and
+  232 did not stop on scripted SIGINT; they were terminated, and the user's
+  pre-existing launch process was left untouched.
+- The existing user-customized RViz display now selects
+  `/uwfl2/sonar_live` with best-effort QoS. That already-dirty RViz file was
+  deliberately not included in the focused implementation commit.
+- Implementation commit: `e385828`.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
