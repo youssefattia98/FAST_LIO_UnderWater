@@ -2918,7 +2918,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
-    std::atomic<bool> corrected_map_publish_requested_{true};
+    std::atomic<bool> corrected_map_publish_requested_{false};
     double corrected_map_interval_s_ = 0.2;
     double corrected_map_voxel_size_ = 0.0;
     bool loop_visualization_enabled_ = false;
