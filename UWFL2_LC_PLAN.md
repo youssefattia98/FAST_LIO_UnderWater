@@ -1790,7 +1790,7 @@ the committed x5 pressure-on run is
   median `z=+9.69 m/s^2`.
 - Command: `tools/process_external_frd_bags.py --all`
 - Commit: `9942a5f`.
-- Frame-correction commit: pending.
+- Frame-correction commit: `c99225d`.
 
 ## Stop Conditions
 
