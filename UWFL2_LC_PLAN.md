@@ -1833,6 +1833,31 @@ because that artifact has a different Git revision and config hash.
 
 Checkpoint commit: `49ed878` (`Handle sensor clock faults and retain dense corrected maps`).
 
+### Bags2 Acquisition Integrity Audit (2026-10-05)
+
+- [x] Compare `going_back`, `last_dinner4`, and `last_dinner5` independently of estimator output.
+- [x] Attribute missing measurements to their recorded upstream nodes.
+- [x] Stop estimator tuning until a continuous sensor recording is available.
+
+`last_dinner4` is only partially valid. Sonar spans its full `117.07 s`, but
+IMU/magnetometer/pressure stop near `66 s`. The MAVLink bridge reports a
+heartbeat timeout at `20.24 s`, briefly reconnects at `25.78 s`, and times out
+again at `33.24 s`. Its sensor headers lag receive time by as much as `13.89 s`.
+
+`last_dinner5` is invalid for FAST-LIO2 from its first message: it contains zero
+IMU, magnetometer, and pressure samples. Sonar and DVL exist only for the first
+`216.18 s` of the `1003.50 s` recording, after which the bag records no usable
+estimator sensors. The DVL connection manager reports a TCP timeout about every
+ten seconds throughout the recording.
+
+The logs identify upstream acquisition faults, not an IKF failure. MAVLink
+loss removes IMU/pressure/magnetometer together. In `going_back`, sonar and DVL
+also report independent network failures; additionally, both the local
+`dvl_a50_node` and a SINTEF `dvl_a50` client appear, which can contend for a
+single-socket A50 connection. Do not use these intervals to tune UWFL2. Fix the
+sensor network/driver ownership, verify continuous rates before launch, and
+record a new bag.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
