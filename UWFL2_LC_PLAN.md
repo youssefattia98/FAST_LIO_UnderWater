@@ -1782,7 +1782,7 @@ the committed x5 pressure-on run is
   `/home/attia/ros2_ws/bags2/processed`; topic counts and representative
   nonzero numerical transforms passed.
 - Command: `tools/process_external_frd_bags.py --all`
-- Commit: pending.
+- Commit: `9942a5f`.
 
 ## Stop Conditions
 
