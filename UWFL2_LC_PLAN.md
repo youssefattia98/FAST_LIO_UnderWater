@@ -1858,6 +1858,16 @@ single-socket A50 connection. Do not use these intervals to tune UWFL2. Fix the
 sensor network/driver ownership, verify continuous rates before launch, and
 record a new bag.
 
+SINTEF-driver comparison: `pillars3` and `pillars4_15mfar` are substantially
+healthier. Their IMU/magnetometer streams span the full bags at approximately
+`100 Hz` and `92 Hz`, and DVL spans the full bags near `4.9 Hz` and `4.7 Hz`,
+with monotonic headers and about `60--80 ms` transport delay. Both contain one
+synchronized IMU interruption of about `2.9 s` and `2.6 s`. Sonar is
+intermittent (`1.73 Hz` and `3.53 Hz` average, maximum gaps `17.52 s` and
+`19.71 s`), and `pillars4_15mfar` has no sonar during its final `13.18 s`.
+Neither bag records a raw pressure topic, so neither can validate complete
+UWFL2 pressure fusion without an undocumented substitute.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
