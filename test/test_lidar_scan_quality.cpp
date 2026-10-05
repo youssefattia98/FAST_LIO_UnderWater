@@ -1,8 +1,6 @@
 #include <gtest/gtest.h>
 
 #include "lidar_scan_quality.hpp"
-#include "imu_gap_policy.hpp"
-#include "sensor_timestamp_policy.hpp"
 
 namespace
 {
@@ -27,22 +25,6 @@ TEST(LidarScanQuality, LegacyDefaultsAcceptBoundary)
     EXPECT_FALSE(policy.map_initialization_is_sufficient(5));
     EXPECT_TRUE(policy.map_initialization_is_sufficient(6));
     EXPECT_TRUE(policy.features_are_sufficient(1));
-}
-
-TEST(SensorTimestampPolicy, ReplacesOnlyImpossibleFutureTimestamps)
-{
-    const auto future = uwfl2::validate_sensor_timestamp(110.0, 100.0, 0.5);
-    EXPECT_TRUE(future.used_arrival_time);
-    EXPECT_DOUBLE_EQ(future.timestamp, 100.0);
-
-    const auto delayed = uwfl2::validate_sensor_timestamp(90.0, 100.0, 0.5);
-    EXPECT_FALSE(delayed.used_arrival_time);
-    EXPECT_DOUBLE_EQ(delayed.timestamp, 90.0);
-
-    const auto disabled = uwfl2::validate_sensor_timestamp(110.0, 100.0, 0.0);
-    EXPECT_FALSE(disabled.used_arrival_time);
-
-    EXPECT_DOUBLE_EQ(uwfl2::usable_arrival_timestamp(123.0), 123.0);
 }
 
 TEST(LidarScanQuality, RejectsSparseInput)
@@ -95,12 +77,4 @@ TEST(LidarScanQuality, AcceptedUpdateKeepsCorrection)
     transaction.finish(accepted);
     EXPECT_EQ(ekf.state, 30);
     EXPECT_EQ(ekf.covariance, 70);
-}
-
-TEST(ImuGapPolicy, DetectsOnlyConfiguredForwardDiscontinuities)
-{
-    EXPECT_FALSE(uwfl2::is_unobserved_imu_interval(10.0, 10.01, 0.1));
-    EXPECT_TRUE(uwfl2::is_unobserved_imu_interval(10.0, 10.11, 0.1));
-    EXPECT_FALSE(uwfl2::is_unobserved_imu_interval(10.0, 20.0, 0.0));
-    EXPECT_FALSE(uwfl2::is_unobserved_imu_interval(20.0, 10.0, 0.1));
 }

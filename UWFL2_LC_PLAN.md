@@ -1754,119 +1754,21 @@ Pressure comparison outputs are under
 the committed x5 pressure-on run is
 `sim_docking_station_5_uwfl2_lc_pressure_on_x5`.
 
-### Real-Sea Timestamp Recovery And Dense Corrected Map (2026-10-04)
+### Estimator Recovery Rollback (2026-10-05)
 
-- [x] Audit `bags2/going_back` topics, frame IDs, rates, timestamp gaps, and recorded hardware faults.
-- [x] Reproduce the first timestamp discontinuity with the unchanged estimator.
-- [x] Prevent stale IMU zero-order hold across a detected sensor-time gap and report the recovery.
-- [x] Separate ikd-tree and corrected-output voxel resolutions without changing scan matching.
-- [x] Build, run focused tests, and replay the first failing `going_back` window.
-- [x] Run one disabled-loop regression on a previously validated bag.
-
-Evidence: `going_back` contains sensor/hardware restarts rather than one
-continuous measurement epoch. The IMU and pressure jump by about `173 s` near
-bag elapsed time `394 s`; sonar jumps by about `169 s`, later disappears for
-over `1000 s`, and DVL disappears for over `1550 s`. Recorded `/rosout` messages
-confirm autopilot heartbeat timeouts plus sonar and DVL connection failures.
-FAST-LIO2 currently zero-order holds one stale IMU sample across such gaps,
-which is not a valid propagation. The recovery must preserve the last valid
-pose/map, skip the unobserved interval, and clearly report that motion during
-the outage cannot be recovered.
-
-Mapping decision: `filter_size_map` remains the live ikd-tree resolution. A
-separate corrected-output voxel size will retain denser undistorted sonar
-history for `/uwfl2/corrected_map` and `/map_save`; loop reconstruction will
-correct that history while independently rebuilding the compact shadow tree.
-
-Build note: the first timestamp-guard build failed because ROS 2 Jazzy's
-`rclcpp::Time` does not provide `to_msg()` in this environment. The conversion
-was replaced with the repository's `get_ros_time()` helper before testing.
-
-Implementation decisions:
-
-- Sonar timestamp regression now clears its cloud and timestamp queues as one
-  transaction. A configurable reorder reserve retains IMU history for delayed
-  sonar after reconnects.
-- Impossible future IMU/DVL/pressure/magnetometer headers are replaced by the
-  common arrival clock; delayed old data are never relabeled as current data.
-  Live use requires `use_sim_time:=false`; replay requires
-  `use_sim_time:=true` and `ros2 bag play ... --clock`.
-- IMU intervals larger than the configured limit are not integrated with a
-  stale zero-order-held sample. The state is held across the unobserved
-  interval, without resetting any state or covariance block.
-- `publish.corrected_map_voxel_size` controls visualization and saved-map
-  history. `filter_size_map` independently controls the live and shadow
-  ikd-trees. Accepted full-resolution undistorted scans feed the output map;
-  rejected scans feed neither map.
-
-Commands and results:
-
-```bash
-cd /home/attia/ros2_ws
-colcon build --packages-select fast_lio --symlink-install
-colcon test --packages-select fast_lio --event-handlers console_direct+
-colcon test-result --test-result-base build/fast_lio --verbose
-```
-
-Build and all `50` tests passed. The focused generated-clock replay is
-`going_back_clock_fix_650_x15_generated`: stale sonar discards decreased from
-`450` to `2`, late DVL decreased from `335` to `0`, maximum odometry jump
-decreased from `22.02 m` to `0.214 m`, and no pose/covariance became invalid.
-
-The full result is `going_back_full_timestamp_dense_x15`. It received all
-`3,768` sonar and `100,697` IMU callbacks, corrected `10,142` IMU and `12,176`
-auxiliary future timestamps, and saved `2,156,512` output points while the
-estimator tree retained its coarse resolution. It also confirms a hard data
-limit: the recording contains a `770.29 s` IMU outage, more than `1,000 s`
-without sonar, and more than `1,550 s` without DVL. Translation is
-unobservable during that interval and subsequently diverges in IMU-only mode.
-No state estimator can recover motion absent from every translational sensor;
-the bag must be split into coherent sessions or repaired at the sensor-driver
-and recording-clock source. The implementation reports and avoids stale
-integration but intentionally makes no undocumented zero-motion assumption.
-
-Disabled-loop regression `sim3_timestamp_dense_regression_no_lc_x15` delivered
-all `5,948` sonar and `66,673` IMU messages, triggered zero timestamp
-corrections/gap handlers, and produced zero invalid poses or covariances. Its
-current-config ATE is not compared numerically with the older stored artifact
-because that artifact has a different Git revision and config hash.
-
-Checkpoint commit: `49ed878` (`Handle sensor clock faults and retain dense corrected maps`).
-
-### Bags2 Acquisition Integrity Audit (2026-10-05)
-
-- [x] Compare `going_back`, `last_dinner4`, and `last_dinner5` independently of estimator output.
-- [x] Attribute missing measurements to their recorded upstream nodes.
-- [x] Stop estimator tuning until a continuous sensor recording is available.
-
-`last_dinner4` is only partially valid. Sonar spans its full `117.07 s`, but
-IMU/magnetometer/pressure stop near `66 s`. The MAVLink bridge reports a
-heartbeat timeout at `20.24 s`, briefly reconnects at `25.78 s`, and times out
-again at `33.24 s`. Its sensor headers lag receive time by as much as `13.89 s`.
-
-`last_dinner5` is invalid for FAST-LIO2 from its first message: it contains zero
-IMU, magnetometer, and pressure samples. Sonar and DVL exist only for the first
-`216.18 s` of the `1003.50 s` recording, after which the bag records no usable
-estimator sensors. The DVL connection manager reports a TCP timeout about every
-ten seconds throughout the recording.
-
-The logs identify upstream acquisition faults, not an IKF failure. MAVLink
-loss removes IMU/pressure/magnetometer together. In `going_back`, sonar and DVL
-also report independent network failures; additionally, both the local
-`dvl_a50_node` and a SINTEF `dvl_a50` client appear, which can contend for a
-single-socket A50 connection. Do not use these intervals to tune UWFL2. Fix the
-sensor network/driver ownership, verify continuous rates before launch, and
-record a new bag.
-
-SINTEF-driver comparison: `pillars3` and `pillars4_15mfar` are substantially
-healthier. Their IMU/magnetometer streams span the full bags at approximately
-`100 Hz` and `92 Hz`, and DVL spans the full bags near `4.9 Hz` and `4.7 Hz`,
-with monotonic headers and about `60--80 ms` transport delay. Both contain one
-synchronized IMU interruption of about `2.9 s` and `2.6 s`. Sonar is
-intermittent (`1.73 Hz` and `3.53 Hz` average, maximum gaps `17.52 s` and
-`19.71 s`), and `pillars4_15mfar` has no sonar during its final `13.18 s`.
-Neither bag records a raw pressure topic, so neither can validate complete
-UWFL2 pressure fusion without an undocumented substitute.
+- [x] Restored estimator, propagation, and sensor-measurement handling to
+  `35a77379fa0d984fbbf1928bdc392a93f3252959`.
+- [x] Retained asynchronous loop closure and its full-SE(3) state/tree commit.
+- [x] Retained a dense corrected visualization/save map independently from the
+  compact real-time ikd-tree.
+- [x] Retained paired sonar cloud/timestamp queue clearing after a genuine
+  timestamp regression.
+- [x] Retained passive missing/late-sensor diagnostics; no timestamp or
+  measurement rewriting remains.
+- [x] Build passed with
+  `colcon build --packages-select fast_lio --symlink-install`; all 48 tests
+  passed with `colcon test --packages-select fast_lio`.
+- Rollback commit: pending.
 
 ## Stop Conditions
 

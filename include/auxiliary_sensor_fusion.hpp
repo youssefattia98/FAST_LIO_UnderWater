@@ -2,7 +2,6 @@
 #define AUXILIARY_SENSOR_FUSION_HPP
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <deque>
 #include <fstream>
@@ -25,7 +24,6 @@
 #include "common_lib.h"
 #include "dvl_measurement_model.hpp"
 #include "magnetometer_heading_model.hpp"
-#include "sensor_timestamp_policy.hpp"
 #include "use-ikfom.hpp"
 
 class AuxiliarySensorFusion
@@ -35,18 +33,6 @@ public:
     using DvlMsg = geometry_msgs::msg::TwistWithCovarianceStamped;
     using PressureMsg = sensor_msgs::msg::FluidPressure;
     using MagMsg = sensor_msgs::msg::MagneticField;
-
-    void configure_timestamp_guard(const rclcpp::Clock::SharedPtr &clock,
-                                   double maximum_future_skew_s)
-    {
-        clock_ = clock;
-        maximum_future_skew_s_ = std::max(0.0, maximum_future_skew_s);
-    }
-
-    std::size_t timestamp_correction_count() const
-    {
-        return timestamp_correction_count_.load();
-    }
 
     struct UpdateSummary
     {
@@ -1102,8 +1088,7 @@ private:
 
     void dvl_callback(const DvlMsg::ConstSharedPtr msg)
     {
-        const auto guarded = guarded_timestamp<DvlMsg>(msg);
-        const double timestamp = get_time_sec(guarded->header.stamp);
+        const double timestamp = get_time_sec(msg->header.stamp);
         std::lock_guard<std::mutex> lock(mutex_);
         if (last_timestamp_dvl_ >= 0.0 &&
             std::abs(timestamp - last_timestamp_dvl_) <= 1e-9)
@@ -1115,13 +1100,12 @@ private:
             dvl_buffer_.clear();
         }
         last_timestamp_dvl_ = timestamp;
-        dvl_buffer_.push_back(guarded);
+        dvl_buffer_.push_back(msg);
     }
 
     void pressure_callback(const PressureMsg::ConstSharedPtr msg)
     {
-        const auto guarded = guarded_timestamp<PressureMsg>(msg);
-        const double timestamp = get_time_sec(guarded->header.stamp);
+        const double timestamp = get_time_sec(msg->header.stamp);
         std::lock_guard<std::mutex> lock(mutex_);
         if (last_timestamp_pressure_ >= 0.0 &&
             std::abs(timestamp - last_timestamp_pressure_) <= 1e-9)
@@ -1143,19 +1127,18 @@ private:
         // ROS timestamps. Do not treat those correlated copies as independent
         // reference samples or Kalman measurements.
         if (last_pressure_raw_valid_ &&
-            guarded->fluid_pressure == last_pressure_raw_)
+            msg->fluid_pressure == last_pressure_raw_)
         {
             return;
         }
-        last_pressure_raw_ = guarded->fluid_pressure;
+        last_pressure_raw_ = msg->fluid_pressure;
         last_pressure_raw_valid_ = true;
-        pressure_buffer_.push_back(guarded);
+        pressure_buffer_.push_back(msg);
     }
 
     void mag_callback(const MagMsg::ConstSharedPtr msg)
     {
-        const auto guarded = guarded_timestamp<MagMsg>(msg);
-        const double timestamp = get_time_sec(guarded->header.stamp);
+        const double timestamp = get_time_sec(msg->header.stamp);
         std::lock_guard<std::mutex> lock(mutex_);
         if (last_timestamp_mag_ >= 0.0 &&
             std::abs(timestamp - last_timestamp_mag_) <= 1e-9)
@@ -1172,9 +1155,9 @@ private:
         // Some drivers republish one hardware reading at the IMU rate with a
         // fresh ROS timestamp. Treat an identical field vector as the same
         // magnetic sample so it cannot initialize or update the filter twice.
-        const V3D raw(guarded->magnetic_field.x,
-                      guarded->magnetic_field.y,
-                      guarded->magnetic_field.z);
+        const V3D raw(msg->magnetic_field.x,
+                      msg->magnetic_field.y,
+                      msg->magnetic_field.z);
         if (last_mag_raw_valid_ &&
             (raw.array() == last_mag_raw_.array()).all())
         {
@@ -1182,31 +1165,7 @@ private:
         }
         last_mag_raw_ = raw;
         last_mag_raw_valid_ = true;
-        mag_buffer_.push_back(guarded);
-    }
-
-    template <typename MessageT>
-    typename MessageT::ConstSharedPtr guarded_timestamp(
-        const typename MessageT::ConstSharedPtr &message)
-    {
-        if (!clock_ || maximum_future_skew_s_ <= 0.0)
-        {
-            return message;
-        }
-        const rclcpp::Time arrival = clock_->now();
-        const double arrival_timestamp =
-            uwfl2::usable_arrival_timestamp(arrival.seconds());
-        const auto decision = uwfl2::validate_sensor_timestamp(
-            get_time_sec(message->header.stamp), arrival_timestamp,
-            maximum_future_skew_s_);
-        if (!decision.used_arrival_time)
-        {
-            return message;
-        }
-        auto corrected = std::make_shared<MessageT>(*message);
-        corrected->header.stamp = get_ros_time(decision.timestamp);
-        ++timestamp_correction_count_;
-        return corrected;
+        mag_buffer_.push_back(msg);
     }
 
     // R_BM rotates the calibrated magnetometer-frame field into the IMU/body frame.
@@ -1634,9 +1593,6 @@ private:
     rclcpp::Subscription<DvlMsg>::SharedPtr sub_dvl_;
     rclcpp::Subscription<PressureMsg>::SharedPtr sub_pressure_;
     rclcpp::Subscription<MagMsg>::SharedPtr sub_mag_;
-    rclcpp::Clock::SharedPtr clock_;
-    double maximum_future_skew_s_ = 0.0;
-    std::atomic<std::size_t> timestamp_correction_count_{0};
 };
 
 #endif

@@ -21,7 +21,6 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "use-ikfom.hpp"
-#include "imu_gap_policy.hpp"
 
 /// *************Preconfiguration
 
@@ -57,10 +56,7 @@ class ImuProcess
   // breaking DVL/pressure observability mid-bag.
   void set_initial_aux_cov(const V3D &b_dvl, double b_pressure);
   void set_gravity(const double gravity_m_s2);
-  void set_maximum_imu_gap(double seconds);
   bool IsInitialized() const;
-  std::size_t imu_gap_count() const;
-  double maximum_observed_imu_gap() const;
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
   void Process(const MeasureGroup &meas,
                Ekf &kf_state,
@@ -98,8 +94,6 @@ class ImuProcess
       double scan_begin_time,
       double scan_end_time,
       const state_ikfom &scan_end_state);
-  bool is_large_imu_gap(double begin, double end) const;
-  void record_imu_gap(double begin, double end);
 
   PointCloudXYZI::Ptr cur_pcl_un_;
   // sensor_msgs::ImuConstPtr last_imu_;
@@ -114,9 +108,6 @@ class ImuProcess
   V3D angvel_last;
   V3D acc_s_last;
   double gravity_m_s2_;
-  double maximum_imu_gap_s_ = 0.0;
-  std::size_t imu_gap_count_ = 0;
-  double maximum_observed_imu_gap_s_ = 0.0;
   double start_timestamp_;
   double last_lidar_end_time_;
   int    init_iter_num = 1;
@@ -222,34 +213,6 @@ void ImuProcess::set_initial_aux_cov(const V3D &b_dvl, double b_pressure)
 void ImuProcess::set_gravity(const double gravity_m_s2)
 {
   gravity_m_s2_ = gravity_m_s2;
-}
-
-void ImuProcess::set_maximum_imu_gap(double seconds)
-{
-  maximum_imu_gap_s_ = std::isfinite(seconds) ? std::max(0.0, seconds) : 0.0;
-}
-
-std::size_t ImuProcess::imu_gap_count() const
-{
-  return imu_gap_count_;
-}
-
-double ImuProcess::maximum_observed_imu_gap() const
-{
-  return maximum_observed_imu_gap_s_;
-}
-
-bool ImuProcess::is_large_imu_gap(double begin, double end) const
-{
-  return uwfl2::is_unobserved_imu_interval(begin, end, maximum_imu_gap_s_);
-}
-
-void ImuProcess::record_imu_gap(double begin, double end)
-{
-  if (!is_large_imu_gap(begin, end)) return;
-  ++imu_gap_count_;
-  maximum_observed_imu_gap_s_ =
-      std::max(maximum_observed_imu_gap_s_, end - begin);
 }
 
 bool ImuProcess::IsInitialized() const
@@ -369,10 +332,6 @@ bool ImuProcess::ReconstructContinuousDeskewPoses(
     if (tail_time <= head_time + time_epsilon)
     {
       continue;
-    }
-    if (is_large_imu_gap(head_time, tail_time))
-    {
-      return false;
     }
 
     V3D gyro;
@@ -599,26 +558,7 @@ void ImuProcess::UndistortPcl(
 
     const double segment_start =
         head_stamp < last_lidar_end_time_ ? last_lidar_end_time_ : head_stamp;
-    if (is_large_imu_gap(segment_start, tail_stamp))
-    {
-      // No inertial information exists inside this interval. Holding the last
-      // sample across it creates an artificial acceleration and rotation, so
-      // preserve the last valid state and resume at the new sensor epoch.
-      record_imu_gap(segment_start, tail_stamp);
-      while (update_index < update_times.size() &&
-             update_times[update_index] <= tail_stamp + 1e-9)
-      {
-        // These measurements belong to an interval with no inertial motion
-        // model. Applying them at one frozen pose would create a false joint
-        // update, so consume them without changing the state.
-        ++update_index;
-      }
-      record_pose(tail_stamp);
-    }
-    else
-    {
-      propagate_segment(segment_start, tail_stamp, true);
-    }
+    propagate_segment(segment_start, tail_stamp, true);
   }
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
@@ -626,15 +566,7 @@ void ImuProcess::UndistortPcl(
   {
     if (pcl_end_time >= imu_end_time)
     {
-      if (is_large_imu_gap(imu_end_time, pcl_end_time))
-      {
-        // This is a LiDAR/IMU frame-end mismatch, not a gap between two IMU
-        // samples. Do not extrapolate a stale sample or count another outage.
-      }
-      else
-      {
-        propagate_segment(imu_end_time, pcl_end_time, false);
-      }
+      propagate_segment(imu_end_time, pcl_end_time, false);
     }
     else
     {
@@ -735,9 +667,9 @@ void ImuProcess::UndistortPclFastLio(
                0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
     acc_avr *= gravity_m_s2_ / mean_acc.norm();
 
-    const double segment_start =
-        head_stamp < last_lidar_end_time_ ? last_lidar_end_time_ : head_stamp;
-    dt = tail_stamp - segment_start;
+    dt = head_stamp < last_lidar_end_time_
+             ? tail_stamp - last_lidar_end_time_
+             : tail_stamp - head_stamp;
     in.acc = acc_avr;
     in.gyro = angvel_avr;
     have_input = true;
@@ -745,15 +677,7 @@ void ImuProcess::UndistortPclFastLio(
     Q.block<3, 3>(3, 3).diagonal() = cov_acc;
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
     Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
-    if (is_large_imu_gap(segment_start, tail_stamp))
-    {
-      record_imu_gap(segment_start, tail_stamp);
-      dt = 0.0;
-    }
-    else
-    {
-      kf_state.predict(dt, Q, in);
-    }
+    kf_state.predict(dt, Q, in);
 
     imu_state = kf_state.get_x();
     angvel_last = angvel_avr - imu_state.bg;
@@ -769,16 +693,7 @@ void ImuProcess::UndistortPclFastLio(
   {
     const double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
     dt = note * (pcl_end_time - imu_end_time);
-    if (is_large_imu_gap(std::min(pcl_end_time, imu_end_time),
-                         std::max(pcl_end_time, imu_end_time)))
-    {
-      // This is a LiDAR/IMU frame-end mismatch, not a gap between two IMU
-      // samples. Do not extrapolate a stale sample or count another outage.
-    }
-    else
-    {
-      kf_state.predict(dt, Q, in);
-    }
+    kf_state.predict(dt, Q, in);
   }
 
   imu_state = kf_state.get_x();
