@@ -1984,7 +1984,7 @@ transform decreased from `+5.00` to `+3.15 deg`; using
 the final 15%). Position RMSE/final error improved from `2.03/2.55 m` to
 `1.93/1.58 m`, and return magnetic innovation decreased from `-5.13` to
 `-2.48 deg`. Results are under `bags/UWFL2_LC_RESULTS/heading_mag_*_20261006`.
-Implementation commit: `b8584d8`.
+Implementation commit: `0238ce5`.
 
 ## Stop Conditions
 
