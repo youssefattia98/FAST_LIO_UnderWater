@@ -63,6 +63,7 @@
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include "fast_lio/srv/inject_loop.hpp"
 #include <tf2_ros/transform_broadcaster.h>
@@ -2188,13 +2189,10 @@ private:
         marker.type = visualization_msgs::msg::Marker::POINTS;
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.02;
-        marker.scale.y = 0.02;
-        marker.color.r = 0.72F;
-        marker.color.g = 0.92F;
-        marker.color.b = 1.0F;
-        marker.color.a = 1.0F;
+        marker.scale.x = 0.03;
+        marker.scale.y = 0.03;
         marker.points.reserve(cloud.size());
+        marker.colors.reserve(cloud.size());
         for (const PointType &point : cloud.points)
         {
             geometry_msgs::msg::Point output;
@@ -2202,6 +2200,20 @@ private:
             output.y = point.y;
             output.z = point.z;
             marker.points.push_back(output);
+
+            // Fixed absolute-z coloring keeps equal heights visually
+            // consistent across independently published scan markers.
+            const float z_normalized = std::clamp(
+                static_cast<float>((point.z + 5.0) / 10.0), 0.0F, 1.0F);
+            std_msgs::msg::ColorRGBA color;
+            color.r = std::clamp(1.5F - std::abs(4.0F * z_normalized - 3.0F),
+                                 0.0F, 1.0F);
+            color.g = std::clamp(1.5F - std::abs(4.0F * z_normalized - 2.0F),
+                                 0.0F, 1.0F);
+            color.b = std::clamp(1.5F - std::abs(4.0F * z_normalized - 1.0F),
+                                 0.0F, 1.0F);
+            color.a = 1.0F;
+            marker.colors.push_back(color);
         }
         return marker;
     }

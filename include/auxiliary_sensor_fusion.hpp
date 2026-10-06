@@ -1241,13 +1241,62 @@ private:
             return false;
         }
 
+        // Seed the startup-relative heading immediately. Waiting for the
+        // entire initialization window before applying any heading update
+        // lets an early gyro error rotate every R_i m_i sample and biases the
+        // reference itself. Subsequent samples are accumulated only after
+        // their heading update has placed them in this seeded local frame.
+        if (mag_reference_sample_count_ == 0)
+        {
+            const V3D horizontal =
+                sample_local - mag_vertical_local_ *
+                                   mag_vertical_local_.dot(sample_local);
+            if (horizontal.norm() <= 1e-12)
+            {
+                reason = "reference_horizontal_field_too_small";
+                return false;
+            }
+            mag_reference_sum_local_ = sample_local;
+            mag_reference_samples_local_.push_back(sample_local);
+            mag_reference_sample_count_ = 1;
+            mag_reference_local_ = sample_local;
+            mag_horizontal_reference_local_ = horizontal.normalized();
+            reason = "reference_seeded";
+            return false;
+        }
+
+        // A provisional reference exists, so this sample can constrain
+        // heading before it is admitted to the final initialization mean.
+        return true;
+    }
+
+    void accumulate_corrected_mag_reference_sample(
+        const state_ikfom &updated_state,
+        const V3D &magnetic_body)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (mag_reference_ready_ || mag_reference_sample_count_ == 0)
+        {
+            return;
+        }
+
+        const V3D sample_local =
+            updated_state.rot.toRotationMatrix() * magnetic_body;
+        const V3D running_mean =
+            mag_reference_sum_local_ /
+            static_cast<double>(mag_reference_sample_count_);
+        if (!underwater_fastlio::magnetometer::reference_sample_is_inlier(
+                sample_local, running_mean, mag_reference_sample_count_))
+        {
+            return;
+        }
+
         mag_reference_sum_local_ += sample_local;
         mag_reference_samples_local_.push_back(sample_local);
         ++mag_reference_sample_count_;
         if (mag_reference_sample_count_ < kMagReferenceSamples)
         {
-            reason = "reference_initializing";
-            return false;
+            return;
         }
 
         mag_reference_local_ =
@@ -1258,8 +1307,7 @@ private:
         if (mag_reference_local_.norm() <= 1e-12 || horizontal.norm() <= 1e-12)
         {
             reset_mag_reference_locked();
-            reason = "reference_horizontal_field_too_small";
-            return false;
+            return;
         }
 
         mag_horizontal_reference_local_ = horizontal.normalized();
@@ -1282,8 +1330,6 @@ private:
             (static_cast<double>(mag_reference_sample_count_) *
              static_cast<double>(mag_reference_sample_count_));
         mag_reference_ready_ = true;
-        reason = "reference_ready";
-        return false;
     }
 
     std::vector<MagMsg::ConstSharedPtr> take_mag_measurements(double begin_time, double end_time)
@@ -1438,6 +1484,8 @@ private:
                                 protected_state_change, min_eigenvalue);
             return false;
         }
+
+        accumulate_corrected_mag_reference_sample(updated_state, measured);
 
         const auto after_observation = underwater_fastlio::magnetometer::evaluate(
             updated_state.rot.toRotationMatrix(), measured, h0, vertical_local);

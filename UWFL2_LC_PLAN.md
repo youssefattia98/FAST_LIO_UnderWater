@@ -1928,6 +1928,40 @@ Validation:
   compact shadow-tree point budget.
 - Implementation commit: `7cfc588`.
 
+### Z-Colored Map And Magnetic Startup Consistency (2026-10-06)
+
+- [x] Publish the full-density corrected-map markers at `0.03 m` with a
+  deterministic RGB color ramp driven by local-map Z.
+- [x] Compare calibrated magnetic heading, IMU yaw rate, DVL isolation, sonar
+  corrections, and the recorded `World -> base_link` motion with LC disabled.
+- [x] Seed startup-relative magnetic heading from the first valid calibrated
+  sample, constrain heading during the 20-sample initialization window, and
+  finalize the reference mean from corrected local-frame samples.
+- [x] Build and run the full package tests plus matched full-bag x15 replays.
+- [ ] Confirm the corrected wall/turn geometry visually in RViz at x1 or x5.
+
+Decision: the current magnetic axes/calibration are supported by the bag. The
+calibrated field agrees with recorded body heading to `2.12 deg` p95, while
+identity and FRD alternatives disagree by tens of degrees. The gyro sign/frame
+is also consistent (`0.90` correlation with recorded yaw rate and fitted scale
+`0.96`). The fault was startup reference construction: heading drifted while
+20 samples were collected open-loop, biasing the reference and causing a
+`3.75 deg` first sonar correction. Bootstrap fusion reduced that correction to
+`0.098 deg`, yaw RMSE from `10.16` to `6.71 deg`, and yaw p95 from `15.63` to
+`9.73 deg`. Disabling magnetometer worsened yaw RMSE to `17.63 deg`. Disabling
+DVL changed yaw RMSE only from `6.71` to `6.62 deg` but worsened position RMSE
+from `2.04` to `4.45 m`; DVL is therefore not the heading root cause. Pressure
+cannot rotate the state because its constrained gain has only depth and
+pressure-bias rows.
+
+Commands: `colcon build --packages-select fast_lio --symlink-install`;
+`colcon test --packages-select fast_lio`; matched runs used
+`tools/run_lc_benchmark.py --rate 15 --loop-closure false --detection false`
+on `bags/DONE/zigzagwall_processed5` in ROS domains 141--144. Results are in
+`bags/UWFL2_LC_RESULTS/heading_*_20261006`. A short domain-145 runtime check
+received one marker with scale `0.030 x 0.030 m`, `6563` points, `6563` colors,
+and `1347` distinct RGB values. All 47 package tests passed.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
