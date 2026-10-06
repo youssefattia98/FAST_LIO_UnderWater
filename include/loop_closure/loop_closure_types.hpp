@@ -100,6 +100,16 @@ struct PointXYZI
     float intensity = 0.0F;
 };
 
+struct MappingScan
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    double timestamp = 0.0;
+    Pose3d T_local_vehicle;
+    std::shared_ptr<const std::vector<PointXYZI>> points_world;
+    std::shared_ptr<const std::vector<PointXYZI>> compact_points_world;
+};
+
 struct Keyframe
 {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -113,6 +123,9 @@ struct Keyframe
     // Compact scan history already expressed in the raw camera_init frame.
     // Keeping it attached to its pose makes global map correction reversible.
     std::shared_ptr<const std::vector<PointXYZI>> map_points_world;
+    // Full-density scans retain their own acquisition pose. This prevents a
+    // turning submap from receiving one rigid correction at its end pose.
+    std::vector<MappingScan, Eigen::aligned_allocator<MappingScan>> map_scans_world;
     std::uint64_t graph_version = 0;
     std::uint64_t tree_generation = 0;
 };

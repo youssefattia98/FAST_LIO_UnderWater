@@ -134,43 +134,94 @@ bool lexicographically_less(const ShadowPoint &lhs, const ShadowPoint &rhs)
            std::tie(rhs.x, rhs.y, rhs.z, rhs.intensity);
 }
 
-const std::vector<PointXYZI> &map_source(const Keyframe &keyframe)
+enum class MapDensity
 {
+    DenseHistory,
+    CompactTree
+};
+
+const std::vector<PointXYZI> *scan_points(const MappingScan &scan,
+                                          MapDensity density)
+{
+    if (density == MapDensity::CompactTree && scan.compact_points_world)
+    {
+        return scan.compact_points_world.get();
+    }
+    return scan.points_world.get();
+}
+
+std::size_t map_point_count(const Keyframe &keyframe, MapDensity density)
+{
+    if (!keyframe.map_scans_world.empty())
+    {
+        std::size_t count = 0;
+        for (const MappingScan &scan : keyframe.map_scans_world)
+        {
+            if (const auto *points = scan_points(scan, density))
+            {
+                count += points->size();
+            }
+        }
+        return count;
+    }
     if (keyframe.map_points_world && !keyframe.map_points_world->empty())
     {
-        return *keyframe.map_points_world;
+        return keyframe.map_points_world->size();
     }
     if (!keyframe.sonar_points)
     {
         throw std::runtime_error("Keyframe has no immutable map cloud");
     }
-    return *keyframe.sonar_points;
+    return keyframe.sonar_points->size();
 }
 
-ShadowPoint corrected_point(const ShadowMapRequest &request,
-                            std::size_t index,
-                            const PointXYZI &source)
+Pose3d graph_correction(const ShadowMapRequest &request, std::size_t index)
 {
-    const Keyframe &keyframe = request.graph.keyframes[index];
-    Eigen::Vector3d world;
-    if (keyframe.map_points_world && !keyframe.map_points_world->empty())
+    return compose(request.graph.optimized_poses[index],
+                   inverse(request.graph.raw_poses[index]));
+}
+
+Pose3d interpolated_graph_correction(const ShadowMapRequest &request,
+                                     double timestamp)
+{
+    const std::size_t count = request.graph.keyframes.size();
+    if (count <= 1 || timestamp <= request.graph.keyframes.front().timestamp)
     {
-        const Pose3d correction = compose(
-            request.graph.optimized_poses[index],
-            inverse(request.graph.raw_poses[index]));
-        world = correction.rotation *
-                    Eigen::Vector3d(source.x, source.y, source.z) +
-                correction.translation;
+        return graph_correction(request, 0);
     }
-    else
+    if (timestamp >= request.graph.keyframes.back().timestamp)
     {
-        const Pose3d T_local_sonar = compose(
-            request.graph.optimized_poses[index], keyframe.T_vehicle_sonar);
-        world = T_local_sonar.rotation *
-                    Eigen::Vector3d(source.x, source.y, source.z) +
-                T_local_sonar.translation;
+        return graph_correction(request, count - 1);
     }
 
+    std::size_t upper = 1;
+    while (upper < count &&
+           request.graph.keyframes[upper].timestamp < timestamp)
+    {
+        ++upper;
+    }
+    const std::size_t lower = upper - 1;
+    const double lower_time = request.graph.keyframes[lower].timestamp;
+    const double upper_time = request.graph.keyframes[upper].timestamp;
+    const double duration = upper_time - lower_time;
+    const double alpha = duration > 1e-9
+                             ? std::clamp((timestamp - lower_time) / duration,
+                                          0.0, 1.0)
+                             : 1.0;
+    const Pose3d lower_correction = graph_correction(request, lower);
+    const Pose3d upper_correction = graph_correction(request, upper);
+    Pose3d correction;
+    correction.rotation = lower_correction.rotation.slerp(
+        alpha, upper_correction.rotation).normalized();
+    correction.translation =
+        (1.0 - alpha) * lower_correction.translation +
+        alpha * upper_correction.translation;
+    return correction;
+}
+
+ShadowPoint make_shadow_point(const Eigen::Vector3d &world,
+                              const PointXYZI &source)
+{
     ShadowPoint point;
     point.x = static_cast<float>(world.x());
     point.y = static_cast<float>(world.y());
@@ -183,20 +234,80 @@ ShadowPoint corrected_point(const ShadowMapRequest &request,
     return point;
 }
 
+template <typename Visitor>
+void visit_corrected_points(const ShadowMapRequest &request,
+                            std::size_t index,
+                            MapDensity density,
+                            Visitor &&visitor)
+{
+    const Keyframe &keyframe = request.graph.keyframes[index];
+    if (!keyframe.map_scans_world.empty())
+    {
+        for (const MappingScan &scan : keyframe.map_scans_world)
+        {
+            const auto *points = scan_points(scan, density);
+            if (!points)
+            {
+                continue;
+            }
+            const Pose3d correction =
+                interpolated_graph_correction(request, scan.timestamp);
+            for (const PointXYZI &source : *points)
+            {
+                const Eigen::Vector3d world =
+                    correction.rotation *
+                        Eigen::Vector3d(source.x, source.y, source.z) +
+                    correction.translation;
+                visitor(make_shadow_point(world, source));
+            }
+        }
+        return;
+    }
+    if (keyframe.map_points_world && !keyframe.map_points_world->empty())
+    {
+        const Pose3d correction = graph_correction(request, index);
+        for (const PointXYZI &source : *keyframe.map_points_world)
+        {
+            const Eigen::Vector3d world =
+                correction.rotation *
+                    Eigen::Vector3d(source.x, source.y, source.z) +
+                correction.translation;
+            visitor(make_shadow_point(world, source));
+        }
+        return;
+    }
+    if (!keyframe.sonar_points)
+    {
+        throw std::runtime_error("Keyframe has no immutable map cloud");
+    }
+    const Pose3d T_local_sonar = compose(
+        request.graph.optimized_poses[index], keyframe.T_vehicle_sonar);
+    for (const PointXYZI &source : *keyframe.sonar_points)
+    {
+        const Eigen::Vector3d world =
+            T_local_sonar.rotation *
+                Eigen::Vector3d(source.x, source.y, source.z) +
+            T_local_sonar.translation;
+        visitor(make_shadow_point(world, source));
+    }
+}
+
 std::size_t count_input_points(const ShadowMapRequest &request,
                                const std::vector<std::size_t> &indices,
-                               std::size_t maximum_input_points)
+                               std::size_t maximum_input_points,
+                               MapDensity density)
 {
     std::size_t total_points = 0;
     for (const std::size_t index : indices)
     {
-        const auto &points = map_source(request.graph.keyframes[index]);
+        const std::size_t point_count =
+            map_point_count(request.graph.keyframes[index], density);
         if (total_points > maximum_input_points ||
-            points.size() > maximum_input_points - total_points)
+            point_count > maximum_input_points - total_points)
         {
             throw std::runtime_error("Shadow-map input point budget exceeded");
         }
-        total_points += points.size();
+        total_points += point_count;
     }
     return total_points;
 }
@@ -252,14 +363,8 @@ ShadowPointVector ordered_voxel_points(const VoxelMap &voxels)
 
 ShadowMapBuilder::ShadowMapBuilder(ShadowMapConfig config) : config_(config)
 {
-    if (config_.history_voxel_size_m <= 0.0)
-    {
-        config_.history_voxel_size_m = config_.voxel_size_m;
-    }
     if (!std::isfinite(config_.radius_m) || config_.radius_m < 0.0 ||
         !std::isfinite(config_.voxel_size_m) || config_.voxel_size_m <= 0.0 ||
-        !std::isfinite(config_.history_voxel_size_m) ||
-        config_.history_voxel_size_m <= 0.0 ||
         config_.maximum_keyframes == 0 || config_.maximum_input_points == 0)
     {
         throw std::invalid_argument("Invalid shadow-map configuration");
@@ -282,7 +387,8 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
     }
 
     const std::size_t total_points = count_input_points(
-        request, selected, config.maximum_input_points);
+        request, selected, config.maximum_input_points,
+        MapDensity::CompactTree);
     if (input_point_count)
     {
         *input_point_count = total_points;
@@ -292,15 +398,14 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
     voxels.reserve(total_points);
     for (const std::size_t index : selected)
     {
-        for (const PointXYZI &source : map_source(request.graph.keyframes[index]))
-        {
-            const ShadowPoint point = corrected_point(request, index, source);
+        visit_corrected_points(request, index, MapDensity::CompactTree,
+                               [&](const ShadowPoint &point) {
             if (std::isfinite(point.x) && std::isfinite(point.y) &&
                 std::isfinite(point.z))
             {
                 accumulate_voxel(voxels, point, config.voxel_size_m);
             }
-        }
+        });
     }
     const auto reconstruction_finished = Clock::now();
     ShadowPointVector filtered = ordered_voxel_points(voxels);
@@ -339,47 +444,55 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
             return result;
         }
         result.input_points = count_input_points(
-            request, selected, config_.maximum_input_points);
+            request, selected, config_.maximum_input_points,
+            MapDensity::CompactTree);
         std::vector<std::size_t> full_indices(request.graph.keyframes.size());
         for (std::size_t index = 0; index < full_indices.size(); ++index)
         {
             full_indices[index] = index;
         }
-        const std::size_t full_input_points = count_input_points(
-            request, full_indices, config_.maximum_input_points);
+        std::size_t full_input_points = 0;
+        for (const std::size_t index : full_indices)
+        {
+            full_input_points += map_point_count(
+                request.graph.keyframes[index], MapDensity::DenseHistory);
+        }
         std::vector<bool> active_keyframe(full_indices.size(), false);
         for (const std::size_t index : selected)
         {
             active_keyframe[index] = true;
         }
 
-        VoxelMap history_voxels;
-        history_voxels.reserve(full_input_points);
+        ShadowPointVector corrected_history;
+        corrected_history.reserve(full_input_points);
         VoxelMap active_voxels;
         active_voxels.reserve(result.input_points);
         for (const std::size_t index : full_indices)
         {
-            for (const PointXYZI &source :
-                 map_source(request.graph.keyframes[index]))
-            {
-                const ShadowPoint point = corrected_point(request, index, source);
+            visit_corrected_points(request, index, MapDensity::DenseHistory,
+                                   [&](const ShadowPoint &point) {
                 if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
                     !std::isfinite(point.z))
                 {
-                    continue;
+                    return;
                 }
-                accumulate_voxel(history_voxels, point,
-                                 config_.history_voxel_size_m);
-                if (active_keyframe[index])
-                {
-                    accumulate_voxel(active_voxels, point,
-                                     config_.voxel_size_m);
-                }
+                corrected_history.push_back(point);
+            });
+            if (active_keyframe[index])
+            {
+                visit_corrected_points(
+                    request, index, MapDensity::CompactTree,
+                    [&](const ShadowPoint &point) {
+                        if (std::isfinite(point.x) && std::isfinite(point.y) &&
+                            std::isfinite(point.z))
+                        {
+                            accumulate_voxel(active_voxels, point,
+                                             config_.voxel_size_m);
+                        }
+                    });
             }
         }
         const auto reconstruction_finished = Clock::now();
-        ShadowPointVector corrected_history =
-            ordered_voxel_points(history_voxels);
         ShadowPointVector filtered = ordered_voxel_points(active_voxels);
         const auto downsample_finished = Clock::now();
         result.reconstruction_time_ms = milliseconds(

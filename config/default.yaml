@@ -109,7 +109,6 @@
 
         publish:
             map_en: true
-            corrected_map_interval_s: 0.2
             path_en: false
 
         pcd_save:

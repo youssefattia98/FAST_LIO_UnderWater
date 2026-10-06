@@ -514,7 +514,7 @@ TEST(ShadowMap, KeepsFullCorrectedHistoryOutsideTheLiveMapRadius)
     EXPECT_NEAR(actual.z, expected.z(), 1e-5);
 }
 
-TEST(ShadowMap, GloballyCompactsOverlappingHistoricalSubmaps)
+TEST(ShadowMap, PreservesOverlappingHistoricalPoints)
 {
     lc::PoseGraphSnapshot graph;
     graph.version = 3;
@@ -542,7 +542,7 @@ TEST(ShadowMap, GloballyCompactsOverlappingHistoricalSubmaps)
     ASSERT_TRUE(result.valid) << result.reason;
     ASSERT_TRUE(result.corrected_history_points);
     EXPECT_EQ(result.selected_keyframes, 1U);
-    EXPECT_EQ(result.corrected_history_points->size(), 1U);
+    EXPECT_EQ(result.corrected_history_points->size(), 2U);
 }
 
 TEST(ShadowMap, KeepsDenseHistoryIndependentOfActiveTreeResolution)
@@ -565,13 +565,97 @@ TEST(ShadowMap, KeepsDenseHistoryIndependentOfActiveTreeResolution)
     lc::ShadowMapConfig config;
     config.radius_m = 10.0;
     config.voxel_size_m = 0.2;
-    config.history_voxel_size_m = 0.02;
     const auto result = lc::ShadowMapBuilder(config).build({graph, 1});
 
     ASSERT_TRUE(result.valid) << result.reason;
     ASSERT_TRUE(result.corrected_history_points);
     EXPECT_EQ(result.filtered_points, 1U);
     EXPECT_EQ(result.corrected_history_points->size(), 2U);
+}
+
+TEST(ShadowMap, DenseHistoryDoesNotConsumeCompactTreePointBudget)
+{
+    lc::PoseGraphSnapshot graph;
+    graph.version = 4;
+    graph.ids = {0};
+    graph.timestamps = {1.0};
+    graph.raw_poses = {lc::Pose3d{}};
+    graph.optimized_poses = graph.raw_poses;
+    lc::Keyframe frame = keyframe(0, lc::Pose3d{});
+    lc::MappingScan scan;
+    scan.timestamp = 1.0;
+    scan.T_local_vehicle = lc::Pose3d{};
+    scan.points_world =
+        std::make_shared<const std::vector<lc::PointXYZI>>(
+            100, lc::PointXYZI{0.1F, 0.0F, 0.0F, 1.0F});
+    scan.compact_points_world =
+        std::make_shared<const std::vector<lc::PointXYZI>>(
+            1, lc::PointXYZI{0.1F, 0.0F, 0.0F, 1.0F});
+    frame.map_scans_world = {scan};
+    graph.keyframes = {frame};
+    graph.node_count = 1;
+
+    lc::ShadowMapConfig config;
+    config.radius_m = 10.0;
+    config.voxel_size_m = 0.2;
+    config.maximum_input_points = 2;
+    const auto result = lc::ShadowMapBuilder(config).build({graph, 1});
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.input_points, 1U);
+    ASSERT_TRUE(result.corrected_history_points);
+    EXPECT_EQ(result.corrected_history_points->size(), 100U);
+}
+
+TEST(ShadowMap, InterpolatesCorrectionAtDenseScanTimestampDuringTurn)
+{
+    lc::PoseGraphSnapshot graph;
+    graph.version = 5;
+    graph.ids = {0, 1};
+    graph.timestamps = {0.0, 10.0};
+    graph.raw_poses = {lc::Pose3d{}, lc::Pose3d{}};
+    graph.optimized_poses = {
+        lc::Pose3d{},
+        pose(Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitZ(), M_PI_2)};
+
+    lc::Keyframe first = keyframe(0, graph.raw_poses[0]);
+    first.timestamp = 0.0;
+    lc::MappingScan first_scan;
+    first_scan.timestamp = 0.0;
+    first_scan.T_local_vehicle = graph.raw_poses[0];
+    first_scan.points_world =
+        std::make_shared<const std::vector<lc::PointXYZI>>(
+            1, lc::PointXYZI{-2.0F, 0.0F, 0.0F, 1.0F});
+    first.map_scans_world = {first_scan};
+
+    lc::Keyframe second = keyframe(1, graph.raw_poses[1]);
+    second.timestamp = 10.0;
+    lc::MappingScan turning_scan;
+    turning_scan.timestamp = 5.0;
+    turning_scan.T_local_vehicle = graph.raw_poses[1];
+    turning_scan.points_world =
+        std::make_shared<const std::vector<lc::PointXYZI>>(
+            1, lc::PointXYZI{1.0F, 0.0F, 0.0F, 42.0F});
+    second.map_scans_world = {turning_scan};
+    graph.keyframes = {first, second};
+    graph.node_count = graph.keyframes.size();
+
+    lc::ShadowMapConfig config;
+    config.radius_m = 0.0;
+    config.voxel_size_m = 0.01;
+    const auto result = lc::ShadowMapBuilder(config).build({graph, 1});
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    ASSERT_TRUE(result.corrected_history_points);
+    const auto corrected = std::find_if(
+        result.corrected_history_points->begin(),
+        result.corrected_history_points->end(),
+        [](const lc::ShadowPoint &point) { return point.intensity == 42.0F; });
+    ASSERT_NE(corrected, result.corrected_history_points->end());
+    const double half_sqrt_two = std::sqrt(0.5);
+    EXPECT_NEAR(corrected->x, half_sqrt_two, 1e-5);
+    EXPECT_NEAR(corrected->y, half_sqrt_two, 1e-5);
+    EXPECT_NEAR(corrected->z, 0.0, 1e-5);
 }
 
 TEST(ShadowMap, VoxelSelectionIsDeterministicAndMatchesCenterRule)

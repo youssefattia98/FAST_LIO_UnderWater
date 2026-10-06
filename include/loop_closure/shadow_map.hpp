@@ -24,9 +24,6 @@ struct ShadowMapConfig
     double radius_m = 80.0;
     // Active estimator-tree resolution.
     double voxel_size_m = 0.3;
-    // Corrected visualization/save-map resolution. Non-positive preserves the
-    // legacy behavior by using voxel_size_m.
-    double history_voxel_size_m = 0.0;
     std::size_t maximum_keyframes = 1000;
     std::size_t maximum_input_points = 3000000;
 };

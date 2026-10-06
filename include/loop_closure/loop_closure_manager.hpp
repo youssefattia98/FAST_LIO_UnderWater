@@ -201,6 +201,57 @@ public:
         return true;
     }
 
+    bool try_submit_scan_history(
+        double timestamp,
+        const Pose3d &T_local_vehicle,
+        const Matrix6d &pose_covariance,
+        const Pose3d &T_vehicle_sonar,
+        PointSnapshot local_points,
+        const std::vector<MappingScan, Eigen::aligned_allocator<MappingScan>>
+            &map_scans_world,
+        std::uint64_t tree_generation)
+    {
+        if (!local_points ||
+            !should_select_keyframe(timestamp, T_local_vehicle,
+                                    local_points->size()))
+        {
+            return false;
+        }
+        if (!covariance_is_valid(pose_covariance) || !T_vehicle_sonar.finite() ||
+            local_points->size() < config_.keyframes.minimum_points)
+        {
+            ++failed_;
+            return false;
+        }
+
+        Keyframe keyframe;
+        keyframe.id = next_keyframe_id_++;
+        keyframe.timestamp = timestamp;
+        keyframe.T_local_vehicle = T_local_vehicle.normalized();
+        keyframe.pose_covariance = pose_covariance;
+        keyframe.T_vehicle_sonar = T_vehicle_sonar.normalized();
+        keyframe.sonar_points = std::move(local_points);
+        keyframe.map_scans_world.reserve(map_scans_world.size());
+        for (const MappingScan &scan : map_scans_world)
+        {
+            if (std::isfinite(scan.timestamp) && scan.T_local_vehicle.finite() &&
+                scan.points_world && !scan.points_world->empty())
+            {
+                keyframe.map_scans_world.push_back(scan);
+            }
+        }
+        keyframe.tree_generation = tree_generation;
+
+        selector_.accept(timestamp, T_local_vehicle);
+        ++submitted_;
+        if (!queue_.push_latest(std::move(keyframe)))
+        {
+            ++failed_;
+            return false;
+        }
+        return true;
+    }
+
     bool should_select_keyframe(double timestamp,
                                 const Pose3d &T_local_vehicle,
                                 std::size_t point_count) const

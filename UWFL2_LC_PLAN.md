@@ -1886,6 +1886,47 @@ Implementation and validation:
   outside the implementation commit.
 - Implementation commit: `3ee070f`.
 
+### Full-Density Scan-Rate Corrected Map (2026-10-06)
+
+- [x] Remove the corrected-map interval and voxel-size parameters; publish one
+  corrected-map update after every accepted sonar scan.
+- [x] Preserve every finite deskewed sonar point for corrected-map display and
+  PCD saving while keeping the active/shadow ikd-trees voxel-filtered at
+  `filter_size_map`.
+- [x] Store the timestamp and full-SE(3) pose of each accepted dense scan.
+  During loop reconstruction, interpolate the graph correction between the
+  surrounding keyframes instead of applying the ending keyframe correction to
+  every scan in a turning submap.
+- [x] Add focused tests for zero-loss dense history, compact-tree point-budget
+  and a synthetic turning trajectory whose intermediate scan receives the
+  interpolated SE(3) correction.
+- [x] Build, run the package tests, then perform one short replay measuring
+  sonar and corrected-map rates plus map-save/display point-count equality.
+
+Decision: visualization/save-map density is independent of both scan-matching
+downsampling and the compact ikd-tree. Re-sending the complete growing cloud
+per scan was rejected after a controlled x1 replay: after only 20 s the map was
+`410817` points/`13.1 MB`, and a matching subscriber received only `0.193 Hz`.
+Instead, `/uwfl2/corrected_map` is a `MarkerArray`: each accepted scan adds one
+full-density world-frame marker, while subscriber attachment or a committed
+loop sends `DELETEALL` followed by the corrected complete history. This keeps
+normal traffic bounded by one scan and removes stale pre-loop geometry.
+
+Validation:
+
+- `colcon build --packages-select fast_lio --symlink-install` passed; only the
+  existing Boost-placeholder and deprecated service-QoS warnings remain.
+- `colcon test --packages-select fast_lio` passed: `47` tests, zero failures.
+- A 20-sensor-second x1 `zigzagwall_processed5` replay measured raw sonar at
+  `6.004 Hz` and corrected-map markers at `6.003 Hz`. Both contained a mean of
+  `6500.1` points per update, confirming no visualization downsampling.
+- A separate 10-s replay accumulated `32` displayed scans/`208548` points.
+  `/map_save` reported and wrote exactly `208548` PCD points.
+- The synthetic full-SE(3) turning test verifies that a scan halfway between
+  identity and a 90-degree graph correction receives 45 degrees, not the old
+  ending-keyframe 90-degree correction. Dense history no longer consumes the
+  compact shadow-tree point budget.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
