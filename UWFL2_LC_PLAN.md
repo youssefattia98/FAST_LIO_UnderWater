@@ -1843,6 +1843,49 @@ Implementation and validation:
 - Implementation commits: `e385828` and the initial-publication correction
   `2dcc574`. The final rebuild and 45-test package run passed after both.
 
+### Timestamp-Aligned Live Visualization Follow-up (2026-10-06)
+
+- [x] Publish the deskewed current sonar scan only after scan processing, with
+  the same scan-end timestamp and `body` frame as the odometry TF.
+- [x] Keep corrected-map visualization independent of loop-keyframe selection;
+  coalesce scan-rate history changes using
+  `publish.corrected_map_interval_s`.
+- [x] Verify live-cloud/odometry timestamp equality, measured sonar rate,
+  corrected-map growth, build, and package tests.
+
+Observed failure: the first implementation mirrored the raw cloud in its
+subscription callback. Its scan-start timestamp preceded the corresponding
+`camera_init -> body` transform, which is published after propagation and scan
+correction at scan end. RViz therefore queued or discarded clouds despite the
+static mounting transform. Keyframe-only corrected-map invalidation also made
+normal map growth lag by as much as the keyframe interval. The correction keeps
+the estimator untouched: it publishes the already deskewed scan in `body`
+immediately after odometry and restores scan-dirty/backend-throttled historical
+map publication.
+
+Implementation and validation:
+
+- The live topic now contains the IMU-deskewed scan transformed by the current
+  sonar-to-IMU extrinsic into `body`. It is emitted directly after `/Odometry`
+  and uses the identical scan-end timestamp. IMU-only packets and empty sonar
+  scans do not republish stale point clouds.
+- Corrected history is marked dirty by every accepted scan. The backend timer
+  publishes at most once per `publish.corrected_map_interval_s`; loop keyframes
+  and graph behavior are unchanged. The full global voxel pass is retained so
+  historical messages remain compact and loop-correctable.
+- `colcon build --packages-select fast_lio --symlink-install` passed with only
+  the existing Boost/service-QoS warnings. All 45 `fast_lio` tests passed.
+- A 20-sensor-second x1 replay of `sim_docking_station_5` in ROS domain 124
+  measured `/uwfl2/sonar_live` at `5.9999999 Hz`. All live messages used
+  `body`; 100% exactly matched both an `/Odometry` timestamp and a
+  `camera_init -> body` TF timestamp. With the map limit overridden to 1.0 s,
+  18 monotonically growing corrected-map snapshots were received.
+- The user-customized RViz live display retains corrected history and overlays
+  a five-second dense live-sonar trail. Only the focused display fields were
+  changed in the working tree; the already user-modified RViz file remains
+  outside the implementation commit.
+- Implementation commit: `3ee070f`.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
