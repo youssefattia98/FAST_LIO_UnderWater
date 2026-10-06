@@ -164,6 +164,10 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_lidar_scan_quality test/test_lidar_scan_quality.cpp)
   target_include_directories(test_lidar_scan_quality PRIVATE include)
+
+  ament_add_gtest(test_corrected_map_visualization
+    test/test_corrected_map_visualization.cpp)
+  target_include_directories(test_corrected_map_visualization PRIVATE include)
 endif()
 
 # ---------------- Install --------------- #

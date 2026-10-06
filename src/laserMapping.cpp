@@ -73,6 +73,7 @@
 #include "auxiliary_sensor_fusion.hpp"
 #include "loop_closure/loop_closure_manager.hpp"
 #include "loop_closure/state_transport.hpp"
+#include "corrected_map_visualization.hpp"
 #include "lidar_scan_quality.hpp"
 #include "observability_manager.hpp"
 #include "preprocess.h"
@@ -1504,8 +1505,6 @@ public:
             // Best-effort subscriptions match both best-effort and reliable
             // sensor publishers and are supported by ROS 2 Humble and newer.
             lidar_qos.best_effort();
-            pubLiveSonar_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-                "/uwfl2/sonar_live", rclcpp::QoS(2).best_effort());
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 lid_topic, lidar_qos, standard_pcl_cbk, lidar_options);
         }
@@ -1609,37 +1608,9 @@ public:
     }
 
 private:
-    void publish_live_sonar()
-    {
-        if (!pubLiveSonar_ ||
-            (pubLiveSonar_->get_subscription_count() == 0 &&
-             pubLiveSonar_->get_intra_process_subscription_count() == 0) ||
-            !feats_undistort || feats_undistort->empty())
-        {
-            return;
-        }
-
-        PointCloudXYZI body_cloud(feats_undistort->size(), 1);
-        for (std::size_t index = 0; index < feats_undistort->size(); ++index)
-        {
-            RGBpointBodyLidarToIMU(&feats_undistort->points[index],
-                                   &body_cloud.points[index]);
-        }
-
-        sensor_msgs::msg::PointCloud2 output;
-        pcl::toROSMsg(body_cloud, output);
-        output.header.stamp = get_ros_time(lidar_end_time);
-        output.header.frame_id = "body";
-        pubLiveSonar_->publish(output);
-    }
-
-    void publish_estimator_outputs(bool include_sonar_scan)
+    void publish_estimator_outputs()
     {
         publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
-        if (include_sonar_scan)
-        {
-            publish_live_sonar();
-        }
     }
 
     struct FrontEndStageTiming
@@ -1816,7 +1787,7 @@ private:
                     }
                 }
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs(false);
+                publish_estimator_outputs();
                 return;
             }
 
@@ -1825,7 +1796,7 @@ private:
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
                 lidar_update_result = lidar_scan_quality.reject_sparse_input(0);
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs(false);
+                publish_estimator_outputs();
                 finish_scan_timing("no_points");
                 return;
             }
@@ -1853,7 +1824,7 @@ private:
                     "Rejected sparse sonar scan: %d downsampled points (minimum %d).",
                     feats_down_size, minimum_scan_points);
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs(true);
+                publish_estimator_outputs();
                 finish_scan_timing(uwfl2::lidar_scan_status(
                     lidar_update_result.reason));
                 return;
@@ -1899,7 +1870,7 @@ private:
                                      ? "kdtree_init"
                                      : (aux_summary.updated() ? "aux_only"
                                                               : "imu_only");
-                publish_estimator_outputs(true);
+                publish_estimator_outputs();
                 finish_scan_timing(lidar_update_result.accepted
                                        ? "tree_initialization"
                                        : uwfl2::lidar_scan_status(
@@ -1950,7 +1921,7 @@ private:
                     lidar_update_max_effective_features,
                     minimum_effective_features);
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs(true);
+                publish_estimator_outputs();
                 finish_scan_timing(uwfl2::lidar_scan_status(
                     lidar_update_result.reason));
                 return;
@@ -1972,7 +1943,7 @@ private:
             /******* Publish odometry *******/
             const double odom_publish_started = omp_get_wtime();
             g_publish_mode = "lidar_update";
-            publish_estimator_outputs(true);
+            publish_estimator_outputs();
             stage_timing.odom_publish_ms =
                 1000.0 * (omp_get_wtime() - odom_publish_started);
 
@@ -2218,6 +2189,30 @@ private:
         return marker;
     }
 
+    PointCloudXYZI select_new_corrected_map_display_points(
+        const PointCloudXYZI &cloud, bool reset)
+    {
+        if (reset)
+        {
+            corrected_map_display_voxels_.clear();
+        }
+
+        PointCloudXYZI selected;
+        selected.reserve(cloud.size());
+        for (const PointType &point : cloud.points)
+        {
+            if (corrected_map_display_voxels_.insert(
+                    point.x, point.y, point.z))
+            {
+                selected.push_back(point);
+            }
+        }
+        selected.width = static_cast<std::uint32_t>(selected.size());
+        selected.height = 1;
+        selected.is_dense = false;
+        return selected;
+    }
+
     void publish_mapping_scan(const MappingScan &scan)
     {
         if (!map_pub_en || !pubCorrectedMap_ || !scan.points_world ||
@@ -2228,11 +2223,18 @@ private:
         }
         PointCloudXYZI cloud;
         append_mapping_scans(cloud, MappingScanVector{scan});
+        std::lock_guard<std::mutex> lock(corrected_map_visualization_mutex_);
+        PointCloudXYZI display_cloud =
+            select_new_corrected_map_display_points(cloud, false);
+        if (display_cloud.empty())
+        {
+            return;
+        }
         visualization_msgs::msg::MarkerArray output;
         const auto nanoseconds = static_cast<std::int64_t>(
             std::llround(scan.timestamp * 1e9));
         output.markers.push_back(mapping_points_marker(
-            cloud, next_corrected_map_marker_id_++,
+            display_cloud, next_corrected_map_marker_id_++,
             rclcpp::Time(nanoseconds, RCL_ROS_TIME)));
         pubCorrectedMap_->publish(output);
     }
@@ -2294,17 +2296,19 @@ private:
         scan.T_local_vehicle.translation = state_point.pos;
         scan.points_world = copy_points(*dense_cloud);
         scan.compact_points_world = copy_points(compact_cloud);
-        publish_mapping_scan(scan);
         if (loop_closure_)
         {
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
-            pending_mapping_scans_.push_back(std::move(scan));
+            pending_mapping_scans_.push_back(scan);
         }
         else
         {
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
             append_mapping_scans(*pcl_wait_pub, MappingScanVector{scan});
         }
+        // Store the scan before visualization. A concurrent full resync then
+        // either includes this scan or the incremental marker follows it.
+        publish_mapping_scan(scan);
     }
 
     MappingScanVector pending_mapping_scans() const
@@ -2623,16 +2627,20 @@ private:
         }
 
         const PointCloudXYZI snapshot = corrected_mapping_snapshot();
+        std::lock_guard<std::mutex> lock(corrected_map_visualization_mutex_);
+        const PointCloudXYZI display_snapshot =
+            select_new_corrected_map_display_points(snapshot, true);
+        next_corrected_map_marker_id_ = 1;
         visualization_msgs::msg::MarkerArray output;
         visualization_msgs::msg::Marker clear;
         clear.header.frame_id = "camera_init";
         clear.header.stamp = this->get_clock()->now();
         clear.action = visualization_msgs::msg::Marker::DELETEALL;
         output.markers.push_back(clear);
-        if (!snapshot.empty())
+        if (!display_snapshot.empty())
         {
             output.markers.push_back(mapping_points_marker(
-                snapshot, 0, clear.header.stamp));
+                display_snapshot, 0, clear.header.stamp));
         }
         pubCorrectedMap_->publish(output);
 
@@ -2935,7 +2943,6 @@ private:
     std::atomic<std::uint64_t> timed_scans_{0};
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
         pubCorrectedMap_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLiveSonar_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
@@ -2959,6 +2966,8 @@ private:
     std::atomic<bool> corrected_map_publish_requested_{false};
     std::size_t corrected_map_subscriber_count_ = 0;
     std::int32_t next_corrected_map_marker_id_ = 1;
+    std::mutex corrected_map_visualization_mutex_;
+    uwfl2::CorrectedMapDisplayVoxels corrected_map_display_voxels_{0.03};
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;
