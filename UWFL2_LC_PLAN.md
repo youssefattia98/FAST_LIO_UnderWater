@@ -2041,6 +2041,46 @@ Note: an unscoped workspace `colcon test-result --verbose` also displayed two
 pre-existing `sonar3d` Python lint failures. No `sonar3d` tests were run or
 changed here; the scoped `fast_lio` build and test result is clean.
 
+### Non-Blocking Estimator Visualization Follow-up (2026-10-06)
+
+- [x] Move corrected-map voxel selection and DDS publication completely out of
+  the front-end scan callback into the existing backend callback group.
+- [x] Restore a subscriber-only estimator-view sonar topic in the unique
+  `body -> uwfl2_sonar` TF branch; never reuse the bag's
+  `base_link -> sonar_frame` child.
+- [x] Keep both visualization queues bounded and drop stale live-sonar frames
+  rather than delaying odometry.
+- [x] Publish a prediction-only IMU odometry copy between scan corrections;
+  keep the corrected IKF and active ikd-tree owned by the front end.
+- [x] Build, run package tests, and verify odometry/live-sonar timestamps,
+  frames, rates, and corrected-map behavior on a short real-data replay.
+
+Decision: one raw topic cannot be visualized in two different TF trees because
+its `header.frame_id` has exactly one parent. The estimator-view copy is
+therefore necessary for these recorded bags, but exists only while subscribed
+and all conversion/publication work runs outside the IKF front end.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+ROS_DOMAIN_ID=156 ros2 bag play \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed \
+  --rate 1.0 --playback-duration 12
+```
+
+Results: build passed with only the existing Boost/service-API warnings. All
+four package test executables passed (43 freshly executed gtests; 55 clean XML
+test records). The isolated x1 replay produced monotonic `/Odometry` at
+102.48 Hz with 10 ms median/p95 spacing, 41/41 live scans in `uwfl2_sonar`,
+and a maximum 4.72 ms separation from the nearest odometry transform. The
+static transform was `body -> uwfl2_sonar`, translation
+`[0.09382,-0.02148,0.11593]`, from the configured sonar--IMU extrinsic. The
+corrected map emitted 42 messages for 41 scans, confirming scan-rate backend
+publication without blocking the estimator callback.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:

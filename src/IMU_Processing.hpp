@@ -57,6 +57,7 @@ class ImuProcess
   void set_initial_aux_cov(const V3D &b_dvl, double b_pressure);
   void set_gravity(const double gravity_m_s2);
   bool IsInitialized() const;
+  double AccelerationScale() const;
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
   void Process(const MeasureGroup &meas,
                Ekf &kf_state,
@@ -218,6 +219,14 @@ void ImuProcess::set_gravity(const double gravity_m_s2)
 bool ImuProcess::IsInitialized() const
 {
   return !imu_need_init_;
+}
+
+double ImuProcess::AccelerationScale() const
+{
+  const double mean_norm = mean_acc.norm();
+  return std::isfinite(mean_norm) && mean_norm > 1e-9
+             ? gravity_m_s2_ / mean_norm
+             : 1.0;
 }
 
 void ImuProcess::IMU_init(

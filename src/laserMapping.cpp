@@ -41,9 +41,11 @@
 #include <chrono>
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -146,6 +148,8 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+std::mutex odometry_prediction_imu_mutex;
+deque<sensor_msgs::msg::Imu::ConstSharedPtr> odometry_prediction_imu_buffer;
 
 std::atomic<std::uint64_t> lidar_callbacks_received{0};
 std::atomic<std::uint64_t> imu_callbacks_received{0};
@@ -358,7 +362,8 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
     mtx_buffer.lock();
 
-    if (timestamp < last_timestamp_imu)
+    const bool timestamp_regressed = timestamp < last_timestamp_imu;
+    if (timestamp_regressed)
     {
         ++imu_timestamp_regressions;
         imu_buffer_messages_cleared.fetch_add(imu_buffer.size());
@@ -368,6 +373,19 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     last_timestamp_imu = timestamp;
 
     imu_buffer.push_back(msg);
+    {
+        std::lock_guard<std::mutex> prediction_lock(
+            odometry_prediction_imu_mutex);
+        if (timestamp_regressed)
+        {
+            odometry_prediction_imu_buffer.clear();
+        }
+        odometry_prediction_imu_buffer.push_back(msg);
+        while (odometry_prediction_imu_buffer.size() > 4000U)
+        {
+            odometry_prediction_imu_buffer.pop_front();
+        }
+    }
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
@@ -1312,6 +1330,8 @@ public:
 
         fill(epsi, epsi + state_ikfom::DOF, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+        odometry_prediction_kf_.init_dyn_share(
+            get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         uwfl2::loop_closure::LoopClosureConfig loop_config;
         this->get_parameter_or<bool>("loop_closure.enable", loop_config.enabled, false);
@@ -1489,6 +1509,7 @@ public:
         lidar_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         processing_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         backend_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        prediction_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         rclcpp::SubscriptionOptions sensor_options;
         sensor_options.callback_group = sensor_callback_group_;
         rclcpp::SubscriptionOptions lidar_options;
@@ -1505,6 +1526,8 @@ public:
             // Best-effort subscriptions match both best-effort and reliable
             // sensor publishers and are supported by ROS 2 Humble and newer.
             lidar_qos.best_effort();
+            pubLiveSonar_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "/uwfl2/sonar_live", rclcpp::QoS(2).best_effort());
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 lid_topic, lidar_qos, standard_pcl_cbk, lidar_options);
         }
@@ -1556,6 +1579,23 @@ public:
         world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
         static_tf_broadcaster_->sendTransform(world_to_camera_init);
 
+        // The bag's sonar_frame may belong to a recorded base_link tree.
+        // Keep the estimator visualization in a uniquely named body child.
+        Eigen::Quaterniond body_to_sonar_quat(Lidar_R_wrt_IMU);
+        body_to_sonar_quat.normalize();
+        geometry_msgs::msg::TransformStamped body_to_sonar;
+        body_to_sonar.header.stamp = this->get_clock()->now();
+        body_to_sonar.header.frame_id = "body";
+        body_to_sonar.child_frame_id = "uwfl2_sonar";
+        body_to_sonar.transform.translation.x = Lidar_T_wrt_IMU.x();
+        body_to_sonar.transform.translation.y = Lidar_T_wrt_IMU.y();
+        body_to_sonar.transform.translation.z = Lidar_T_wrt_IMU.z();
+        body_to_sonar.transform.rotation.x = body_to_sonar_quat.x();
+        body_to_sonar.transform.rotation.y = body_to_sonar_quat.y();
+        body_to_sonar.transform.rotation.z = body_to_sonar_quat.z();
+        body_to_sonar.transform.rotation.w = body_to_sonar_quat.w();
+        static_tf_broadcaster_->sendTransform(body_to_sonar);
+
         // Inform the pressure model how camera_init sits in World, so pressure
         // constrains true World-vertical depth rather than tilted local z.
         aux_fusion_.set_camera_init_pose_in_world(
@@ -1570,13 +1610,22 @@ public:
         timer_ = this->create_wall_timer(std::chrono::milliseconds(1),
                                          std::bind(&LaserMappingNode::timer_callback, this),
                                          processing_callback_group_);
-        if (pubCorrectedMap_)
+        if (pubCorrectedMap_ || pubLiveSonar_)
         {
             corrected_map_timer_ = this->create_wall_timer(
                 std::chrono::milliseconds(10),
-                std::bind(&LaserMappingNode::maybe_publish_corrected_map, this),
+                std::bind(&LaserMappingNode::visualization_timer_callback, this),
                 backend_callback_group_);
         }
+        const auto prediction_timer_period =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::duration<double>(
+                    0.5 / odometry_publish_rate_hz));
+        prediction_timer_ = this->create_wall_timer(
+            prediction_timer_period,
+            std::bind(&LaserMappingNode::publish_high_rate_odometry_prediction,
+                      this),
+            prediction_callback_group_);
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
         if (loop_closure_)
         {
@@ -1608,9 +1657,314 @@ public:
     }
 
 private:
-    void publish_estimator_outputs()
+    struct LiveSonarScan
     {
-        publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+        double timestamp = 0.0;
+        PointCloudXYZI::Ptr points;
+    };
+
+    void enqueue_live_sonar()
+    {
+        if (!pubLiveSonar_ ||
+            (pubLiveSonar_->get_subscription_count() == 0 &&
+             pubLiveSonar_->get_intra_process_subscription_count() == 0) ||
+            !feats_undistort || feats_undistort->empty())
+        {
+            return;
+        }
+
+        LiveSonarScan scan;
+        scan.timestamp = lidar_end_time;
+        scan.points = std::make_shared<PointCloudXYZI>(*feats_undistort);
+        std::lock_guard<std::mutex> lock(live_sonar_queue_mutex_);
+        // Visualization always prefers the newest frame over stale backlog.
+        live_sonar_queue_.clear();
+        live_sonar_queue_.push_back(std::move(scan));
+    }
+
+    void publish_pending_live_sonar()
+    {
+        if (!pubLiveSonar_ ||
+            (pubLiveSonar_->get_subscription_count() == 0 &&
+             pubLiveSonar_->get_intra_process_subscription_count() == 0))
+        {
+            std::lock_guard<std::mutex> lock(live_sonar_queue_mutex_);
+            live_sonar_queue_.clear();
+            return;
+        }
+
+        LiveSonarScan scan;
+        {
+            std::lock_guard<std::mutex> lock(live_sonar_queue_mutex_);
+            if (live_sonar_queue_.empty())
+            {
+                return;
+            }
+            scan = std::move(live_sonar_queue_.back());
+            live_sonar_queue_.clear();
+        }
+        if (!scan.points || scan.points->empty())
+        {
+            return;
+        }
+
+        sensor_msgs::msg::PointCloud2 output;
+        pcl::toROSMsg(*scan.points, output);
+        output.header.stamp = get_ros_time(scan.timestamp);
+        output.header.frame_id = "uwfl2_sonar";
+        pubLiveSonar_->publish(output);
+    }
+
+    void reset_high_rate_odometry_prediction_locked()
+    {
+        auto state = kf.get_x();
+        auto covariance = kf.get_P();
+        odometry_prediction_kf_.change_x(state);
+        odometry_prediction_kf_.change_P(covariance);
+        odometry_prediction_Q_ = p_imu->Q;
+        odometry_prediction_acceleration_scale_ =
+            p_imu->AccelerationScale();
+        odometry_prediction_time_ = lidar_end_time;
+        next_odometry_prediction_publish_time_ =
+            lidar_end_time + 1.0 / odometry_publish_rate_hz;
+        odometry_prediction_ready_ = true;
+    }
+
+    void publish_predicted_odometry(
+        const state_ikfom &state, const MainEkf::cov &covariance,
+        double timestamp)
+    {
+        nav_msgs::msg::Odometry odometry;
+        odometry.header.frame_id = "camera_init";
+        odometry.child_frame_id = "body";
+        odometry.header.stamp = get_ros_time(timestamp);
+        odometry.pose.pose.position.x = state.pos.x();
+        odometry.pose.pose.position.y = state.pos.y();
+        odometry.pose.pose.position.z = state.pos.z();
+        const Eigen::Quaterniond orientation(
+            state.rot.toRotationMatrix());
+        odometry.pose.pose.orientation.x = orientation.x();
+        odometry.pose.pose.orientation.y = orientation.y();
+        odometry.pose.pose.orientation.z = orientation.z();
+        odometry.pose.pose.orientation.w = orientation.w();
+        for (int i = 0; i < 6; ++i)
+        {
+            const int k = i < 3 ? i + 3 : i - 3;
+            odometry.pose.covariance[i * 6 + 0] = covariance(k, 3);
+            odometry.pose.covariance[i * 6 + 1] = covariance(k, 4);
+            odometry.pose.covariance[i * 6 + 2] = covariance(k, 5);
+            odometry.pose.covariance[i * 6 + 3] = covariance(k, 0);
+            odometry.pose.covariance[i * 6 + 4] = covariance(k, 1);
+            odometry.pose.covariance[i * 6 + 5] = covariance(k, 2);
+        }
+        pubOdomAftMapped_->publish(odometry);
+
+        geometry_msgs::msg::TransformStamped transform;
+        transform.header = odometry.header;
+        transform.child_frame_id = "body";
+        transform.transform.translation.x = state.pos.x();
+        transform.transform.translation.y = state.pos.y();
+        transform.transform.translation.z = state.pos.z();
+        transform.transform.rotation = odometry.pose.pose.orientation;
+        tf_broadcaster_->sendTransform(transform);
+    }
+
+    void publish_high_rate_odometry_prediction()
+    {
+        double pending_sonar_time =
+            std::numeric_limits<double>::infinity();
+        {
+            std::lock_guard<std::mutex> lock(mtx_buffer);
+            if (lidar_pushed)
+            {
+                pending_sonar_time = lidar_end_time;
+            }
+            else if (!time_buffer.empty() && !lidar_buffer.empty())
+            {
+                const double scan_begin_time = time_buffer.front();
+                const auto &scan = lidar_buffer.front();
+                double scan_duration = lidar_mean_scantime;
+                if (scan && scan->points.size() > 1U)
+                {
+                    const double measured_duration =
+                        scan->points.back().curvature / 1000.0;
+                    if (measured_duration >= 0.5 * lidar_mean_scantime)
+                    {
+                        scan_duration = measured_duration;
+                    }
+                }
+                pending_sonar_time = scan_begin_time + scan_duration;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(
+                odometry_prediction_state_mutex_);
+            if (!odometry_prediction_ready_ ||
+                odometry_prediction_time_ < 0.0)
+            {
+                return;
+            }
+
+            std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> imu_samples;
+            {
+                std::lock_guard<std::mutex> imu_lock(
+                    odometry_prediction_imu_mutex);
+                if (odometry_prediction_imu_buffer.size() < 2U)
+                {
+                    return;
+                }
+
+                std::size_t begin_index = 0;
+                while (begin_index + 1U <
+                           odometry_prediction_imu_buffer.size() &&
+                       get_time_sec(odometry_prediction_imu_buffer[
+                                        begin_index + 1U]
+                                        ->header.stamp) <=
+                           odometry_prediction_time_ + 1e-9)
+                {
+                    ++begin_index;
+                }
+                imu_samples.assign(
+                    odometry_prediction_imu_buffer.begin() + begin_index,
+                    odometry_prediction_imu_buffer.end());
+
+                // Preserve enough history to rewind the private predictor
+                // when a delayed scan correction arrives, but do not recopy
+                // the complete mission at every 100 Hz timer tick.
+                const double keep_after =
+                    odometry_prediction_time_ - std::max(0.5, lidar_timeout);
+                while (odometry_prediction_imu_buffer.size() > 2U &&
+                       get_time_sec(odometry_prediction_imu_buffer[1]
+                                        ->header.stamp) < keep_after)
+                {
+                    odometry_prediction_imu_buffer.pop_front();
+                }
+            }
+            if (imu_samples.size() < 2U)
+            {
+                return;
+            }
+
+            struct PredictedOutput
+            {
+                state_ikfom state;
+                MainEkf::cov covariance;
+                double timestamp = -1.0;
+            };
+            std::vector<PredictedOutput> outputs;
+
+            for (std::size_t i = 1; i < imu_samples.size(); ++i)
+            {
+                const auto &head = imu_samples[i - 1];
+                const auto &tail = imu_samples[i];
+                const double head_time = get_time_sec(head->header.stamp);
+                const double tail_time = get_time_sec(tail->header.stamp);
+                if (tail_time <= odometry_prediction_time_ + 1e-9)
+                {
+                    continue;
+                }
+                if (head_time >= pending_sonar_time - 1e-9 ||
+                    tail_time > pending_sonar_time + 1e-9)
+                {
+                    break;
+                }
+                const double segment_begin =
+                    std::max(head_time, odometry_prediction_time_);
+                const double segment_dt = tail_time - segment_begin;
+                if (!std::isfinite(segment_dt) || segment_dt <= 0.0 ||
+                    segment_dt > 0.1)
+                {
+                    continue;
+                }
+
+                input_ikfom input;
+                input.gyro = V3D(
+                    0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
+                    0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
+                    0.5 * (head->angular_velocity.z + tail->angular_velocity.z));
+                input.acc = odometry_prediction_acceleration_scale_ * V3D(
+                    0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
+                    0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
+                    0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z));
+
+                const double output_period =
+                    1.0 / odometry_publish_rate_hz;
+                // Driver timestamps can arrive in bursts. Integrate the same
+                // averaged IMU input at fixed output epochs inside the segment.
+                while (next_odometry_prediction_publish_time_ <=
+                       tail_time + 1e-9)
+                {
+                    const double output_time =
+                        next_odometry_prediction_publish_time_;
+                    if (output_time > odometry_prediction_time_ + 1e-9)
+                    {
+                        double prediction_dt =
+                            output_time - odometry_prediction_time_;
+                        odometry_prediction_kf_.predict(
+                            prediction_dt,
+                            odometry_prediction_Q_, input);
+                        odometry_prediction_time_ = output_time;
+                    }
+                    if (output_time >
+                        last_odometry_prediction_published_time_ + 1e-6)
+                    {
+                        outputs.push_back(
+                            {odometry_prediction_kf_.get_x(),
+                             odometry_prediction_kf_.get_P(), output_time});
+                    }
+                    next_odometry_prediction_publish_time_ += output_period;
+                }
+                if (tail_time > odometry_prediction_time_ + 1e-9)
+                {
+                    double prediction_dt =
+                        tail_time - odometry_prediction_time_;
+                    odometry_prediction_kf_.predict(
+                        prediction_dt,
+                        odometry_prediction_Q_, input);
+                    odometry_prediction_time_ = tail_time;
+                }
+            }
+            for (const auto &output : outputs)
+            {
+                if (output.timestamp <=
+                    last_odometry_prediction_published_time_ + 1e-6)
+                {
+                    continue;
+                }
+                last_odometry_prediction_published_time_ = output.timestamp;
+                publish_predicted_odometry(
+                    output.state, output.covariance, output.timestamp);
+            }
+        }
+    }
+
+    void publish_estimator_outputs(bool include_sonar_scan)
+    {
+        if (!p_imu->IsInitialized())
+        {
+            publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(
+                odometry_prediction_state_mutex_);
+            // A prediction may already be newer when scan processing is
+            // delayed. Never send TF/Odometry backward; reset the private
+            // predictor from the corrected state and let its next output carry
+            // the correction forward monotonically.
+            if (lidar_end_time >
+                last_odometry_prediction_published_time_ + 1e-6)
+            {
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                last_odometry_prediction_published_time_ = lidar_end_time;
+            }
+            reset_high_rate_odometry_prediction_locked();
+        }
+        if (include_sonar_scan)
+        {
+            enqueue_live_sonar();
+        }
     }
 
     struct FrontEndStageTiming
@@ -1787,7 +2141,7 @@ private:
                     }
                 }
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs();
+                publish_estimator_outputs(false);
                 return;
             }
 
@@ -1796,7 +2150,7 @@ private:
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
                 lidar_update_result = lidar_scan_quality.reject_sparse_input(0);
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs();
+                publish_estimator_outputs(false);
                 finish_scan_timing("no_points");
                 return;
             }
@@ -1824,7 +2178,7 @@ private:
                     "Rejected sparse sonar scan: %d downsampled points (minimum %d).",
                     feats_down_size, minimum_scan_points);
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs();
+                publish_estimator_outputs(true);
                 finish_scan_timing(uwfl2::lidar_scan_status(
                     lidar_update_result.reason));
                 return;
@@ -1870,7 +2224,7 @@ private:
                                      ? "kdtree_init"
                                      : (aux_summary.updated() ? "aux_only"
                                                               : "imu_only");
-                publish_estimator_outputs();
+                publish_estimator_outputs(true);
                 finish_scan_timing(lidar_update_result.accepted
                                        ? "tree_initialization"
                                        : uwfl2::lidar_scan_status(
@@ -1921,7 +2275,7 @@ private:
                     lidar_update_max_effective_features,
                     minimum_effective_features);
                 g_publish_mode = aux_summary.updated() ? "aux_only" : "imu_only";
-                publish_estimator_outputs();
+                publish_estimator_outputs(true);
                 finish_scan_timing(uwfl2::lidar_scan_status(
                     lidar_update_result.reason));
                 return;
@@ -1943,7 +2297,7 @@ private:
             /******* Publish odometry *******/
             const double odom_publish_started = omp_get_wtime();
             g_publish_mode = "lidar_update";
-            publish_estimator_outputs();
+            publish_estimator_outputs(true);
             stage_timing.odom_publish_ms =
                 1000.0 * (omp_get_wtime() - odom_publish_started);
 
@@ -2112,6 +2466,8 @@ private:
     using MappingScan = uwfl2::loop_closure::MappingScan;
     using MappingScanVector =
         std::vector<MappingScan, Eigen::aligned_allocator<MappingScan>>;
+    using MappingScanQueue =
+        std::deque<MappingScan, Eigen::aligned_allocator<MappingScan>>;
 
     static void append_mapping_scans(PointCloudXYZI &cloud,
                                      const MappingScanVector &scans)
@@ -2213,7 +2569,7 @@ private:
         return selected;
     }
 
-    void publish_mapping_scan(const MappingScan &scan)
+    void enqueue_mapping_scan_for_visualization(const MappingScan &scan)
     {
         if (!map_pub_en || !pubCorrectedMap_ || !scan.points_world ||
             (pubCorrectedMap_->get_subscription_count() == 0 &&
@@ -2221,11 +2577,44 @@ private:
         {
             return;
         }
-        PointCloudXYZI cloud;
-        append_mapping_scans(cloud, MappingScanVector{scan});
-        std::lock_guard<std::mutex> lock(corrected_map_visualization_mutex_);
-        PointCloudXYZI display_cloud =
-            select_new_corrected_map_display_points(cloud, false);
+
+        std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
+        if (corrected_map_queue_.size() >= 32U)
+        {
+            corrected_map_queue_.clear();
+            corrected_map_publish_requested_.store(true);
+        }
+        corrected_map_queue_.push_back(scan);
+    }
+
+    void publish_mapping_scan(const MappingScan &scan)
+    {
+        if (!scan.points_world)
+        {
+            return;
+        }
+
+        PointCloudXYZI display_cloud;
+        display_cloud.reserve(scan.points_world->size());
+        for (const auto &point : *scan.points_world)
+        {
+            if (!corrected_map_display_voxels_.insert(
+                    point.x, point.y, point.z))
+            {
+                continue;
+            }
+            PointType converted;
+            converted.x = point.x;
+            converted.y = point.y;
+            converted.z = point.z;
+            converted.intensity = point.intensity;
+            converted.normal_x = converted.normal_y = converted.normal_z = 0.0F;
+            converted.curvature = 0.0F;
+            display_cloud.push_back(converted);
+        }
+        display_cloud.width = static_cast<std::uint32_t>(display_cloud.size());
+        display_cloud.height = 1;
+        display_cloud.is_dense = false;
         if (display_cloud.empty())
         {
             return;
@@ -2306,9 +2695,9 @@ private:
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
             append_mapping_scans(*pcl_wait_pub, MappingScanVector{scan});
         }
-        // Store the scan before visualization. A concurrent full resync then
-        // either includes this scan or the incremental marker follows it.
-        publish_mapping_scan(scan);
+        // The backend owns visualization filtering and DDS publication. The
+        // front end only enqueues shared scan storage after committing it.
+        enqueue_mapping_scan_for_visualization(scan);
     }
 
     MappingScanVector pending_mapping_scans() const
@@ -2578,10 +2967,17 @@ private:
                 true, elapsed_ms(), "committed");
             if (corrected_mapping_output.cloud)
             {
-                std::lock_guard<std::mutex> lock(mapping_output_mutex);
-                pcl_wait_pub = corrected_mapping_output.cloud;
-                pending_mapping_scans_ = corrected_mapping_output.pending_scans;
-                corrected_map_publish_requested_ = true;
+                {
+                    std::lock_guard<std::mutex> lock(mapping_output_mutex);
+                    pcl_wait_pub = corrected_mapping_output.cloud;
+                    pending_mapping_scans_ =
+                        corrected_mapping_output.pending_scans;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
+                    corrected_map_queue_.clear();
+                }
+                corrected_map_publish_requested_.store(true);
             }
         }
         catch (...)
@@ -2617,33 +3013,55 @@ private:
         corrected_map_subscriber_count_ = subscriber_count;
         if (subscriber_count == 0)
         {
+            std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
+            corrected_map_queue_.clear();
             return;
         }
 
         const bool requested = corrected_map_publish_requested_.exchange(false);
-        if (!requested)
+        if (requested)
         {
+            const PointCloudXYZI snapshot = corrected_mapping_snapshot();
+            const PointCloudXYZI display_snapshot =
+                select_new_corrected_map_display_points(snapshot, true);
+            next_corrected_map_marker_id_ = 1;
+            visualization_msgs::msg::MarkerArray output;
+            visualization_msgs::msg::Marker clear;
+            clear.header.frame_id = "camera_init";
+            clear.header.stamp = this->get_clock()->now();
+            clear.action = visualization_msgs::msg::Marker::DELETEALL;
+            output.markers.push_back(clear);
+            if (!display_snapshot.empty())
+            {
+                output.markers.push_back(mapping_points_marker(
+                    display_snapshot, 0, clear.header.stamp));
+            }
+            pubCorrectedMap_->publish(output);
             return;
         }
 
-        const PointCloudXYZI snapshot = corrected_mapping_snapshot();
-        std::lock_guard<std::mutex> lock(corrected_map_visualization_mutex_);
-        const PointCloudXYZI display_snapshot =
-            select_new_corrected_map_display_points(snapshot, true);
-        next_corrected_map_marker_id_ = 1;
-        visualization_msgs::msg::MarkerArray output;
-        visualization_msgs::msg::Marker clear;
-        clear.header.frame_id = "camera_init";
-        clear.header.stamp = this->get_clock()->now();
-        clear.action = visualization_msgs::msg::Marker::DELETEALL;
-        output.markers.push_back(clear);
-        if (!display_snapshot.empty())
+        // Two scans per 10 ms tick can drain a 15x replay without ever making
+        // the estimator callback wait for hashing or DDS serialization.
+        for (int published = 0; published < 2; ++published)
         {
-            output.markers.push_back(mapping_points_marker(
-                display_snapshot, 0, clear.header.stamp));
+            MappingScan scan;
+            {
+                std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
+                if (corrected_map_queue_.empty())
+                {
+                    break;
+                }
+                scan = std::move(corrected_map_queue_.front());
+                corrected_map_queue_.pop_front();
+            }
+            publish_mapping_scan(scan);
         }
-        pubCorrectedMap_->publish(output);
+    }
 
+    void visualization_timer_callback()
+    {
+        publish_pending_live_sonar();
+        maybe_publish_corrected_map();
     }
 
     static geometry_msgs::msg::Pose pose_message(
@@ -2943,6 +3361,7 @@ private:
     std::atomic<std::uint64_t> timed_scans_{0};
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
         pubCorrectedMap_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLiveSonar_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_graph_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_graph_path_pub_;
@@ -2953,11 +3372,13 @@ private:
     rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
     rclcpp::CallbackGroup::SharedPtr lidar_callback_group_;
     rclcpp::CallbackGroup::SharedPtr processing_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr prediction_callback_group_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr corrected_map_timer_;
+    rclcpp::TimerBase::SharedPtr prediction_timer_;
     rclcpp::CallbackGroup::SharedPtr backend_callback_group_;
     rclcpp::Service<fast_lio::srv::InjectLoop>::SharedPtr loop_inject_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
@@ -2966,8 +3387,21 @@ private:
     std::atomic<bool> corrected_map_publish_requested_{false};
     std::size_t corrected_map_subscriber_count_ = 0;
     std::int32_t next_corrected_map_marker_id_ = 1;
-    std::mutex corrected_map_visualization_mutex_;
+    std::mutex corrected_map_queue_mutex_;
+    MappingScanQueue corrected_map_queue_;
     uwfl2::CorrectedMapDisplayVoxels corrected_map_display_voxels_{0.03};
+    std::mutex live_sonar_queue_mutex_;
+    std::deque<LiveSonarScan> live_sonar_queue_;
+    MainEkf odometry_prediction_kf_;
+    Eigen::Matrix<double, process_noise_ikfom::DOF,
+                  process_noise_ikfom::DOF> odometry_prediction_Q_ =
+        process_noise_cov();
+    std::mutex odometry_prediction_state_mutex_;
+    double odometry_prediction_acceleration_scale_ = 1.0;
+    double odometry_prediction_time_ = -1.0;
+    double next_odometry_prediction_publish_time_ = -1.0;
+    double last_odometry_prediction_published_time_ = -1.0;
+    bool odometry_prediction_ready_ = false;
     bool loop_visualization_enabled_ = false;
     std::chrono::steady_clock::time_point next_loop_visualization_publish_{};
     bool aux_timeline_started_ = false;
@@ -2987,7 +3421,7 @@ int main(int argc, char** argv)
     signal(SIGINT, SigHandle);
 
     auto node = std::make_shared<LaserMappingNode>();
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 3);
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
     executor.add_node(node);
     executor.spin();
 
