@@ -2007,6 +2007,36 @@ setup run named `heading_mag_attitude_only_gyr55e7_20261006` retained
 `gyr_cov=1.0e-6` because of a YAML-format substitution mismatch and is not a
 valid comparison.
 
+### Bounded Corrected-Map Visualization (2026-10-06)
+
+- [x] Remove the duplicate `/uwfl2/sonar_live` publisher; visualize the source
+  sonar topic directly through its recorded/static TF.
+- [x] Keep full-density corrected history for loop correction and `/map_save`,
+  but retain only one point per 3 cm world voxel in RViz.
+- [x] Rebuild the display voxel set after subscriber attachment or a committed
+  loop correction so stale geometry is removed.
+- [x] Build, run focused/full package tests, and perform a short replay check.
+
+Decision: the active ikd-tree and saved corrected map remain unchanged. Only
+the RViz representation is bounded; repeated observations of an already shown
+3 cm cell are not sent or retained again. This prevents DDS/RViz cost from
+growing with every repeated full-density sonar scan.
+
+Validation: `colcon build --packages-select fast_lio --symlink-install`
+passed. The four package test executables passed, including four new display
+voxel tests: 43 freshly executed cases with zero failures. In ROS
+domain 147, a 20-sensor-second x1 replay of
+`bags/DONE/backAndforth_CSSN3_processed` published `274160` RViz points while
+`/map_save` retained all `860162` corrected-history points, a 68% display
+reduction. Topic inspection showed `/sonar_point_cloud`, `/Odometry`, and
+`/uwfl2/corrected_map`, with no `/uwfl2/sonar_live`. A separate 90-sensor-second
+x15 burst demonstrated that this tuned configuration cannot consume 15x input
+in real time even without RViz; it was used only as a stress check and not as
+an estimator-quality result. Implementation commit: `4e109ab`. The existing
+user-customized RViz file was not included in that commit; only its live-sonar
+topic field was changed locally from `/uwfl2/sonar_live` to
+`/sonar_point_cloud`.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
