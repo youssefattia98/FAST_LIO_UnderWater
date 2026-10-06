@@ -1937,6 +1937,8 @@ Validation:
 - [x] Seed startup-relative magnetic heading from the first valid calibrated
   sample, constrain heading during the 20-sample initialization window, and
   finalize the reference mean from corrected local-frame samples.
+- [x] Isolate the remaining return-leg heading error and prevent magnetic
+  residuals from being stored as a persistent gyroscope-bias correction.
 - [x] Build and run the full package tests plus matched full-bag x15 replays.
 - [ ] Confirm the corrected wall/turn geometry visually in RViz at x1 or x5.
 
@@ -1961,6 +1963,28 @@ on `bags/DONE/zigzagwall_processed5` in ROS domains 141--144. Results are in
 `bags/UWFL2_LC_RESULTS/heading_*_20261006`. A short domain-145 runtime check
 received one marker with scale `0.030 x 0.030 m`, `6563` points, `6563` colors,
 and `1347` distinct RGB values. All 47 package tests passed.
+
+Follow-up diagnosis: the calibrated raw magnetic field evaluated against the
+recorded `World -> base_link` attitude remained centered near zero on every
+mission quarter (return mean `-0.02 deg`, return p95 absolute `2.65 deg`), so
+neither its axes nor calibration explain the return error. Both sonar and the
+magnetometer requested negative yaw, but the old constrained magnetic gain
+also wrote transient heading disagreement into gyroscope bias. The first-half
+negative bias then integrated into positive return yaw. Lowering the heading
+floor alone made this feedback worse (`-5.13` to `-6.61 deg` return magnetic
+innovation), and suppressing bias only while the reference was provisional
+merely deferred the same correction; both trials were rejected.
+
+The retained correction makes the scalar magnetic update attitude-only. Its
+Joseph covariance update uses that same constrained gain, while IMU/sonar
+fusion remains responsible for gyroscope-bias estimation. On the matched,
+LC-disabled x15 replay, return heading disagreement against the recorded body
+transform decreased from `+5.00` to `+3.15 deg`; using
+`heading_cov_floor=0.005` reduced it further to `+2.58 deg` (`+1.38 deg` over
+the final 15%). Position RMSE/final error improved from `2.03/2.55 m` to
+`1.93/1.58 m`, and return magnetic innovation decreased from `-5.13` to
+`-2.48 deg`. Results are under `bags/UWFL2_LC_RESULTS/heading_mag_*_20261006`.
+Implementation commit: `b8584d8`.
 
 ## Stop Conditions
 

@@ -109,8 +109,7 @@ inline Eigen::VectorXd constrained_gain(const Eigen::MatrixXd &P,
                                         const Eigen::RowVectorXd &H,
                                         double innovation_variance,
                                         const Eigen::Vector3d &heading_direction_body,
-                                        int attitude_index = 3,
-                                        int gyro_bias_index = 15)
+                                        int attitude_index = 3)
 {
     Eigen::VectorXd constrained = Eigen::VectorXd::Zero(P.rows());
     if (P.rows() != P.cols() || H.size() != P.rows() ||
@@ -122,8 +121,6 @@ inline Eigen::VectorXd constrained_gain(const Eigen::MatrixXd &P,
     const Eigen::Vector3d g = heading_direction_body.normalized();
     constrained.segment<3>(attitude_index) =
         g * g.dot(unconstrained.segment<3>(attitude_index));
-    constrained.segment<3>(gyro_bias_index) =
-        g * g.dot(unconstrained.segment<3>(gyro_bias_index));
     return constrained;
 }
 

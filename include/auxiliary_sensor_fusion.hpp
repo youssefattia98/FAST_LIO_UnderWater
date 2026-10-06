@@ -1433,6 +1433,9 @@ private:
             return false;
         }
 
+        // A local magnetic heading directly observes attitude, not gyro bias.
+        // Keep its constrained gain attitude-only so transient disagreement
+        // cannot be stored as a persistent bias and integrated into yaw.
         const Eigen::VectorXd K = underwater_fastlio::magnetometer::constrained_gain(
             P, H, innovation_variance, observation.g, 3);
         const Eigen::VectorXd dx_dyn = K * observation.innovation;
