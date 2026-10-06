@@ -1986,6 +1986,27 @@ the final 15%). Position RMSE/final error improved from `2.03/2.55 m` to
 `-2.48 deg`. Results are under `bags/UWFL2_LC_RESULTS/heading_mag_*_20261006`.
 Implementation commit: `0238ce5`.
 
+Gyroscope-covariance follow-up: a matched LC-disabled replay compared
+`mapping.gyr_cov=1.0e-6` and `5.5e-6` with the retained attitude-only magnetic
+gain. The larger value increased the steady heading-direction covariance from
+approximately `2.8--3.0e-6` to `5.0--5.6e-6`, allowing the return-leg magnetic
+and sonar yaw corrections to grow from `-0.60/-0.50 deg` to
+`-1.27/-0.77 deg`. Yaw RMSE improved from `6.42` to `6.03 deg` and final
+position error from `1.58` to `1.35 m`, although position RMSE worsened from
+`1.93` to `2.13 m`; this is therefore a heading tradeoff rather than a uniform
+accuracy improvement. The bag's IMU timing is not a regular 200 Hz sampling
+clock: although its average is `199.6 Hz`, median positive header spacing is
+`0.136 ms`, the 75th percentile is `9.81 ms`, and the 95th percentile is
+`19.94 ms`. Gyroscope values are quantized at `0.001 rad/s`, and the first
+five seconds have per-axis variances of roughly `1.8e-5`, `2.4e-5`, and
+`3.1e-5 (rad/s)^2`. Thus `1.0e-6` is overconfident for this recording and
+`5.5e-6` partly compensates for gyro noise/timestamp batching; it does not fix
+the acquisition timestamps. Results are in
+`bags/UWFL2_LC_RESULTS/heading_mag_attitude_only_gyr55e6_20261006`. An aborted
+setup run named `heading_mag_attitude_only_gyr55e7_20261006` retained
+`gyr_cov=1.0e-6` because of a YAML-format substitution mismatch and is not a
+valid comparison.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
