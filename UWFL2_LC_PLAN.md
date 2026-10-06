@@ -1926,6 +1926,7 @@ Validation:
   identity and a 90-degree graph correction receives 45 degrees, not the old
   ending-keyframe 90-degree correction. Dense history no longer consumes the
   compact shadow-tree point budget.
+- Implementation commit: `7cfc588`.
 
 ## Stop Conditions
 
