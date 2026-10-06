@@ -2037,6 +2037,10 @@ user-customized RViz file was not included in that commit; only its live-sonar
 topic field was changed locally from `/uwfl2/sonar_live` to
 `/sonar_point_cloud`.
 
+Note: an unscoped workspace `colcon test-result --verbose` also displayed two
+pre-existing `sonar3d` Python lint failures. No `sonar3d` tests were run or
+changed here; the scoped `fast_lio` build and test result is clean.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
