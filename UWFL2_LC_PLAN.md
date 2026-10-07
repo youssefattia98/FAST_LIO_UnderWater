@@ -2134,8 +2134,8 @@ ROS_DOMAIN_ID=161 ros2 service call /map_save std_srvs/srv/Trigger '{}'
 The original back-and-forth bag contains both `World -> base_link` and static
 `base_link -> sonar_frame`, which makes RViz follow the external vehicle pose.
 Connecting that tree to UWFL2 would mix two odometries, while publishing a
-second parent for `sonar_frame` would violate the TF tree. The input bag was
-therefore preserved and a repaired copy was generated with:
+second parent for `sonar_frame` would violate the TF tree. The repair was first
+validated on a separate copy with:
 
 ```bash
 tools/repair_sonar_tf_bag.py \
@@ -2144,13 +2144,23 @@ tools/repair_sonar_tf_bag.py \
   --force
 ```
 
-The tool copied `709290` messages and removed the one conflicting static
-transform. A short isolated x1 replay confirmed `body -> sonar_frame` with
+The test copy retained `709290` messages except for the one conflicting static
+TF message. A short isolated x1 replay confirmed `body -> sonar_frame` with
 translation `[0.09382,-0.02148,0.11593]` and `+6 deg` pitch, exactly matching
 the selected YAML extrinsic. The cloud remains tagged `sonar_frame`, and the
 repaired bag contains no recorded parent for that child. The build passed with
 only existing warnings; all four package test executables passed (`55` tests,
 zero errors or failures).
+
+At the user's request, every bag in `bags/DONE` was subsequently repaired in
+place without compression. Each bag was rewritten to a temporary directory,
+checked for an unchanged sonar-message count and zero non-`body` parents of its
+sonar frame, then atomically substituted before deleting its backup. Conflicting
+TF transforms removed were: back-and-forth `1`, both HF variants `1` each,
+pillars `1`, sunken-boat LF2 `1`, zigzag `1`, path-home `79232`, sim3 `133346`,
+and docking `16233`. Sunken-boat LF5 already had no sonar-frame parent and was
+left unchanged. No temporary copies remain and disk use returned to its
+pre-repair level.
 
 ## Stop Conditions
 
