@@ -2220,6 +2220,8 @@ ROS_DOMAIN_ID=221 ros2 bag play \
 
 ### External Loop-Closure Profiles (2026-10-07)
 
+Implementation commit: `050e38f`.
+
 - [x] Remove `diagnostics_directory` from the public ROS/YAML interface.
 - [x] Remove the `sparse_sonar` profile and migrate its users to `balanced`.
 - [x] Move every advanced `balanced` and `simulation` value into profile files
