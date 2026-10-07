@@ -2321,6 +2321,40 @@ ros2 bag play /home/attia/ros2_ws/bags/DONE/sim3 \
   --rate 15 --playback-duration 180
 ```
 
+### Loop-Closure Posterior Covariance Handoff (2026-10-07)
+
+Implementation commit: `972cfc5`.
+
+- [x] Replace additive LC correction uncertainty with a six-dimensional pose
+  pseudo-measurement update using graph-anchor and re-registration covariance.
+- [x] Update the complete 27-state covariance and cross-state correlations in
+  Joseph form after the deterministic full-SE(3) transport.
+- [x] Convert position covariance between IKF world-frame error and GTSAM
+  body-local Pose3 tangent conventions in both directions.
+- [x] Verify PSD, protected-state behavior, covariance reduction for an
+  informative loop, build, and disabled-mode tests.
+
+Build passed and all `65/65` tests passed. The same full x15
+`backAndforth_CSSN3_processed` replay that previously increased position
+covariance trace from `0.001306` to `7.33896 m^2` committed one loop with the
+new update and changed position trace from `0.00126855` to `0.00126752 m^2` and
+attitude trace from `0.000150598` to `0.000149175 rad^2`. No invalid or
+negative covariance was reported. The small reduction is expected because the
+live IKF prior was substantially more confident than the loop correction.
+A short loop-disabled `pillars_LF_2_processed` replay initialized and processed
+normally without invoking the new loop-only path.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+colcon test-result --test-result-base build/fast_lio --verbose
+ros2 bag play \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed --rate 15
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
