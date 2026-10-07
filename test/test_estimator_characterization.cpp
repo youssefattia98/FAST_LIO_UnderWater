@@ -4,6 +4,7 @@
 #include "IMU_Processing.hpp"
 #include "auxiliary_sensor_fusion.hpp"
 #include "mapping_input_buffers.hpp"
+#include "replay_trace.hpp"
 #include <thread>
 
 namespace
@@ -55,7 +56,65 @@ TEST(InputBuffers, ConcurrentSensorsKeepQueuesPairedAndHistoryBounded)
     EXPECT_EQ(buffers.imu_buffer.back(), buffers.odometry_prediction_imu_buffer.back());
 }
 
+TEST(InputBuffers, PredictionHistoryRetainsCorrectionEpochWhenPredictorIsAhead)
+{
+    uwfl2::MappingInputBuffers buffers;
+    for (int i = 0; i <= 300; ++i)
+    {
+        auto message = std::make_shared<sensor_msgs::msg::Imu>();
+        message->header.stamp = get_ros_time(1.0 + i * 0.01);
+        buffers.PushImu(message);
+    }
+    const auto ahead = buffers.PredictionSamples(3.0, 2.0);
+    ASSERT_GE(ahead.size(), 2U);
+    EXPECT_LE(get_time_sec(ahead.front()->header.stamp), 3.0);
+    // A correction at 2 s must replay real samples, not use the 3 s input early.
+    const auto rewind = buffers.PredictionSamples(2.0, 2.0);
+    ASSERT_GE(rewind.size(), 2U);
+    EXPECT_LE(get_time_sec(rewind.front()->header.stamp), 2.0);
+    EXPECT_GE(get_time_sec(rewind[1]->header.stamp), 2.0);
+    EXPECT_GE(rewind.size(), 200U);
+    EXPECT_EQ(buffers.odometry_prediction_imu_buffer.back(), buffers.imu_buffer.back());
+}
+
+TEST(InputBuffers, PredictionHistoryDoesNotFabricateSamplesBeyondHardLimit)
+{
+    uwfl2::MappingInputBuffers buffers;
+    for (int i = 0; i < 4100; ++i)
+    {
+        auto message = std::make_shared<sensor_msgs::msg::Imu>();
+        message->header.stamp = get_ros_time(1.0 + i * 0.001);
+        buffers.PushImu(message);
+    }
+    const auto samples = buffers.PredictionSamples(1.0, 1.0);
+    EXPECT_EQ(samples.size(), 4000U);
+    ASSERT_FALSE(samples.empty());
+    EXPECT_GT(get_time_sec(samples.front()->header.stamp), 1.0);
+    EXPECT_EQ(buffers.odometry_prediction_imu_buffer.size(), 4000U);
+}
+
 using Ekf = ImuProcess::Ekf;
+
+TEST(InputBuffers, SonarFallbackRequiresReceptionSilenceAndCompletedConversion)
+{
+    using Clock = uwfl2::MappingInputBuffers::Clock;
+    const auto epoch = Clock::time_point(std::chrono::seconds(10));
+    const auto grace = std::chrono::milliseconds(20);
+    uwfl2::MappingInputBuffers buffers;
+    buffers.NoteSonarReceipt(epoch);
+    // A conversion remains in flight even when the IMU watermark is far ahead.
+    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(1)));
+    auto cloud = std::make_shared<PointCloudXYZI>();
+    buffers.PushSonar(cloud, 27.53);
+    EXPECT_FALSE(buffers.sonar_processing);
+    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::milliseconds(267)));
+    EXPECT_TRUE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::milliseconds(270)));
+    EXPECT_TRUE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(1)));
+    buffers.NoteSonarReceipt(epoch + std::chrono::seconds(1));
+    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(2)));
+    buffers.PushSonar(cloud, 28.0);
+    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(1)));
+}
 
 struct RosContext
 {
@@ -73,6 +132,43 @@ void InitializeFilter(Ekf &filter)
     double epsilon[state_ikfom::DOF];
     std::fill_n(epsilon, state_ikfom::DOF, 1e-3);
     filter.init_dyn_share(get_f, df_dx, df_dw, NoMeasurement, 4, epsilon);
+}
+
+TEST(ReplayTrace, FingerprintsLogicalFieldsRatherThanSerializedPadding)
+{
+    sensor_msgs::msg::Imu message;
+    message.header.stamp = get_ros_time(1.0);
+    message.header.frame_id = "imu";
+    message.linear_acceleration.z = 9.81;
+    const auto fingerprint = uwfl2::ReplayTrace::Fingerprint(message);
+    auto copy = message;
+    EXPECT_EQ(fingerprint, uwfl2::ReplayTrace::Fingerprint(copy));
+    ++copy.header.stamp.nanosec;
+    EXPECT_NE(fingerprint, uwfl2::ReplayTrace::Fingerprint(copy));
+    copy = message;
+    copy.header.frame_id = "other_imu";
+    EXPECT_NE(fingerprint, uwfl2::ReplayTrace::Fingerprint(copy));
+    copy = message;
+    copy.angular_velocity.z = 0.01;
+    EXPECT_NE(fingerprint, uwfl2::ReplayTrace::Fingerprint(copy));
+    copy = message;
+    copy.angular_velocity_covariance[0] = 0.02;
+    EXPECT_NE(fingerprint, uwfl2::ReplayTrace::Fingerprint(copy));
+}
+
+TEST(ReplayTrace, RecordingCannotChangeMainStateOrCovariance)
+{
+    Ekf filter;
+    InitializeFilter(filter);
+    auto before = filter.get_x();
+    const auto covariance = filter.get_P();
+    uwfl2::ReplayTrace trace;
+    trace.Record("fixture", 1.0, 1.0, 0, 0, filter);
+    auto after = filter.get_x();
+    Eigen::Matrix<double, state_ikfom::DOF, 1> difference;
+    after.boxminus(difference, before);
+    EXPECT_DOUBLE_EQ(difference.norm(), 0.0);
+    EXPECT_DOUBLE_EQ((filter.get_P() - covariance).norm(), 0.0);
 }
 
 MeasureGroup StationaryInterval(double begin, double end)

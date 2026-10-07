@@ -21,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--early-recovery", action="store_true",
+                        help="Deliver the recovery scan before its IMU watermark")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     os.environ["ROS_DOMAIN_ID"] = "230"
@@ -53,6 +55,7 @@ def main():
                     [(float(x), float(y), -1.0) for x in (1, 2) for y in (-1, 0, 1)]))
 
             def samples(begin, end, scan_times=()):
+                next_sample = time.monotonic()
                 for nanoseconds in range(round(begin * 1e9), round(end * 1e9) + 1, 5000000):
                     seconds = nanoseconds / 1e9
                     if any(abs(seconds - epoch) < 1e-8 for epoch in scan_times):
@@ -63,20 +66,27 @@ def main():
                     message.orientation_covariance[0] = -1.0
                     imu.publish(message)
                     rclpy.spin_once(node, timeout_sec=0.001)
+                    next_sample += 0.005
+                    time.sleep(max(0.0, next_sample - time.monotonic()))
 
             def drain():
                 end = time.monotonic() + 0.4
                 while time.monotonic() < end:
                     rclpy.spin_once(node, timeout_sec=0.01)
 
-            samples(1.0, 2.0, (1.0, 1.2, 1.4, 1.6, 1.8))
+            # Initialize through several real-time scans before testing fallback.
+            samples(1.0, 3.0, tuple(1.0 + 0.2 * i for i in range(10)))
             drain()
             first_count = len(outputs)
-            samples(2.005, 2.8)
+            samples(3.005, 3.3)
+            if args.early_recovery:
+                cloud(3.55)
+            samples(3.305, 3.8)
             drain()
             outage_count = len(outputs)
-            cloud(2.55)
-            samples(2.805, 3.2, (3.0,))
+            if not args.early_recovery:
+                cloud(3.55)
+            samples(3.805, 4.2, (4.0,))
             drain()
             stamps = [m.header.stamp.sec * 10**9 + m.header.stamp.nanosec for m in outputs]
             print({"scan": first_count, "outage": outage_count,
@@ -84,8 +94,9 @@ def main():
             assert first_count > 0 and outage_count > first_count and len(outputs) > outage_count
             # Startup may publish the same epoch; initialized output must not go backwards.
             assert all(a <= b for a, b in zip(stamps, stamps[1:]))
-            assert stamps[-1] >= 3100000000
+            assert stamps[-1] >= 4100000000
             report = {"command": command, "scan_phase_outputs": first_count,
+                      "early_recovery": args.early_recovery,
                       "outage_outputs": outage_count - first_count,
                       "recovery_outputs": len(outputs) - outage_count,
                       "first_stamp_ns": stamps[0], "final_stamp_ns": stamps[-1]}

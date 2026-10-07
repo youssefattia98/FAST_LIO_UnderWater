@@ -133,6 +133,11 @@ target_include_directories(fastlio_mapping PUBLIC
   ${PCL_INCLUDE_DIRS}
 )
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} Eigen3::Eigen uwfl2_loop_closure)
+option(UWFL2_REPLAY_TRACE "Build test-only estimator replay tracing" OFF)
+if(UWFL2_REPLAY_TRACE)
+  target_compile_definitions(fastlio_mapping PRIVATE UWFL2_REPLAY_TRACE)
+  target_include_directories(fastlio_mapping PRIVATE test)
+endif()
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 

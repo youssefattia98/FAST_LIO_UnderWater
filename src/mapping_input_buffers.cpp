@@ -3,9 +3,58 @@
 namespace uwfl2
 {
 
+std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> MappingInputBuffers::PredictionSamples(
+    double prediction_time, double correction_time)
+{
+    std::lock_guard<std::mutex> lock(odometry_prediction_imu_mutex);
+    if (odometry_prediction_imu_buffer.size() < 2U)
+    {
+        return {};
+    }
+    std::size_t begin = 0;
+    while (begin + 1U < odometry_prediction_imu_buffer.size() &&
+           get_time_sec(odometry_prediction_imu_buffer[begin + 1U]->header.stamp) <=
+               prediction_time + 1e-9)
+    {
+        ++begin;
+    }
+    std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> samples(
+        odometry_prediction_imu_buffer.begin() + begin,
+        odometry_prediction_imu_buffer.end());
+    // The main filter can still correct any epoch after its latest correction.
+    // Pruning against prediction_time loses the history required for that reset.
+    while (odometry_prediction_imu_buffer.size() > 2U &&
+           get_time_sec(odometry_prediction_imu_buffer[1]->header.stamp) < correction_time)
+    {
+        odometry_prediction_imu_buffer.pop_front();
+    }
+    return samples;
+}
+
+void MappingInputBuffers::NoteSonarReceipt(Clock::time_point now)
+{
+    std::lock_guard<std::mutex> lock(mtx_buffer);
+    last_sonar_receipt = now;
+    sonar_processing = true;
+}
+
+bool MappingInputBuffers::SonarReceptionTimedOut(
+    double timeout_seconds, Clock::duration callback_grace, Clock::time_point now) const
+{
+    // Called under mtx_buffer: transport silence is not a sensor-time gap.
+    return !sonar_processing &&
+           now - last_sonar_receipt >=
+               std::chrono::duration<double>(timeout_seconds) + callback_grace;
+}
+
 void MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp)
 {
     std::lock_guard<std::mutex> lock(mtx_buffer);
+    if (!sonar_processing)
+    {
+        last_sonar_receipt = Clock::now();
+    }
+    sonar_processing = false;
     if (!is_first_lidar && timestamp < last_timestamp_lidar)
     {
         lidar_buffer.clear();

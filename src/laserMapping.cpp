@@ -80,6 +80,13 @@
 #include "odometry_covariance.hpp"
 #include "odometry_output.hpp"
 #include "mapping_input_buffers.hpp"
+#ifdef UWFL2_REPLAY_TRACE
+#include "replay_trace.hpp"
+#define TRACE_STATE(stage, timestamp, count, key) \
+    replay_trace_.Record(stage, timestamp, lidar_end_time, count, key, kf)
+#else
+#define TRACE_STATE(stage, timestamp, count, key)
+#endif
 #include "observability_manager.hpp"
 #include "preprocess.h"
 #include "sensor_parameter_utils.hpp"
@@ -698,6 +705,10 @@ public:
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 lid_topic, lidar_qos,
                 [this](sensor_msgs::msg::PointCloud2::UniquePtr message) {
+#ifdef UWFL2_REPLAY_TRACE
+                    replay_trace_.SonarReceived(*message);
+#endif
+                    input_buffers_.NoteSonarReceipt();
                     ensure_sonar_frame_attached_to_body(message->header.frame_id);
                     standard_pcl_cbk(std::move(message));
                 },
@@ -858,7 +869,9 @@ private:
         return true;
     }
 
-    bool sync_packages(MeasureGroup &meas)
+    enum class ImuPacketResult { Unavailable, Waiting, Ready };
+
+    bool sync_packages(MeasureGroup &meas, bool &imu_only_measure)
     {
         while (!input_buffers_.lidar_pushed && !input_buffers_.lidar_buffer.empty() && input_buffers_.last_processed_time > 0.0 &&
                input_buffers_.time_buffer.front() < input_buffers_.last_processed_time - 1e-4)
@@ -870,6 +883,23 @@ private:
 
         if (input_buffers_.lidar_buffer.empty() || input_buffers_.imu_buffer.empty()) {
             return false;
+        }
+
+        // Complete a gap on fixed IMU packet epochs before admitting the
+        // returning scan. Otherwise callback order changes the number of IMU
+        // attitude/auxiliary corrections performed during that same gap.
+        if (!input_buffers_.lidar_pushed)
+        {
+            const auto gap_result = sync_imu_only_packages(meas, true);
+            if (gap_result == ImuPacketResult::Ready)
+            {
+                imu_only_measure = true;
+                return true;
+            }
+            if (gap_result == ImuPacketResult::Waiting)
+            {
+                return false;
+            }
         }
 
         /*** push a lidar scan ***/
@@ -920,10 +950,11 @@ private:
         input_buffers_.lidar_buffer.pop_front();
         input_buffers_.time_buffer.pop_front();
         input_buffers_.lidar_pushed = false;
+        input_buffers_.last_scan_end_time = meas.lidar_end_time;
         return true;
     }
 
-    bool sync_imu_only_packages(MeasureGroup &meas)
+    ImuPacketResult sync_imu_only_packages(MeasureGroup &meas, bool completing_sonar_gap = false)
     {
         // An empty topic explicitly selects INS mode. A misspelled/unavailable
         // topic also enters INS mode, and an established LiDAR stream enters the
@@ -933,48 +964,104 @@ private:
         // scan callback to take priority before its timestamp is crossed.
         const bool explicit_ins_mode = lid_topic.empty();
         const bool no_lidar_received = input_buffers_.is_first_lidar;
-        if (!input_buffers_.lidar_buffer.empty() || input_buffers_.lidar_pushed || input_buffers_.imu_buffer.empty()) {
-            return false;
+        const bool pending_scan = !input_buffers_.lidar_buffer.empty();
+        // One slightly late frame is still a normal scan interval. Require a
+        // whole missed scan cycle before applying outage-specific corrections.
+        const double sonar_outage_timeout = 2.0 * lidar_timeout;
+        if (pending_scan != completing_sonar_gap || input_buffers_.lidar_pushed ||
+            (!completing_sonar_gap && input_buffers_.sonar_processing) ||
+            input_buffers_.imu_buffer.empty()) {
+            return ImuPacketResult::Unavailable;
+        }
+
+        if (completing_sonar_gap &&
+            (input_buffers_.last_processed_time <= 0.0 ||
+             input_buffers_.last_scan_end_time <= 0.0 ||
+             input_buffers_.time_buffer.front() - input_buffers_.last_scan_end_time < sonar_outage_timeout))
+        {
+            return ImuPacketResult::Unavailable;
         }
 
         const double latest_imu_time = get_time_sec(input_buffers_.imu_buffer.back()->header.stamp);
         const double first_imu_time = get_time_sec(input_buffers_.imu_buffer.front()->header.stamp);
         const bool lidar_timed_out =
             input_buffers_.last_timestamp_lidar > 0.0 &&
-            latest_imu_time - input_buffers_.last_timestamp_lidar >= lidar_timeout;
+            latest_imu_time - input_buffers_.last_timestamp_lidar >= sonar_outage_timeout;
         const bool initial_lidar_timed_out =
             no_lidar_received && latest_imu_time - first_imu_time >= lidar_timeout;
-        if (!explicit_ins_mode && !lidar_timed_out && !initial_lidar_timed_out)
+        if (!completing_sonar_gap && !explicit_ins_mode &&
+            !lidar_timed_out && !initial_lidar_timed_out)
         {
-            return false;
+            return ImuPacketResult::Unavailable;
         }
-        if (input_buffers_.last_processed_time > 0.0 && latest_imu_time <= input_buffers_.last_processed_time + 1e-6) {
-            return false;
+        // Accelerated replay can advance IMU sensor time while an on-time
+        // sonar callback is still queued/converting. Only an established
+        // stream with actual reception silence may enter outage fallback.
+        if (!completing_sonar_gap && !explicit_ins_mode && !no_lidar_received &&
+            !input_buffers_.SonarReceptionTimedOut(
+                sonar_outage_timeout, AUX_SENSOR_REORDER_WALL_GRACE))
+        {
+            return ImuPacketResult::Unavailable;
         }
-        meas.imu.clear();
-        meas.lidar.reset(new PointCloudXYZI());
         double packet_begin_time = input_buffers_.last_processed_time > 0.0 ? input_buffers_.last_processed_time : first_imu_time;
         if (input_buffers_.last_processed_time > 0.0 && first_imu_time > packet_begin_time + expected_imu_timeout())
         {
             packet_begin_time = first_imu_time;
         }
         const double target_packet_end_time = packet_begin_time + imu_only_packet_duration();
+        // Keep an IMU sample for the returning scan, including instantaneous
+        // sonar clouds whose begin and end timestamps are identical.
+        const double scan_horizon = completing_sonar_gap
+            ? input_buffers_.time_buffer.front() - expected_imu_period()
+            : std::numeric_limits<double>::infinity();
+        if (target_packet_end_time > scan_horizon + 1e-6)
+        {
+            return ImuPacketResult::Unavailable;
+        }
         // Once a LiDAR stream has been established, retain one timeout of IMU
         // history during an outage. A returning scan can then still be fused at
         // its sensor timestamp instead of being discarded as out of sequence.
         const double propagation_horizon =
-            (!explicit_ins_mode && input_buffers_.last_timestamp_lidar > 0.0)
-                ? latest_imu_time - lidar_timeout
+            completing_sonar_gap
+                ? std::min(latest_imu_time, scan_horizon)
+                : (!explicit_ins_mode && input_buffers_.last_timestamp_lidar > 0.0)
+                ? latest_imu_time - lidar_timeout - expected_imu_period()
                 : latest_imu_time;
         if (propagation_horizon < target_packet_end_time - 1e-6)
         {
-            return false;
+            return completing_sonar_gap ? ImuPacketResult::Waiting
+                                        : ImuPacketResult::Unavailable;
+        }
+        // Select a complete packet before popping anything. A partial packet
+        // would change the next correction epoch with callback timing.
+        const auto packet_tail = std::find_if(
+            input_buffers_.imu_buffer.begin(), input_buffers_.imu_buffer.end(),
+            [&](const auto &imu) {
+                return get_time_sec(imu->header.stamp) >=
+                    target_packet_end_time - 0.5 * expected_imu_period();
+            });
+        if (packet_tail == input_buffers_.imu_buffer.end())
+        {
+            return completing_sonar_gap ? ImuPacketResult::Waiting
+                                        : ImuPacketResult::Unavailable;
+        }
+        const double packet_tail_time = get_time_sec((*packet_tail)->header.stamp);
+        if (packet_tail_time > scan_horizon + 1e-6)
+        {
+            return ImuPacketResult::Unavailable;
+        }
+        if (packet_tail_time > propagation_horizon + 1e-6)
+        {
+            return completing_sonar_gap ? ImuPacketResult::Waiting
+                                        : ImuPacketResult::Unavailable;
         }
         if (!auxiliary_callbacks_ready(target_packet_end_time, latest_imu_time))
         {
-            return false;
+            return ImuPacketResult::Waiting;
         }
 
+        meas.imu.clear();
+        meas.lidar.reset(new PointCloudXYZI());
         meas.lidar_beg_time = packet_begin_time;
         double last_included_imu_time = packet_begin_time;
 
@@ -998,11 +1085,11 @@ private:
 
         if (meas.imu.empty())
         {
-            return false;
+            return ImuPacketResult::Unavailable;
         }
         meas.lidar_end_time = last_included_imu_time;
         lidar_end_time = meas.lidar_end_time;
-        return true;
+        return ImuPacketResult::Ready;
     }
 
     void DeclareParameters()
@@ -1308,6 +1395,7 @@ private:
 
     void reset_high_rate_odometry_prediction_locked()
     {
+        TRACE_STATE("reset_prediction", lidar_end_time, 0, 0);
         auto state = kf.get_x();
         auto covariance = kf.get_P();
         odometry_prediction_kf_.change_x(state);
@@ -1316,6 +1404,7 @@ private:
         odometry_prediction_acceleration_scale_ =
             p_imu->AccelerationScale();
         odometry_prediction_time_ = lidar_end_time;
+        odometry_prediction_correction_time_ = lidar_end_time;
         next_odometry_prediction_publish_time_ =
             lidar_end_time + 1.0 / odometry_publish_rate_hz;
         odometry_prediction_ready_ = true;
@@ -1375,41 +1464,8 @@ private:
                 return;
             }
 
-            std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> imu_samples;
-            {
-                std::lock_guard<std::mutex> imu_lock(
-                    input_buffers_.odometry_prediction_imu_mutex);
-                if (input_buffers_.odometry_prediction_imu_buffer.size() < 2U)
-                {
-                    return;
-                }
-
-                std::size_t begin_index = 0;
-                while (begin_index + 1U <
-                           input_buffers_.odometry_prediction_imu_buffer.size() &&
-                       get_time_sec(input_buffers_.odometry_prediction_imu_buffer[
-                                        begin_index + 1U]
-                                        ->header.stamp) <=
-                           odometry_prediction_time_ + 1e-9)
-                {
-                    ++begin_index;
-                }
-                imu_samples.assign(
-                    input_buffers_.odometry_prediction_imu_buffer.begin() + begin_index,
-                    input_buffers_.odometry_prediction_imu_buffer.end());
-
-                // Preserve enough history to rewind the private predictor
-                // when a delayed scan correction arrives, but do not recopy
-                // the complete mission at every 100 Hz timer tick.
-                const double keep_after =
-                    odometry_prediction_time_ - std::max(0.5, lidar_timeout);
-                while (input_buffers_.odometry_prediction_imu_buffer.size() > 2U &&
-                       get_time_sec(input_buffers_.odometry_prediction_imu_buffer[1]
-                                        ->header.stamp) < keep_after)
-                {
-                    input_buffers_.odometry_prediction_imu_buffer.pop_front();
-                }
-            }
+            const auto imu_samples = input_buffers_.PredictionSamples(
+                odometry_prediction_time_, odometry_prediction_correction_time_);
             if (imu_samples.size() < 2U)
             {
                 return;
@@ -1432,6 +1488,15 @@ private:
                 if (tail_time <= odometry_prediction_time_ + 1e-9)
                 {
                     continue;
+                }
+                if (head_time > odometry_prediction_time_ + 1e-6)
+                {
+                    odometry_prediction_ready_ = false;
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 5000,
+                        "IMU prediction history does not cover the corrected epoch. "
+                        "Waiting for a fresh filter correction.");
+                    return;
                 }
                 if (head_time >= pending_sonar_time - 1e-9 ||
                     tail_time > pending_sonar_time + 1e-9)
@@ -1585,10 +1650,10 @@ private:
         bool has_measurement = false;
         {
             std::lock_guard<std::mutex> lock(input_buffers_.mtx_buffer);
-            has_measurement = sync_packages(Measures);
+            has_measurement = sync_packages(Measures, imu_only_measure);
             if (!has_measurement)
             {
-                imu_only_measure = sync_imu_only_packages(Measures);
+                imu_only_measure = sync_imu_only_packages(Measures) == ImuPacketResult::Ready;
                 has_measurement = imu_only_measure;
             }
         }
@@ -1611,6 +1676,9 @@ private:
             }
 
             const double process_begin_time = input_buffers_.last_processed_time > 0.0 ? input_buffers_.last_processed_time : Measures.lidar_beg_time;
+            TRACE_STATE(imu_only_measure ? "packet_ins" : "packet_scan",
+                        process_begin_time, Measures.imu.size(),
+                        uwfl2::ReplayTrace::ImuFingerprint(Measures.imu));
             if (!noiseless_imu && auxiliary_fusion_enabled)
             {
                 const double now = Measures.lidar_end_time;
@@ -1627,6 +1695,7 @@ private:
                     aux_fusion_.initialize_pressure_reference_pose(kf.get_x());
                 }
                 input_buffers_.last_processed_time = Measures.lidar_end_time;
+                TRACE_STATE("initialized", Measures.lidar_end_time, p_imu->IsInitialized(), 0);
                 update_state_outputs();
                 return;
             }
@@ -1664,9 +1733,15 @@ private:
                 auto apply_timed_measurement =
                     [&](std::size_t measurement_index, ImuProcess::Ekf &event_kf) -> bool
                 {
-                    return aux_fusion_.apply_timed_measurement(
-                        timed_measurements[measurement_index], Measures.imu,
-                        event_kf);
+                    const auto &measurement = timed_measurements[measurement_index];
+                    TRACE_STATE("aux_prior", measurement.timestamp,
+                                static_cast<std::size_t>(measurement.kind),
+                                uwfl2::ReplayTrace::MeasurementFingerprint(measurement));
+                    const bool applied = aux_fusion_.apply_timed_measurement(
+                        measurement, Measures.imu, event_kf);
+                    TRACE_STATE("aux_after", measurement.timestamp, applied,
+                                uwfl2::ReplayTrace::MeasurementFingerprint(measurement));
+                    return applied;
                 };
 
                 p_imu->Process(Measures, kf, feats_undistort,
@@ -1674,14 +1749,20 @@ private:
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
             }
             // These are IMU observations, not auxiliary-sensor observations.
+            TRACE_STATE("propagated", Measures.lidar_end_time, 0, 0);
             // Apply them once after either propagation path so disabling DVL,
             // pressure, and magnetometer cannot silently change IMU behavior.
-            if (!Measures.imu.empty())
+            // Once sonar is established, these observations stay scan-rate.
+            // Temporary outage packets must not introduce extra attitude
+            // corrections. Pure INS retains its existing observation cadence.
+            if (!Measures.imu.empty() &&
+                (!imu_only_measure || input_buffers_.last_scan_end_time < 0.0))
             {
                 apply_imu_orientation_update(Measures.imu.back());
                 apply_accel_attitude_update(Measures.imu);
             }
             input_buffers_.last_processed_time = Measures.lidar_end_time;
+            TRACE_STATE("imu_attitude", Measures.lidar_end_time, 0, 0);
             update_state_outputs();
 
             if (imu_only_measure)
@@ -1796,6 +1877,8 @@ private:
             const bool update_applied =
                 kf.update_iterated_dyn_share_modified(lidar_update_cov,
                                                       solve_H_time);
+            TRACE_STATE("sonar_updated", Measures.lidar_end_time, effct_feat_num,
+                        uwfl2::ReplayTrace::NeighborFingerprint(Nearest_Points));
             lidar_update_result = lidar_scan_quality.evaluate_update(
                 static_cast<std::size_t>(feats_down_size),
                 static_cast<std::size_t>(lidar_update_max_effective_features),
@@ -2785,6 +2868,9 @@ private:
 
     uwfl2::MappingInputBuffers input_buffers_;
     bool aux_reorder_waiting = false;
+#ifdef UWFL2_REPLAY_TRACE
+    uwfl2::ReplayTrace replay_trace_;
+#endif
     double aux_reorder_target_time = -1.0;
     std::chrono::steady_clock::time_point aux_reorder_wait_start;
     AuxiliarySensorFusion aux_fusion_;
@@ -2829,6 +2915,7 @@ private:
     std::mutex odometry_prediction_state_mutex_;
     double odometry_prediction_acceleration_scale_ = 1.0;
     double odometry_prediction_time_ = -1.0;
+    double odometry_prediction_correction_time_ = -1.0;
     double next_odometry_prediction_publish_time_ = -1.0;
     double last_odometry_prediction_published_time_ = -1.0;
     std::chrono::steady_clock::time_point odometry_rate_window_wall_time_{};
