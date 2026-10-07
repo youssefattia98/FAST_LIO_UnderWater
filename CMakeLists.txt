@@ -125,7 +125,7 @@ target_include_directories(uwfl2_loop_closure PUBLIC
 )
 target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam yaml-cpp uwfl2_ikdtree ${PCL_LIBRARIES})
 
-add_executable(fastlio_mapping src/laserMapping.cpp src/preprocess.cpp
+add_executable(fastlio_mapping src/main.cpp src/laserMapping.cpp src/preprocess.cpp
   src/auxiliary_sensor_fusion.cpp src/IMU_Processing.cpp)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

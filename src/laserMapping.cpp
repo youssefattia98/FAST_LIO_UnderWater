@@ -49,10 +49,10 @@
 #include <so3_math.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
+#include "laser_mapping_node.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -955,247 +955,12 @@ class LaserMappingNode : public rclcpp::Node
 public:
     LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) : Node("laser_mapping", options)
     {
-        this->declare_parameter<bool>("publish.corrected_map_enable", false);
-        this->declare_parameter<string>("publish.corrected_map_topic",
-                                        "/uwfl2/corrected_map");
-
-        this->declare_parameter<string>("sonar.topic", "/points_raw");
-        this->declare_parameter<double>("sonar.frequency", 4.0);
-        this->declare_parameter<vector<double>>("sonar.extrinsic_T", vector<double>());
-        this->declare_parameter<vector<double>>("sonar.extrinsic_R", vector<double>());
-        this->declare_parameter<float>("sonar.max_range", 300.0F);
-        this->declare_parameter<double>("sonar.min_range", 0.01);
-        this->declare_parameter<double>("sonar.xy_covariance", LASER_POINT_COV_DEFAULT);
-        this->declare_parameter<double>("sonar.z_covariance", LASER_POINT_COV_DEFAULT);
-
-        this->declare_parameter<string>("imu.topic", "/imu/data");
-        this->declare_parameter<double>("imu.frequency", 100.0);
-        this->declare_parameter<double>("imu.odometry_publish_frequency", 100.0);
-        this->declare_parameter<double>("imu.initial_gravity_estimate", G_m_s2);
-        this->declare_parameter<double>("imu.gyr_cov", 0.1);
-        this->declare_parameter<double>("imu.acc_cov", 0.1);
-        this->declare_parameter<double>("imu.b_gyr_cov", 0.0001);
-        this->declare_parameter<double>("imu.b_acc_cov", 0.0001);
-        this->declare_parameter<double>("imu.init_b_gyr_cov", 0.0001);
-        this->declare_parameter<double>("imu.init_b_acc_cov", 0.001);
-        this->declare_parameter<double>("imu.init_gravity_covariance", 0.00001);
-        this->declare_parameter<double>("imu.orientation_covariance", 3.0461742e-6);
-        this->declare_parameter<double>("imu.accel_attitude_covariance", 1.2184697e-3);
-        this->declare_parameter<double>("imu.accel_attitude_norm_gate", 2.0);
-        this->declare_parameter<bool>("imu.noiseless", false);
-        ObservabilityManager::declare_parameters(*this);
-
-        this->declare_parameter<int>("mapping.max_iteration", 4);
-        this->declare_parameter<double>("mapping.filter_size_surf", 0.5);
-        this->declare_parameter<double>("mapping.filter_size_map", 0.5);
-        this->declare_parameter<double>("mapping.cube_side_length", 200.0);
-        this->declare_parameter<int>("mapping.minimum_scan_points", 5);
-        this->declare_parameter<int>("mapping.minimum_effective_features", 1);
-        this->declare_parameter<string>("mapping.map_file_path", "");
-        this->declare_parameter<bool>("mapping.map_save_enable", false);
-        this->declare_parameter<string>("mapping.world_frame", "world");
-        this->declare_parameter<vector<double>>("mapping.world_to_camera_init_T",
-                                                {0.0, 0.0, 0.0});
-        this->declare_parameter<vector<double>>("mapping.world_to_camera_init_R",
-                             {1.0, 0.0, 0.0,
-                              0.0, 1.0, 0.0,
-                              0.0, 0.0, 1.0});
-        this->declare_parameter<bool>("loop_closure.enable", false);
-        this->declare_parameter<string>("loop_closure.profile", "balanced");
-        aux_fusion_.declare_parameters(*this);
-
-        this->get_parameter_or<bool>("publish.corrected_map_enable",
-                                     corrected_map_publish_enabled_, false);
-        this->get_parameter_or<string>("publish.corrected_map_topic",
-                                       corrected_map_topic_, "/uwfl2/corrected_map");
-        this->get_parameter_or<string>("sonar.topic", lid_topic, "/points_raw");
-        this->get_parameter_or<double>("sonar.frequency", sonar_frequency_hz, 4.0);
-        this->get_parameter_or<vector<double>>("sonar.extrinsic_T", extrinT,
-                                               vector<double>());
-        this->get_parameter_or<vector<double>>("sonar.extrinsic_R", extrinR,
-                                               vector<double>());
-        this->get_parameter_or<float>("sonar.max_range", DET_RANGE, 300.0F);
-        this->get_parameter_or<double>("sonar.min_range", p_pre->blind, 0.01);
-        this->get_parameter_or<double>("sonar.xy_covariance", LASER_POINT_COV_XY,
-                                       double(LASER_POINT_COV_DEFAULT));
-        this->get_parameter_or<double>("sonar.z_covariance", LASER_POINT_COV_Z,
-                                       double(LASER_POINT_COV_DEFAULT));
-
-        this->get_parameter_or<string>("imu.topic", imu_topic, "/imu/data");
-        this->get_parameter_or<double>("imu.frequency", imu_rate_hz, 100.0);
-        this->get_parameter_or<double>("imu.odometry_publish_frequency",
-                                       odometry_publish_rate_hz, 100.0);
-        this->get_parameter_or<double>("imu.initial_gravity_estimate",
-                                       initial_gravity_estimate, G_m_s2);
-        this->get_parameter_or<double>("imu.gyr_cov", gyr_cov, 0.1);
-        this->get_parameter_or<double>("imu.acc_cov", acc_cov, 0.1);
-        this->get_parameter_or<double>("imu.b_gyr_cov", b_gyr_cov, 0.0001);
-        this->get_parameter_or<double>("imu.b_acc_cov", b_acc_cov, 0.0001);
-        this->get_parameter_or<double>("imu.init_b_gyr_cov", init_b_gyr_cov, 0.0001);
-        this->get_parameter_or<double>("imu.init_b_acc_cov", init_b_acc_cov, 0.001);
-        this->get_parameter_or<double>("imu.init_gravity_covariance", init_grav_cov,
-                                       0.00001);
-        this->get_parameter_or<double>("imu.orientation_covariance",
-                                       imu_orientation_cov, 3.0461742e-6);
-        this->get_parameter_or<double>("imu.accel_attitude_covariance",
-                                       accel_attitude_cov, 1.2184697e-3);
-        this->get_parameter_or<double>("imu.accel_attitude_norm_gate",
-                                       accel_attitude_norm_gate, 2.0);
-        this->get_parameter_or<bool>("imu.noiseless", noiseless_imu, false);
-
-        this->get_parameter_or<int>("mapping.max_iteration", NUM_MAX_ITERATIONS, 4);
-        this->get_parameter_or<double>("mapping.filter_size_surf",
-                                       filter_size_surf_min, 0.5);
-        this->get_parameter_or<double>("mapping.filter_size_map",
-                                       filter_size_map_min, 0.5);
-        this->get_parameter_or<double>("mapping.cube_side_length", cube_len, 200.0);
-        this->get_parameter_or<string>("mapping.map_file_path", map_file_path, "");
-        this->get_parameter_or<bool>("mapping.map_save_enable", pcd_save_en, false);
-        this->get_parameter_or<string>("mapping.world_frame", world_frame, "world");
+        DeclareParameters();
         std::vector<double> world_to_camera_init_T;
         std::vector<double> world_to_camera_init_R;
-        this->get_parameter_or<vector<double>>("mapping.world_to_camera_init_T",
-                            world_to_camera_init_T,
-                            {0.0, 0.0, 0.0});
-        this->get_parameter_or<vector<double>>("mapping.world_to_camera_init_R",
-                            world_to_camera_init_R,
-                            {1.0, 0.0, 0.0,
-                             0.0, 1.0, 0.0,
-                             0.0, 0.0, 1.0});
-        LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
-        LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
-        this->get_parameter_or<int>("mapping.minimum_scan_points",
-                                    minimum_scan_points, 5);
-        this->get_parameter_or<int>("mapping.minimum_effective_features",
-                                    minimum_effective_features, 1);
-        minimum_scan_points = std::max(1, minimum_scan_points);
-        minimum_effective_features = std::max(1, minimum_effective_features);
-        lidar_scan_quality = uwfl2::LidarScanQualityPolicy(
-            static_cast<std::size_t>(minimum_scan_points),
-            static_cast<std::size_t>(minimum_effective_features));
-        imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
-        accel_attitude_cov = std::max(1e-8, accel_attitude_cov);
-        accel_attitude_norm_gate = std::max(0.0, accel_attitude_norm_gate);
-        if (!std::isfinite(sonar_frequency_hz) || sonar_frequency_hz <= 0.0)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "sonar.frequency must be positive. Falling back to 4 Hz.");
-            sonar_frequency_hz = 4.0;
-        }
-        lidar_timeout = uwfl2::timeout_from_frequency(sonar_frequency_hz, 4.0);
-        if (imu_rate_hz <= 0.0)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "imu.frequency must be positive. Falling back to 100 Hz.");
-            imu_rate_hz = 100.0;
-        }
-        if (odometry_publish_rate_hz <= 0.0)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "imu.odometry_publish_frequency must be positive. Falling back to 100 Hz.");
-            odometry_publish_rate_hz = 100.0;
-        }
-        if (!std::isfinite(initial_gravity_estimate) ||
-            initial_gravity_estimate <= 0.0)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "imu.initial_gravity_estimate must be positive. Falling back to %.2f m/s^2.",
-                        G_m_s2);
-            initial_gravity_estimate = G_m_s2;
-        }
-        aux_fusion_.load_parameters(*this);
-        auxiliary_fusion_enabled = aux_fusion_.dvl_enabled() ||
-                                   aux_fusion_.pressure_enabled() ||
-                                   aux_fusion_.mag_enabled();
-        if (noiseless_imu)
-        {
-            // Simulation-only mode: IMU has zero bias/noise. Freeze ba/bg/grav so
-            // LiDAR residuals cannot rewrite them. Only valid for simulated IMUs.
-            b_acc_cov = std::min(b_acc_cov, 1e-10);
-            b_gyr_cov = std::min(b_gyr_cov, 1e-10);
-            init_b_acc_cov = 1e-10;
-            init_b_gyr_cov = 1e-10;
-            init_grav_cov = 1e-10;
-        }
-        // else: init_b_acc_cov / init_b_gyr_cov / init_grav_cov already loaded from YAML above.
-        const double disabled_aux_cov = 1e-12;
-        init_b_dvl_cov = aux_fusion_.dvl_enabled() ? aux_fusion_.dvl_b_init_cov() : disabled_aux_cov;
-        init_b_pressure_cov = aux_fusion_.pressure_enabled()
-                                  ? aux_fusion_.pressure_b_init_cov()
-                                  : disabled_aux_cov;
-
-        // /*** variables definition ***/
-        // int effect_feat_num = 0, frame_num = 0;
-        // double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
-        // bool flg_EKF_converged, EKF_stop_flg = 0;
-
-
-
-        memset(point_selected_surf, true, sizeof(point_selected_surf));
-        downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
-        memset(point_selected_surf, true, sizeof(point_selected_surf));
-
-        if (extrinT.size() != 3)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "sonar.extrinsic_T must have 3 values. Using zero translation.");
-            extrinT = {0.0, 0.0, 0.0};
-        }
-        if (extrinR.size() != 9)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "sonar.extrinsic_R must have 9 values. Using identity rotation.");
-            extrinR = {1.0, 0.0, 0.0,
-                       0.0, 1.0, 0.0,
-                       0.0, 0.0, 1.0};
-        }
-        Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
-        Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
-        p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
-        p_imu->set_gravity(initial_gravity_estimate);
-        p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
-        p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
-        p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
-        p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
-        p_imu->set_initial_cov(V3D(init_b_gyr_cov, init_b_gyr_cov, init_b_gyr_cov),
-                               V3D(init_b_acc_cov, init_b_acc_cov, init_b_acc_cov),
-                               init_grav_cov);
-        p_imu->set_initial_aux_cov(V3D(init_b_dvl_cov, init_b_dvl_cov, init_b_dvl_cov),
-                                   init_b_pressure_cov);
-        obs_manager.load_parameters(*this, b_gyr_cov, b_acc_cov);
-
-        fill(epsi, epsi + state_ikfom::DOF, 0.001);
-        kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
-        odometry_prediction_kf_.init_dyn_share(
-            get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
-
-        bool loop_enabled = false;
-        string loop_profile;
-        this->get_parameter_or<bool>("loop_closure.enable", loop_enabled, false);
-        this->get_parameter_or<string>("loop_closure.profile", loop_profile, "balanced");
-        if (loop_profile != "balanced" && loop_profile != "simulation")
-        {
-            throw std::invalid_argument(
-                "Unknown loop_closure.profile '" + loop_profile +
-                "' (expected balanced or simulation)");
-        }
-        const auto loop_profile_path = std::filesystem::path(
-            ament_index_cpp::get_package_share_directory("fast_lio")) /
-            "config" / "loop_closure" / (loop_profile + ".yaml");
-        auto loop_config =
-            uwfl2::loop_closure::load_config_profile(loop_profile_path);
-        loop_config.enabled = loop_enabled;
-        loop_visualization_enabled_ = loop_enabled;
-        loop_config.shadow_map.voxel_size_m = filter_size_map_min;
-        if (loop_config.enabled)
-        {
-            loop_closure_ =
-                std::make_unique<uwfl2::loop_closure::LoopClosureManager>(loop_config);
-            RCLCPP_INFO(this->get_logger(),
-                        "Loop closure enabled with '%s' profile: automatic place-based "
-                        "detection and RViz markers active (no elapsed-time gate).",
-                        loop_profile.c_str());
-        }
+        LoadParameters(world_to_camera_init_T, world_to_camera_init_R);
+        InitializeEstimator();
+        InitializeLoopClosure();
 
         /*** ROS subscribe initialization ***/
         sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -1331,6 +1096,263 @@ public:
     }
 
 private:
+
+    void DeclareParameters()
+    {
+        this->declare_parameter<bool>("publish.corrected_map_enable", false);
+        this->declare_parameter<string>("publish.corrected_map_topic",
+                                        "/uwfl2/corrected_map");
+
+        this->declare_parameter<string>("sonar.topic", "/points_raw");
+        this->declare_parameter<double>("sonar.frequency", 4.0);
+        this->declare_parameter<vector<double>>("sonar.extrinsic_T", vector<double>());
+        this->declare_parameter<vector<double>>("sonar.extrinsic_R", vector<double>());
+        this->declare_parameter<float>("sonar.max_range", 300.0F);
+        this->declare_parameter<double>("sonar.min_range", 0.01);
+        this->declare_parameter<double>("sonar.xy_covariance", LASER_POINT_COV_DEFAULT);
+        this->declare_parameter<double>("sonar.z_covariance", LASER_POINT_COV_DEFAULT);
+
+        this->declare_parameter<string>("imu.topic", "/imu/data");
+        this->declare_parameter<double>("imu.frequency", 100.0);
+        this->declare_parameter<double>("imu.odometry_publish_frequency", 100.0);
+        this->declare_parameter<double>("imu.initial_gravity_estimate", G_m_s2);
+        this->declare_parameter<double>("imu.gyr_cov", 0.1);
+        this->declare_parameter<double>("imu.acc_cov", 0.1);
+        this->declare_parameter<double>("imu.b_gyr_cov", 0.0001);
+        this->declare_parameter<double>("imu.b_acc_cov", 0.0001);
+        this->declare_parameter<double>("imu.init_b_gyr_cov", 0.0001);
+        this->declare_parameter<double>("imu.init_b_acc_cov", 0.001);
+        this->declare_parameter<double>("imu.init_gravity_covariance", 0.00001);
+        this->declare_parameter<double>("imu.orientation_covariance", 3.0461742e-6);
+        this->declare_parameter<double>("imu.accel_attitude_covariance", 1.2184697e-3);
+        this->declare_parameter<double>("imu.accel_attitude_norm_gate", 2.0);
+        this->declare_parameter<bool>("imu.noiseless", false);
+        ObservabilityManager::declare_parameters(*this);
+
+        this->declare_parameter<int>("mapping.max_iteration", 4);
+        this->declare_parameter<double>("mapping.filter_size_surf", 0.5);
+        this->declare_parameter<double>("mapping.filter_size_map", 0.5);
+        this->declare_parameter<double>("mapping.cube_side_length", 200.0);
+        this->declare_parameter<int>("mapping.minimum_scan_points", 5);
+        this->declare_parameter<int>("mapping.minimum_effective_features", 1);
+        this->declare_parameter<string>("mapping.map_file_path", "");
+        this->declare_parameter<bool>("mapping.map_save_enable", false);
+        this->declare_parameter<string>("mapping.world_frame", "world");
+        this->declare_parameter<vector<double>>("mapping.world_to_camera_init_T",
+                                                {0.0, 0.0, 0.0});
+        this->declare_parameter<vector<double>>("mapping.world_to_camera_init_R",
+                             {1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0});
+        this->declare_parameter<bool>("loop_closure.enable", false);
+        this->declare_parameter<string>("loop_closure.profile", "balanced");
+        aux_fusion_.declare_parameters(*this);
+
+    }
+
+    void LoadParameters(std::vector<double> &world_to_camera_init_T,
+                        std::vector<double> &world_to_camera_init_R)
+    {
+        this->get_parameter_or<bool>("publish.corrected_map_enable",
+                                     corrected_map_publish_enabled_, false);
+        this->get_parameter_or<string>("publish.corrected_map_topic",
+                                       corrected_map_topic_, "/uwfl2/corrected_map");
+        this->get_parameter_or<string>("sonar.topic", lid_topic, "/points_raw");
+        this->get_parameter_or<double>("sonar.frequency", sonar_frequency_hz, 4.0);
+        this->get_parameter_or<vector<double>>("sonar.extrinsic_T", extrinT,
+                                               vector<double>());
+        this->get_parameter_or<vector<double>>("sonar.extrinsic_R", extrinR,
+                                               vector<double>());
+        this->get_parameter_or<float>("sonar.max_range", DET_RANGE, 300.0F);
+        this->get_parameter_or<double>("sonar.min_range", p_pre->blind, 0.01);
+        this->get_parameter_or<double>("sonar.xy_covariance", LASER_POINT_COV_XY,
+                                       double(LASER_POINT_COV_DEFAULT));
+        this->get_parameter_or<double>("sonar.z_covariance", LASER_POINT_COV_Z,
+                                       double(LASER_POINT_COV_DEFAULT));
+
+        this->get_parameter_or<string>("imu.topic", imu_topic, "/imu/data");
+        this->get_parameter_or<double>("imu.frequency", imu_rate_hz, 100.0);
+        this->get_parameter_or<double>("imu.odometry_publish_frequency",
+                                       odometry_publish_rate_hz, 100.0);
+        this->get_parameter_or<double>("imu.initial_gravity_estimate",
+                                       initial_gravity_estimate, G_m_s2);
+        this->get_parameter_or<double>("imu.gyr_cov", gyr_cov, 0.1);
+        this->get_parameter_or<double>("imu.acc_cov", acc_cov, 0.1);
+        this->get_parameter_or<double>("imu.b_gyr_cov", b_gyr_cov, 0.0001);
+        this->get_parameter_or<double>("imu.b_acc_cov", b_acc_cov, 0.0001);
+        this->get_parameter_or<double>("imu.init_b_gyr_cov", init_b_gyr_cov, 0.0001);
+        this->get_parameter_or<double>("imu.init_b_acc_cov", init_b_acc_cov, 0.001);
+        this->get_parameter_or<double>("imu.init_gravity_covariance", init_grav_cov,
+                                       0.00001);
+        this->get_parameter_or<double>("imu.orientation_covariance",
+                                       imu_orientation_cov, 3.0461742e-6);
+        this->get_parameter_or<double>("imu.accel_attitude_covariance",
+                                       accel_attitude_cov, 1.2184697e-3);
+        this->get_parameter_or<double>("imu.accel_attitude_norm_gate",
+                                       accel_attitude_norm_gate, 2.0);
+        this->get_parameter_or<bool>("imu.noiseless", noiseless_imu, false);
+
+        this->get_parameter_or<int>("mapping.max_iteration", NUM_MAX_ITERATIONS, 4);
+        this->get_parameter_or<double>("mapping.filter_size_surf",
+                                       filter_size_surf_min, 0.5);
+        this->get_parameter_or<double>("mapping.filter_size_map",
+                                       filter_size_map_min, 0.5);
+        this->get_parameter_or<double>("mapping.cube_side_length", cube_len, 200.0);
+        this->get_parameter_or<string>("mapping.map_file_path", map_file_path, "");
+        this->get_parameter_or<bool>("mapping.map_save_enable", pcd_save_en, false);
+        this->get_parameter_or<string>("mapping.world_frame", world_frame, "world");
+        this->get_parameter_or<vector<double>>("mapping.world_to_camera_init_T",
+                            world_to_camera_init_T,
+                            {0.0, 0.0, 0.0});
+        this->get_parameter_or<vector<double>>("mapping.world_to_camera_init_R",
+                            world_to_camera_init_R,
+                            {1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.0, 0.0, 1.0});
+        LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
+        LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
+        this->get_parameter_or<int>("mapping.minimum_scan_points",
+                                    minimum_scan_points, 5);
+        this->get_parameter_or<int>("mapping.minimum_effective_features",
+                                    minimum_effective_features, 1);
+        minimum_scan_points = std::max(1, minimum_scan_points);
+        minimum_effective_features = std::max(1, minimum_effective_features);
+        lidar_scan_quality = uwfl2::LidarScanQualityPolicy(
+            static_cast<std::size_t>(minimum_scan_points),
+            static_cast<std::size_t>(minimum_effective_features));
+        imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
+        accel_attitude_cov = std::max(1e-8, accel_attitude_cov);
+        accel_attitude_norm_gate = std::max(0.0, accel_attitude_norm_gate);
+        if (!std::isfinite(sonar_frequency_hz) || sonar_frequency_hz <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "sonar.frequency must be positive. Falling back to 4 Hz.");
+            sonar_frequency_hz = 4.0;
+        }
+        lidar_timeout = uwfl2::timeout_from_frequency(sonar_frequency_hz, 4.0);
+        if (imu_rate_hz <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "imu.frequency must be positive. Falling back to 100 Hz.");
+            imu_rate_hz = 100.0;
+        }
+        if (odometry_publish_rate_hz <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "imu.odometry_publish_frequency must be positive. Falling back to 100 Hz.");
+            odometry_publish_rate_hz = 100.0;
+        }
+        if (!std::isfinite(initial_gravity_estimate) ||
+            initial_gravity_estimate <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "imu.initial_gravity_estimate must be positive. Falling back to %.2f m/s^2.",
+                        G_m_s2);
+            initial_gravity_estimate = G_m_s2;
+        }
+        aux_fusion_.load_parameters(*this);
+        auxiliary_fusion_enabled = aux_fusion_.dvl_enabled() ||
+                                   aux_fusion_.pressure_enabled() ||
+                                   aux_fusion_.mag_enabled();
+        if (noiseless_imu)
+        {
+            // Simulation-only mode: IMU has zero bias/noise. Freeze ba/bg/grav so
+            // LiDAR residuals cannot rewrite them. Only valid for simulated IMUs.
+            b_acc_cov = std::min(b_acc_cov, 1e-10);
+            b_gyr_cov = std::min(b_gyr_cov, 1e-10);
+            init_b_acc_cov = 1e-10;
+            init_b_gyr_cov = 1e-10;
+            init_grav_cov = 1e-10;
+        }
+        // else: init_b_acc_cov / init_b_gyr_cov / init_grav_cov already loaded from YAML above.
+        const double disabled_aux_cov = 1e-12;
+        init_b_dvl_cov = aux_fusion_.dvl_enabled() ? aux_fusion_.dvl_b_init_cov() : disabled_aux_cov;
+        init_b_pressure_cov = aux_fusion_.pressure_enabled()
+                                  ? aux_fusion_.pressure_b_init_cov()
+                                  : disabled_aux_cov;
+
+    }
+
+    void InitializeEstimator()
+    {
+        // /*** variables definition ***/
+        // int effect_feat_num = 0, frame_num = 0;
+        // double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
+        // bool flg_EKF_converged, EKF_stop_flg = 0;
+
+
+
+        memset(point_selected_surf, true, sizeof(point_selected_surf));
+        downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
+        memset(point_selected_surf, true, sizeof(point_selected_surf));
+
+        if (extrinT.size() != 3)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "sonar.extrinsic_T must have 3 values. Using zero translation.");
+            extrinT = {0.0, 0.0, 0.0};
+        }
+        if (extrinR.size() != 9)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "sonar.extrinsic_R must have 9 values. Using identity rotation.");
+            extrinR = {1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0};
+        }
+        Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
+        Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
+        p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
+        p_imu->set_gravity(initial_gravity_estimate);
+        p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
+        p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
+        p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
+        p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+        p_imu->set_initial_cov(V3D(init_b_gyr_cov, init_b_gyr_cov, init_b_gyr_cov),
+                               V3D(init_b_acc_cov, init_b_acc_cov, init_b_acc_cov),
+                               init_grav_cov);
+        p_imu->set_initial_aux_cov(V3D(init_b_dvl_cov, init_b_dvl_cov, init_b_dvl_cov),
+                                   init_b_pressure_cov);
+        obs_manager.load_parameters(*this, b_gyr_cov, b_acc_cov);
+
+        fill(epsi, epsi + state_ikfom::DOF, 0.001);
+        kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+        odometry_prediction_kf_.init_dyn_share(
+            get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+
+    }
+
+    void InitializeLoopClosure()
+    {
+        bool loop_enabled = false;
+        string loop_profile;
+        this->get_parameter_or<bool>("loop_closure.enable", loop_enabled, false);
+        this->get_parameter_or<string>("loop_closure.profile", loop_profile, "balanced");
+        if (loop_profile != "balanced" && loop_profile != "simulation")
+        {
+            throw std::invalid_argument(
+                "Unknown loop_closure.profile '" + loop_profile +
+                "' (expected balanced or simulation)");
+        }
+        const auto loop_profile_path = std::filesystem::path(
+            ament_index_cpp::get_package_share_directory("fast_lio")) /
+            "config" / "loop_closure" / (loop_profile + ".yaml");
+        auto loop_config =
+            uwfl2::loop_closure::load_config_profile(loop_profile_path);
+        loop_config.enabled = loop_enabled;
+        loop_visualization_enabled_ = loop_enabled;
+        loop_config.shadow_map.voxel_size_m = filter_size_map_min;
+        if (loop_config.enabled)
+        {
+            loop_closure_ =
+                std::make_unique<uwfl2::loop_closure::LoopClosureManager>(loop_config);
+            RCLCPP_INFO(this->get_logger(),
+                        "Loop closure enabled with '%s' profile: automatic place-based "
+                        "detection and RViz markers active (no elapsed-time gate).",
+                        loop_profile.c_str());
+        }
+
+    }
 
     void ensure_sonar_frame_attached_to_body(const std::string &frame_id)
     {
@@ -2928,19 +2950,7 @@ private:
     double epsi[state_ikfom::DOF] = {0.001};
 };
 
-int main(int argc, char** argv)
+std::shared_ptr<rclcpp::Node> MakeLaserMappingNode(const rclcpp::NodeOptions &options)
 {
-    rclcpp::init(argc, argv);
-
-    signal(SIGINT, SigHandle);
-
-    auto node = std::make_shared<LaserMappingNode>();
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
-    executor.add_node(node);
-    executor.spin();
-
-    if (rclcpp::ok())
-        rclcpp::shutdown();
-
-    return 0;
+    return std::make_shared<LaserMappingNode>(options);
 }
