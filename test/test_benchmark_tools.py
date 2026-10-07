@@ -14,6 +14,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import compare_lc_runs as compare
 import run_lc_benchmark as benchmark
+from compare_refactor_replays import shared_pose_comparison
 
 
 class BenchmarkToolsTest(unittest.TestCase):
@@ -90,6 +91,19 @@ class BenchmarkToolsTest(unittest.TestCase):
                 baseline=self.root, candidate=self.root)):
             with self.assertRaises(FileNotFoundError):
                 compare.main()
+
+    def test_shared_timestamp_comparison_does_not_align_poses(self):
+        left = {"odom_times": np.array([1.0, 2.0, 3.0]),
+                "odom_poses": np.repeat(np.eye(4)[None], 3, axis=0)}
+        right = {"odom_times": np.array([1.0, 3.0]),
+                 "odom_poses": np.repeat(np.eye(4)[None], 2, axis=0)}
+        report = shared_pose_comparison(left, right)
+        self.assertEqual(report["shared_samples"], 2)
+        self.assertEqual(report["position_max_m"], 0.0)
+        right["odom_poses"][1, 0, 3] = 0.2
+        self.assertEqual(shared_pose_comparison(left, right)["position_max_m"], 0.2)
+        right["odom_times"] += 10.0
+        self.assertEqual(shared_pose_comparison(left, right)["shared_samples"], 0)
 
 
 if __name__ == "__main__":

@@ -82,11 +82,40 @@ permission to implement multiple checkpoints together.
   worktree-diff provenance added. No estimator changes. Commit: see
   `git log --oneline --grep='CP-001'`.
 
-- [ ] **CP-002 - Establish characterization and baselines.** Add characterization
+- [x] **CP-002 - Establish characterization and baselines.** Add characterization
   tests for preprocessing, IMU startup, DVL/pressure/magnetic updates, timestamp
   ordering, fallback, and covariance. Establish current replay repeatability
   before structural edits. **Depends on:** CP-001. **Validation:** focused tests,
   clean build, and recorded short FL2/INS/UWFL2 baseline comparisons.
+  **Result (2026-10-07):** fresh isolated build succeeded; nine CTest
+  targets passed (60 C++ cases and nine Python fixtures). Fixtures cover padded
+  PointCloud2 rows/range filtering, empty input, startup gravity/bias/covariance,
+  original and interleaved empty-scan propagation, DVL native-frame Jacobians,
+  covariance floors, scalar magnetic correction/protected states/Joseph PSD,
+  pressure startup sample non-reuse, and callback queues including duplicates,
+  regression clearing, deferred/late samples and one-time consumption.
+  Initial failures retained in colcon logs: test-only `Time::to_msg()` is not
+  supported in Jazzy; a covariance fixture incorrectly assumed message covariance
+  was ignored. Both fixtures corrected without estimator changes.
+  Replays: 40 sensor seconds at x5, two repetitions of FL2/INS/UWFL2 on both
+  `DONE/sim3` and `DONE/backAndforth_CSSN3_processed`, domains 211--222,
+  LC disabled, display publication disabled, sonar-run maps saved. Artifacts:
+  `/home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline`.
+  Every run stores its exact command, runtime/resolved YAML, hashes, dirty diff,
+  output bag, map and timing/resource results. No original config/bag edits.
+  Strict sequence comparison already failed for identical FL2 simulation
+  replays because prediction output coalescing changed counts (907 vs 932);
+  their maps matched byte-for-byte and all 483 shared timestamp poses matched
+  exactly. Keep this failed strict result; use separately reported shared-time
+  comparisons plus exact saved maps, without spatial alignment, for cleanup.
+  All 12 runs completed; all six repeated-baseline comparisons passed. Shared
+  poses, complete published pose/twist covariance, and twist matched exactly;
+  all four sonar-map pairs matched SHA-256. INS correctly has no map. Published
+  covariance was finite/PSD in all runs. Comparison requires at least 100 common
+  source timestamps spanning 90% of the overlapping interval and differences
+  below `1e-9`; no frame/trajectory fitting or interpolation is performed.
+  The new comparison reports count/coverage differences rather than asserting
+  identical publication schedules. Commit: see `git log --oneline --grep='CP-002'`.
 
 - [ ] **CP-003 - Remove unused plotting integration.** Remove the unused Python
   plotting include, `matplotlibcpp.h`, and their CMake requirements. Preserve
@@ -217,6 +246,10 @@ These are not automatic refactors or permission to change behavior:
   separately approved behavior-changing bug fix.
 - **Estimator mathematics:** review LC mean/covariance consistency and correlated
   graph information before changing covariance formulas.
+- **Covariance policy:** current DVL fusion uses valid driver covariance with
+  YAML diagonal floors; pressure similarly floors scalar driver variance. This
+  is not "always ignore message covariance." Characterize it, do not silently
+  change it during cleanup. Any policy change requires separate approval.
 - **Paper/code differences:** pressure Jacobian restrictions, magnetic gyro-bias
   protection, and descriptions of iterated auxiliary updates need reconciliation.
   Do not edit the paper as part of these cleanup checkpoints.
@@ -253,3 +286,30 @@ When requested to `Execute CP-XXX`:
 - Plan saved after read-only inspection; all implementation checkpoints remain
   pending. Production code, existing configuration edits, and RViz edits were
   left unchanged.
+
+### CP-001 And CP-002 Commands
+
+CP-001 commit: `69c778f`. CP-002: test/tool-only changes; production baseline
+remains that commit's estimator, with captured worktree diff. Initial clean
+build took 180 s and failed on the test-only Jazzy API; repaired build took
+44 s, later expanded fixtures rebuilt in 43 s. Final CTest took 2.01 s.
+
+```bash
+cd /home/attia/ros2_ws
+source /opt/ros/jazzy/setup.bash
+MAKEFLAGS=-j2 colcon build --packages-select fast_lio --symlink-install \
+  --build-base build_refactor --install-base install_refactor \
+  --cmake-args -DBUILD_TESTING=ON
+ROS_DOMAIN_ID=229 ctest --test-dir build_refactor/fast_lio --output-on-failure
+cd /home/attia/ros2_ws/src/FAST_LIO_UnderWater
+/usr/bin/python3 tools/run_refactor_replays.py \
+  --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline \
+  --workspace-setup /home/attia/ros2_ws/install_refactor/setup.bash --repeats 2
+/usr/bin/python3 tools/compare_refactor_replays.py \
+  --baseline /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline \
+  --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline/repeatability.json
+```
+
+`runs.json` retains each expanded replay command; `repeatability.json` retains
+all six comparisons. Failed strict sample-by-sample comparison is preserved as
+`sim3_FL2_1/comparison.json`, not replaced by a passing report.

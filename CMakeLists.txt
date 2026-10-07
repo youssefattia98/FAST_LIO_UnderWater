@@ -183,6 +183,21 @@ if(BUILD_TESTING)
   ament_add_gtest(test_odometry_covariance
     test/test_odometry_covariance.cpp)
   target_include_directories(test_odometry_covariance PRIVATE include)
+
+  ament_add_gtest(test_estimator_characterization test/test_estimator_characterization.cpp)
+  target_include_directories(test_estimator_characterization PRIVATE include src ${PCL_INCLUDE_DIRS})
+  ament_target_dependencies(test_estimator_characterization ${dependencies})
+  if(COMMAND rosidl_get_typesupport_target)
+    target_link_libraries(test_estimator_characterization ${cpp_typesupport_target})
+  else()
+    rosidl_target_interfaces(test_estimator_characterization ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  endif()
+
+  ament_add_gtest(test_preprocess_characterization
+    test/test_preprocess_characterization.cpp src/preprocess.cpp)
+  target_include_directories(test_preprocess_characterization PRIVATE src ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_preprocess_characterization ${PCL_LIBRARIES})
+  ament_target_dependencies(test_preprocess_characterization rclcpp sensor_msgs pcl_conversions)
 endif()
 
 # ---------------- Install --------------- #
