@@ -4,9 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
-#include <fstream>
 #include <functional>
-#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -24,6 +22,7 @@
 #include "common_lib.h"
 #include "dvl_measurement_model.hpp"
 #include "magnetometer_heading_model.hpp"
+#include "sensor_parameter_utils.hpp"
 #include "use-ikfom.hpp"
 
 class AuxiliarySensorFusion
@@ -181,23 +180,18 @@ public:
                                                     {1.0, 0.0, 0.0,
                                                      0.0, 1.0, 0.0,
                                                      0.0, 0.0, 1.0});
-        node.declare_parameter<double>("dvl.dvl_timeout", 0.25);
+        node.declare_parameter<double>("dvl.frequency", 15.0);
 
         node.declare_parameter<bool>("pressure.enable", false);
         node.declare_parameter<std::string>("pressure.topic", "/auv/pressure/scaled2");
         node.declare_parameter<std::vector<double>>("pressure.extrinsic_T", {-0.24219, -0.03954, 0.01898});
-        node.declare_parameter<double>("pressure.pressure_timeout", 0.25);
+        node.declare_parameter<double>("pressure.timeout", 0.25);
 
-        node.declare_parameter<double>("dvl.velocity_cov", 4e-4);
-        node.declare_parameter<double>("dvl.innovation_gate_sigma", 5.0);
-        node.declare_parameter<double>("dvl.bias_init_cov", 1e-8);
-        node.declare_parameter<double>("pressure.pressure_cov", 1e4);
-        node.declare_parameter<double>("pressure.bias_init_cov", 1e4);
-        node.declare_parameter<double>("pressure.innovation_gate_sigma", 0.0);
+        node.declare_parameter<double>("dvl.covariance", 4e-4);
+        node.declare_parameter<double>("dvl.init_covariance", 1e-8);
+        node.declare_parameter<double>("pressure.covariance", 1e4);
+        node.declare_parameter<double>("pressure.init_covariance", 1e4);
         node.declare_parameter<double>("pressure.fluid_density", 1025.0);
-        node.declare_parameter<double>("pressure.gravity", 9.80665);
-        node.declare_parameter<double>("pressure.surface_pressure", 101325.0);
-        node.declare_parameter<double>("pressure.surface_z", 0.0);
 
         node.declare_parameter<bool>("magnetometer.enable", false);
         node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
@@ -208,30 +202,23 @@ public:
             {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
         node.declare_parameter<double>("magnetometer.mag_cov", 1849.0);
         node.declare_parameter<double>("magnetometer.heading_cov_floor", 1e-6);
-        node.declare_parameter<double>("magnetometer.innovation_gate_sigma", 3.0);
-        node.declare_parameter<double>("magnetometer.mag_timeout", 0.5);
-        node.declare_parameter<std::string>("magnetometer.debug_csv_path", "");
+        node.declare_parameter<double>("magnetometer.timeout", 0.5);
     }
 
     void load_parameters(rclcpp::Node &node)
     {
         node.get_parameter_or<bool>("dvl.enable", dvl_enable_, false);
         node.get_parameter_or<std::string>("dvl.topic", dvl_topic_, "/auv/dvl");
-        node.get_parameter_or<double>("dvl.dvl_timeout", dvl_timeout_, 0.25);
-        node.get_parameter_or<double>("dvl.velocity_cov", dvl_velocity_cov_, 4e-4);
-        node.get_parameter_or<double>("dvl.innovation_gate_sigma", dvl_innovation_gate_sigma_, 5.0);
-        node.get_parameter_or<double>("dvl.bias_init_cov", dvl_b_init_cov_, 1e-8);
+        node.get_parameter_or<double>("dvl.frequency", dvl_frequency_, 15.0);
+        node.get_parameter_or<double>("dvl.covariance", dvl_velocity_cov_, 4e-4);
+        node.get_parameter_or<double>("dvl.init_covariance", dvl_b_init_cov_, 1e-8);
 
         node.get_parameter_or<bool>("pressure.enable", pressure_enable_, false);
         node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
-        node.get_parameter_or<double>("pressure.pressure_timeout", pressure_timeout_, 0.25);
-        node.get_parameter_or<double>("pressure.pressure_cov", pressure_cov_, 1e4);
-        node.get_parameter_or<double>("pressure.bias_init_cov", pressure_b_init_cov_, 1e4);
-        node.get_parameter_or<double>("pressure.innovation_gate_sigma", pressure_innovation_gate_sigma_, 0.0);
+        node.get_parameter_or<double>("pressure.timeout", pressure_timeout_, 0.25);
+        node.get_parameter_or<double>("pressure.covariance", pressure_cov_, 1e4);
+        node.get_parameter_or<double>("pressure.init_covariance", pressure_b_init_cov_, 1e4);
         node.get_parameter_or<double>("pressure.fluid_density", pressure_fluid_density_, 1025.0);
-        node.get_parameter_or<double>("pressure.gravity", pressure_gravity_, 9.80665);
-        node.get_parameter_or<double>("pressure.surface_pressure", pressure_surface_pressure_, 101325.0);
-        node.get_parameter_or<double>("pressure.surface_z", pressure_surface_z_, 0.0);
 
         std::vector<double> dvl_T;
         std::vector<double> dvl_R;
@@ -279,9 +266,7 @@ public:
         node.get_parameter_or<std::string>("magnetometer.topic", mag_topic_, "/auv/imu/magnetic_field");
         node.get_parameter_or<double>("magnetometer.mag_cov", mag_cov_, 1849.0);
         node.get_parameter_or<double>("magnetometer.heading_cov_floor", mag_heading_cov_floor_, 1e-6);
-        node.get_parameter_or<double>("magnetometer.innovation_gate_sigma", mag_innovation_gate_sigma_, 3.0);
-        node.get_parameter_or<double>("magnetometer.mag_timeout", mag_timeout_, 0.5);
-        node.get_parameter_or<std::string>("magnetometer.debug_csv_path", mag_debug_csv_path_, "");
+        node.get_parameter_or<double>("magnetometer.timeout", mag_timeout_, 0.5);
 
         std::vector<double> mag_extrinsic_R, hard_iron, soft_iron;
         node.get_parameter_or<std::vector<double>>("magnetometer.extrinsic_R", mag_extrinsic_R,
@@ -319,23 +304,25 @@ public:
             mag_soft_iron_.setIdentity();
         }
 
-        dvl_timeout_ = std::max(0.0, dvl_timeout_);
+        if (!std::isfinite(dvl_frequency_) || dvl_frequency_ <= 0.0)
+        {
+            RCLCPP_WARN(node.get_logger(),
+                        "dvl.frequency must be positive. Falling back to 15 Hz.");
+            dvl_frequency_ = 15.0;
+        }
+        dvl_timeout_ = uwfl2::timeout_from_frequency(dvl_frequency_, 15.0);
         pressure_timeout_ = std::max(0.0, pressure_timeout_);
         mag_timeout_ = std::max(0.0, mag_timeout_);
         dvl_velocity_cov_ = std::max(1e-12, dvl_velocity_cov_);
-        dvl_innovation_gate_sigma_ = std::max(0.0, dvl_innovation_gate_sigma_);
         dvl_b_init_cov_ = std::max(1e-12, dvl_b_init_cov_);
         pressure_cov_ = std::max(1e-6, pressure_cov_);
         pressure_b_init_cov_ = std::max(1e-12, pressure_b_init_cov_);
-        pressure_innovation_gate_sigma_ = std::max(0.0, pressure_innovation_gate_sigma_);
         pressure_fluid_density_ = std::max(1e-6, pressure_fluid_density_);
-        pressure_gravity_ = std::max(1e-6, pressure_gravity_);
         // Magnetometer covariance may be expressed in Tesla^2 in simulation
         // (around 1e-15) or in uT^2 for real bags. Keep only a numerical floor
         // here; a 1e-6 floor silently disables Tesla-scale magnetometer fusion.
         mag_cov_ = std::max(1e-18, mag_cov_);
         mag_heading_cov_floor_ = std::max(1e-12, mag_heading_cov_floor_);
-        mag_innovation_gate_sigma_ = std::max(0.0, mag_innovation_gate_sigma_);
     }
 
     void create_subscriptions(rclcpp::Node &node,
@@ -455,8 +442,9 @@ public:
                     return false;
                 }
                 const auto &msg = *measurement.pressure;
-                const double residual_pa = pressure_residual(msg, kf.get_x());
-                const double residual_depth = residual_pa / pressure_scale();
+                const state_ikfom state = kf.get_x();
+                const double residual_pa = pressure_residual(msg, state);
+                const double residual_depth = residual_pa / pressure_scale(state);
                 summary.pressure_count++;
                 summary.pressure_res_depth_sum += std::abs(residual_depth);
                 summary.pressure_res_depth_max = std::max(summary.pressure_res_depth_max,
@@ -526,13 +514,13 @@ public:
     const std::string &dvl_topic() const { return dvl_topic_; }
     const std::string &pressure_topic() const { return pressure_topic_; }
     const std::string &mag_topic() const { return mag_topic_; }
+    double dvl_frequency() const { return dvl_frequency_; }
     double dvl_timeout() const { return dvl_timeout_; }
     double pressure_timeout() const { return pressure_timeout_; }
     double mag_timeout() const { return mag_timeout_; }
     const V3D &dvl_T() const { return dvl_T_; }
     const V3D &pressure_T() const { return pressure_T_; }
     double dvl_velocity_cov() const { return dvl_velocity_cov_; }
-    double dvl_innovation_gate_sigma() const { return dvl_innovation_gate_sigma_; }
     double dvl_b_init_cov() const { return dvl_b_init_cov_; }
     double pressure_b_init_cov() const { return pressure_b_init_cov_; }
 
@@ -593,9 +581,10 @@ private:
         return v.allFinite();
     }
 
-    double pressure_scale() const
+    double pressure_scale(const state_ikfom &state) const
     {
-        return pressure_fluid_density_ * pressure_gravity_;
+        const V3D gravity(state.grav[0], state.grav[1], state.grav[2]);
+        return pressure_fluid_density_ * std::max(1e-6, gravity.norm());
     }
 
     // Use the message covariance when valid, but never below the configured fallback.
@@ -747,28 +736,9 @@ private:
         return result;
     }
 
-    bool dvl_passes_gate(const DvlLinearization &dvl,
-                         const typename Ekf::cov &P) const
+    bool dvl_measurement_is_valid(const DvlLinearization &dvl) const
     {
-        if (!dvl.valid)
-        {
-            return false;
-        }
-        if (dvl_innovation_gate_sigma_ <= 0.0)
-        {
-            return true;
-        }
-
-        const M3D innovation_covariance = dvl.H * P * dvl.H.transpose() + dvl.R;
-        Eigen::LDLT<M3D> ldlt(innovation_covariance);
-        if (ldlt.info() != Eigen::Success)
-        {
-            return false;
-        }
-        const double nis = dvl.residual.dot(ldlt.solve(dvl.residual));
-        const double threshold = 3.0 * dvl_innovation_gate_sigma_ *
-                                 dvl_innovation_gate_sigma_;
-        return std::isfinite(nis) && nis <= threshold;
+        return dvl.valid;
     }
 
     Eigen::RowVector3d world_z_axis_in_camera_init() const
@@ -784,15 +754,11 @@ private:
         return camera_init_T_in_world_.z() + world_z_axis_in_camera_init().dot(sensor_ci);
     }
 
-    double pressure_raw_depth(const state_ikfom &state) const
-    {
-        return pressure_surface_z_ - pressure_sensor_z_world(state);
-    }
-
     double pressure_prediction(const state_ikfom &state) const
     {
         const double relative_depth = pressure_reference_sensor_z_world_ - pressure_sensor_z_world(state);
-        return pressure_surface_pressure_ + pressure_scale() * relative_depth + state.b_pressure[0];
+        return pressure_reference_pa_ + pressure_scale(state) * relative_depth +
+               state.b_pressure[0];
     }
 
     double pressure_residual(const PressureMsg &msg, const state_ikfom &state) const
@@ -825,7 +791,7 @@ private:
         const double relative_depth =
             pressure_reference_sensor_z_world_ - pressure_sensor_z_world(state);
         pressure_init_sum_ +=
-            msg.fluid_pressure - pressure_scale() * relative_depth;
+            msg.fluid_pressure - pressure_scale(state) * relative_depth;
         ++pressure_init_samples_collected_;
         if (pressure_init_samples_collected_ < kPressureReferenceSamples)
         {
@@ -834,7 +800,7 @@ private:
 
         const double mean_pressure =
             pressure_init_sum_ / static_cast<double>(pressure_init_samples_collected_);
-        pressure_surface_pressure_ = mean_pressure - state.b_pressure[0];
+        pressure_reference_pa_ = mean_pressure - state.b_pressure[0];
         pressure_ref_finalized_ = true;
         // Reference samples calibrate the local datum and are not reused as
         // independent Kalman measurements. Fusion starts with the next sample.
@@ -856,7 +822,7 @@ private:
         const state_ikfom state = kf.get_x();
         const DvlLinearization dvl =
             build_dvl_linearization(make_dvl_observation(msg, imu_sample, state), state);
-        if (!dvl_passes_gate(dvl, kf.get_P()))
+        if (!dvl_measurement_is_valid(dvl))
         {
             return false;
         }
@@ -877,26 +843,11 @@ private:
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
         // Pressure measures World-z depth, but it must not correct horizontal
         // x/y. Use the World-z prediction and let the EKF correct only local depth.
-        H(0, 2) = -pressure_scale() * world_z_axis_in_camera_init().z();
+        H(0, 2) = -pressure_scale(state) * world_z_axis_in_camera_init().z();
         H(0, 26) = 1.0;
 
         Eigen::MatrixXd R = Eigen::MatrixXd::Zero(1, 1);
         R(0, 0) = covariance_or_fallback(msg.variance, pressure_cov_);
-
-        if (pressure_innovation_gate_sigma_ > 0.0)
-        {
-            const typename Ekf::cov P = kf.get_P();
-            const Eigen::MatrixXd S = H * P * H.transpose() + R;
-            if (!S.allFinite() || S(0, 0) <= 0.0)
-            {
-                return false;
-            }
-            const double sigma_pres = std::sqrt(S(0, 0));
-            if (std::abs(residual(0)) > pressure_innovation_gate_sigma_ * sigma_pres)
-            {
-                return false;
-            }
-        }
 
         return apply_pressure_depth_update(residual, H, R, kf);
     }
@@ -1202,8 +1153,7 @@ private:
     }
 
     bool collect_mag_reference_sample(const state_ikfom &state,
-                                      const V3D &magnetic_body,
-                                      const char *&reason)
+                                      const V3D &magnetic_body)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (mag_reference_ready_)
@@ -1223,7 +1173,6 @@ private:
 
         if (!magnetic_body.allFinite() || magnetic_body.norm() <= 1e-12)
         {
-            reason = "invalid_sample";
             return false;
         }
 
@@ -1237,7 +1186,6 @@ private:
         if (!underwater_fastlio::magnetometer::reference_sample_is_inlier(
                 sample_local, running_mean, mag_reference_sample_count_))
         {
-            reason = "reference_outlier";
             return false;
         }
 
@@ -1253,7 +1201,6 @@ private:
                                    mag_vertical_local_.dot(sample_local);
             if (horizontal.norm() <= 1e-12)
             {
-                reason = "reference_horizontal_field_too_small";
                 return false;
             }
             mag_reference_sum_local_ = sample_local;
@@ -1261,7 +1208,6 @@ private:
             mag_reference_sample_count_ = 1;
             mag_reference_local_ = sample_local;
             mag_horizontal_reference_local_ = horizontal.normalized();
-            reason = "reference_seeded";
             return false;
         }
 
@@ -1364,15 +1310,9 @@ private:
 
         const state_ikfom state = kf.get_x();
         const V3D measured = mag_corrected(msg);
-        const double yaw_before = yaw_from_state(state);
 
-        const char *reference_reason = "reference_initializing";
-        if (!collect_mag_reference_sample(state, measured, reference_reason))
+        if (!collect_mag_reference_sample(state, measured))
         {
-            write_mag_debug_row(msg, measured, {}, 0.0, 0.0, 0.0,
-                                V3D::Zero(), V3D::Zero(), V3D::Zero(),
-                                false, reference_reason, yaw_before, yaw_before,
-                                0.0, 0.0, 0.0);
             return false;
         }
         V3D h0;
@@ -1389,10 +1329,6 @@ private:
             state.rot.toRotationMatrix(), measured, h0, vertical_local);
         if (!observation.valid)
         {
-            write_mag_debug_row(msg, measured, observation, 0.0, 0.0, 0.0,
-                                V3D::Zero(), V3D::Zero(), V3D::Zero(),
-                                false, "heading_geometry_degenerate", yaw_before, yaw_before,
-                                0.0, 0.0, 0.0);
             return false;
         }
         if (innovation_out)
@@ -1414,22 +1350,6 @@ private:
         if (!H.allFinite() || !P.allFinite() || !std::isfinite(innovation_variance) ||
             innovation_variance <= 0.0)
         {
-            write_mag_debug_row(msg, measured, observation, heading_covariance,
-                                innovation_variance, 0.0, V3D::Zero(), V3D::Zero(), V3D::Zero(),
-                                false, "invalid_innovation_covariance", yaw_before, yaw_before,
-                                0.0, 0.0, 0.0);
-            return false;
-        }
-
-        const double nis = observation.innovation * observation.innovation /
-                           innovation_variance;
-        if (mag_innovation_gate_sigma_ > 0.0 &&
-            nis > mag_innovation_gate_sigma_ * mag_innovation_gate_sigma_)
-        {
-            write_mag_debug_row(msg, measured, observation, heading_covariance,
-                                innovation_variance, nis, V3D::Zero(), V3D::Zero(), V3D::Zero(),
-                                false, "innovation_nis", yaw_before, yaw_before,
-                                0.0, 0.0, 0.0);
             return false;
         }
 
@@ -1441,10 +1361,6 @@ private:
         const Eigen::VectorXd dx_dyn = K * observation.innovation;
         if (!finite_vector(dx_dyn))
         {
-            write_mag_debug_row(msg, measured, observation, heading_covariance,
-                                innovation_variance, nis, K.segment<3>(3), K.segment<3>(15),
-                                V3D::Zero(), false, "nonfinite_dx", yaw_before, yaw_before,
-                                0.0, 0.0, 0.0);
             return false;
         }
 
@@ -1462,11 +1378,6 @@ private:
         const double protected_state_change = protected_dx.cwiseAbs().maxCoeff();
         if (tilt_axis_change > 1e-10 || protected_state_change > 1e-14)
         {
-            write_mag_debug_row(msg, measured, observation, heading_covariance,
-                                innovation_variance, nis, K.segment<3>(3), K.segment<3>(15),
-                                dx_dyn.segment<3>(3), false, "roll_pitch_protection_failed",
-                                yaw_before, yaw_before, tilt_axis_change,
-                                protected_state_change, 0.0);
             return false;
         }
 
@@ -1474,110 +1385,17 @@ private:
             P, H, K, heading_covariance);
         P_new = underwater_fastlio::magnetometer::transport_attitude_covariance(
             P_new, dx_dyn.segment<3>(3), 3);
-        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> covariance_solver(P_new);
-        const double min_eigenvalue = covariance_solver.info() == Eigen::Success
-            ? covariance_solver.eigenvalues().minCoeff()
-            : -std::numeric_limits<double>::infinity();
         if (!underwater_fastlio::magnetometer::covariance_is_psd(P_new, 1e-9))
         {
-            write_mag_debug_row(msg, measured, observation, heading_covariance,
-                                innovation_variance, nis, K.segment<3>(3), K.segment<3>(15),
-                                dx_dyn.segment<3>(3), false, "covariance_not_psd",
-                                yaw_before, yaw_before, tilt_axis_change,
-                                protected_state_change, min_eigenvalue);
             return false;
         }
 
         accumulate_corrected_mag_reference_sample(updated_state, measured);
 
-        const auto after_observation = underwater_fastlio::magnetometer::evaluate(
-            updated_state.rot.toRotationMatrix(), measured, h0, vertical_local);
-        const double yaw_after = yaw_from_state(updated_state);
         kf.change_x(updated_state);
         typename Ekf::cov fixed_P = P_new;
         kf.change_P(fixed_P);
-        write_mag_debug_row(msg, measured, observation, heading_covariance,
-                            innovation_variance, nis, K.segment<3>(3), K.segment<3>(15),
-                            dx_dyn.segment<3>(3), true, "accepted", yaw_before, yaw_after,
-                            tilt_axis_change, protected_state_change, min_eigenvalue,
-                            after_observation.valid ? after_observation.innovation : 0.0);
         return true;
-    }
-
-    double yaw_from_state(const state_ikfom &state) const
-    {
-        const M3D R = state.rot.toRotationMatrix();
-        return std::atan2(R(1, 0), R(0, 0));
-    }
-
-    void write_mag_debug_row(const MagMsg &msg,
-                             const V3D &measured,
-                             const underwater_fastlio::magnetometer::HeadingObservation &observation,
-                             double heading_covariance,
-                             double innovation_cov,
-                             double nis,
-                             const V3D &attitude_gain,
-                             const V3D &gyro_bias_gain,
-                             const V3D &attitude_correction,
-                             bool accepted,
-                             const char *reason,
-                             double yaw_before,
-                             double yaw_after,
-                             double tilt_axis_change,
-                             double protected_state_change,
-                             double min_covariance_eigenvalue,
-                             double innovation_after = 0.0)
-    {
-        if (mag_debug_csv_path_.empty())
-        {
-            return;
-        }
-        if (!mag_debug_csv_.is_open())
-        {
-            mag_debug_csv_.open(mag_debug_csv_path_, std::ios::out | std::ios::trunc);
-            if (!mag_debug_csv_.is_open())
-            {
-                mag_debug_csv_path_.clear();
-                return;
-            }
-            mag_debug_csv_ << "stamp,accepted,reason,innovation_rad,innovation_after_rad,heading_cov,S,nis,"
-                              "yaw_before_rad,yaw_after_rad,tilt_axis_change,protected_state_change,min_cov_eig,"
-                              "meas_x,meas_y,meas_z,g_x,g_y,g_z,p_x,p_y,p_z,"
-                              "k_theta_x,k_theta_y,k_theta_z,k_bg_x,k_bg_y,k_bg_z,"
-                              "dx_theta_x,dx_theta_y,dx_theta_z\n";
-        }
-        mag_debug_csv_ << std::setprecision(12)
-                       << get_time_sec(msg.header.stamp) << ','
-                       << (accepted ? 1 : 0) << ','
-                       << reason << ','
-                       << observation.innovation << ','
-                       << innovation_after << ','
-                       << heading_covariance << ','
-                       << innovation_cov << ','
-                       << nis << ','
-                       << yaw_before << ','
-                       << yaw_after << ','
-                       << tilt_axis_change << ','
-                       << protected_state_change << ','
-                       << min_covariance_eigenvalue << ','
-                       << measured.x() << ','
-                       << measured.y() << ','
-                       << measured.z() << ','
-                       << observation.g.x() << ','
-                       << observation.g.y() << ','
-                       << observation.g.z() << ','
-                       << observation.p.x() << ','
-                       << observation.p.y() << ','
-                       << observation.p.z() << ','
-                       << attitude_gain.x() << ','
-                       << attitude_gain.y() << ','
-                       << attitude_gain.z() << ','
-                       << gyro_bias_gain.x() << ','
-                       << gyro_bias_gain.y() << ','
-                       << gyro_bias_gain.z() << ','
-                       << attitude_correction.x() << ','
-                       << attitude_correction.y() << ','
-                       << attitude_correction.z() << '\n';
     }
 
     bool dvl_enable_ = false;
@@ -1586,21 +1404,18 @@ private:
     std::string dvl_topic_ = "/auv/dvl";
     std::string pressure_topic_ = "/auv/pressure/scaled2";
     std::string mag_topic_ = "/auv/imu/magnetic_field";
+    double dvl_frequency_ = 15.0;
     double dvl_timeout_ = 0.25;
     double pressure_timeout_ = 0.25;
     double mag_timeout_ = 0.5;
     double dvl_velocity_cov_ = 4e-4;
-    double dvl_innovation_gate_sigma_ = 5.0;
     double dvl_b_init_cov_ = 1e-8;
     double pressure_cov_ = 1e4;
     double pressure_b_init_cov_ = 1e4;
-    double pressure_innovation_gate_sigma_ = 0.0;
     V3D camera_init_T_in_world_ = V3D::Zero();
     M3D camera_init_R_in_world_ = M3D::Identity();
     double pressure_fluid_density_ = 1025.0;
-    double pressure_gravity_ = 9.80665;
-    double pressure_surface_pressure_ = 101325.0;
-    double pressure_surface_z_ = 0.0;
+    double pressure_reference_pa_ = 0.0;
     double pressure_reference_sensor_z_world_ = 0.0;
     static constexpr int kPressureReferenceSamples = 20;
     double pressure_init_sum_ = 0.0;
@@ -1611,7 +1426,6 @@ private:
     bool last_pressure_raw_valid_ = false;
     double mag_cov_ = 1849.0;
     double mag_heading_cov_floor_ = 1e-6;
-    double mag_innovation_gate_sigma_ = 3.0;
     static constexpr int kMagReferenceSamples = 20;
     V3D mag_reference_sum_local_ = V3D::Zero();
     std::vector<V3D> mag_reference_samples_local_;
@@ -1630,8 +1444,6 @@ private:
     M3D mag_R_BM_ = M3D::Identity();
     V3D mag_hard_iron_ = V3D::Zero();
     M3D mag_soft_iron_ = M3D::Identity();
-    std::string mag_debug_csv_path_;
-    std::ofstream mag_debug_csv_;
 
     mutable std::mutex mutex_;
     std::deque<DvlMsg::ConstSharedPtr> dvl_buffer_;

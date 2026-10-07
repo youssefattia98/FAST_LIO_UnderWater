@@ -172,6 +172,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_corrected_map_visualization
     test/test_corrected_map_visualization.cpp)
   target_include_directories(test_corrected_map_visualization PRIVATE include)
+
+  ament_add_gtest(test_sensor_parameter_utils
+    test/test_sensor_parameter_utils.cpp)
+  target_include_directories(test_sensor_parameter_utils PRIVATE include)
 endif()
 
 # ---------------- Install --------------- #

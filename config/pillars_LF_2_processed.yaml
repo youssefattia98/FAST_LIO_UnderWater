@@ -1,125 +1,80 @@
 /**:
-    ros__parameters:
-        # Maximum IEKF scan-to-map correction iterations per LiDAR/sonar frame.
-        max_iteration: 16
-        # Voxel leaf size in meters for downsampling the current scan before matching.
-        filter_size_surf: 0.3
-        # Voxel leaf size in meters for downsampling points inserted into the map/ikd-tree.
-        filter_size_map: 0.3
-        cube_side_length: 60.0
-        map_file_path: "./test.pcd"
-
-        feature_extract_enable: false
-        filter_size_corner: 0.5
-        point_filter_num: 2
-
-        common:
-            lid_topic:  "/sonar_point_cloud"               
-            imu_topic:  "/auv/imu/data_raw"
-            world_frame: "World"
-            
-
-            # pillars_LF_2_processed/
-            world_to_camera_init_T: [ 18.64484601173051,
-                        -69.78822449188986,
-                        -5.18412338770762 ]
-
-            world_to_camera_init_R: [  0.75916001,  0.65039857, -0.02564704,
-                                    -0.65056677,  0.75944568,  0.00226569,
-                                    0.02095114,  0.01496510,  0.99966849 ]
-            imu_rate_hz: 200.0
-            lidar_timeout: 0.25
-            gravity_m_s2: 9.8
-
-            odometry_publish_rate_hz: 100.0
-        preprocess:
-            blind: 0.2
-
-            scan_line: 16
-            scan_rate: 10
-            timestamp_unit: 2
-        mapping:
-            minimum_scan_points: 5
-            minimum_effective_features: 1
-            noiseless_imu: false
-            obs_manager_sonar_timeout: 0.0
-            obs_manager_ramp_time: 0.0
-            obs_manager_freeze_cov: 1.0e-10
-            imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
-
-
-            b_acc_cov: 0.0001
-            b_gyr_cov: 0.0001
-            init_b_acc_cov: 0.001
-            init_b_gyr_cov: 0.0001
-            init_grav_cov: 0.00001
-
-
-            acc_cov: 0.1
-            gyr_cov: 0.0000055
-            imu_orientation_cov: 3.0461742e-6
-            imu_orientation_gate_sigma: 0.0
-            laser_point_cov_xy: 1e-5
-            laser_point_cov_z: 1e-5
-            fov_degree:    90.0
-            det_range:     15.0
-            extrinsic_T: [ 0.09382, -0.02148, 0.11593 ]
-            extrinsic_R: [ 0.994521895, 0.0, 0.104528463,
-                0.0,         1.0, 0.0,
-                -0.104528463, 0.0, 0.994521895 ]
-
-            accel_attitude_cov: 1.2184697e-3
-            accel_attitude_norm_gate: 2.0
-            laser_point_cov: 0.001
-        dvl:
-            enable: true
-            topic: "/auv/dvl"
-            extrinsic_T: [ -0.079, -0.09691, -0.25938 ]
-            extrinsic_R: [ 1., 0., 0.,
-                           0., 1., 0.,
-                           0., 0., 1. ]
-            dvl_timeout: 0.55
-            velocity_cov: 5.0e-5
-            innovation_gate_sigma: 0.0
-            # Keep DVL bias fixed near zero in no-sonar mode so velocity cannot be hidden in b_dvl.
-            bias_init_cov: 1.0e-10
-
-        pressure:
-            enable: true
-            topic: "/auv/pressure/scaled2"
-            extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
-            surface_pressure: 111506.0
-            pressure_timeout: 0.25
-            fluid_density: 1028.0
-            gravity: 9.80665
-            pressure_cov: 4.0652529e4
-            innovation_gate_sigma: 0.0
-            surface_z: 0.0
-
-            bias_init_cov: 1.0e4
-        magnetometer:
-            enable: true
-            topic: "/auv/imu/magnetic_field"
-            hard_iron_offset: [ -0.30, -19.96, 86.70 ]
-            soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
-                                 0.000000, -1.257623, 0.000000,
-                                 0.000000,  0.000000, -1.000000 ]
-            mag_cov: 1.0
-            innovation_gate_sigma: 0.0
-            mag_timeout: 0.25
-
-            debug_csv_path: ""
-            extrinsic_R: [ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 ]
-            heading_cov_floor: 1.0e-6
-        publish:
-            map_en: true
-            path_en:  false
-
-            effect_map_en: false
-        pcd_save:
-            pcd_save_en: false
-            interval: -1
-
-        loop_closure:
-            enable: false
-            profile: "balanced"
+  ros__parameters:
+    sonar:
+      topic: /sonar_point_cloud
+      frequency: 4.0
+      extrinsic_T: [0.09382, -0.02148, 0.11593]
+      extrinsic_R: [0.994521895, 0.0, 0.104528463, 0.0, 1.0, 0.0, -0.104528463, 0.0, 0.994521895]
+      fov_degree: 90.0
+      max_range: 15.0
+      min_range: 0.2
+      xy_covariance: 1.0e-05
+      z_covariance: 1.0e-05
+      scan_line: 16
+      scan_rate: 10
+      timestamp_unit: 2
+      point_filter_num: 2
+      feature_extract_enable: false
+    imu:
+      topic: /auv/imu/data_raw
+      frequency: 200.0
+      odometry_publish_frequency: 100.0
+      initial_gravity_estimate: 9.8
+      noiseless: false
+      gyr_cov: 5.5e-06
+      acc_cov: 0.1
+      b_gyr_cov: 0.0001
+      b_acc_cov: 0.0001
+      init_b_gyr_cov: 0.0001
+      init_b_acc_cov: 0.001
+      init_gravity_covariance: 1.0e-05
+      orientation_covariance: 3.0461742e-06
+      accel_attitude_covariance: 0.0012184697
+      accel_attitude_norm_gate: 2.0
+      sonar_outage_timeout: 0.0
+      sonar_return_ramp_time: 0.0
+      unobservable_bias_covariance: 1.0e-10
+    dvl:
+      enable: true
+      topic: /auv/dvl
+      frequency: 15.0
+      extrinsic_T: [-0.079, -0.09691, -0.25938]
+      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      covariance: 5.0e-05
+      init_covariance: 1.0e-10
+    pressure:
+      enable: true
+      topic: /auv/pressure/scaled2
+      timeout: 0.25
+      extrinsic_T: [-0.24219, -0.03954, 0.01898]
+      fluid_density: 1028.0
+      covariance: 40652.529
+      init_covariance: 10000.0
+    magnetometer:
+      enable: true
+      topic: /auv/imu/magnetic_field
+      timeout: 0.25
+      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      hard_iron_offset: [-0.3, -19.96, 86.7]
+      soft_iron_matrix: [-1.257623, 0.0, 0.0, 0.0, -1.257623, 0.0, 0.0, 0.0, -1.0]
+      mag_cov: 1.0
+      heading_cov_floor: 1.0e-06
+    mapping:
+      max_iteration: 16
+      filter_size_surf: 0.3
+      filter_size_map: 0.3
+      cube_side_length: 60.0
+      minimum_scan_points: 5
+      minimum_effective_features: 1
+      world_frame: World
+      world_to_camera_init_T: [18.64484601173051, -69.78822449188986, -5.18412338770762]
+      world_to_camera_init_R: [0.75916001, 0.65039857, -0.02564704, -0.65056677, 0.75944568, 0.00226569, 0.02095114, 0.0149651,
+        0.99966849]
+      map_file_path: ./test.pcd
+      map_save_enable: false
+    publish:
+      corrected_map_enable: true
+      corrected_map_topic: /uwfl2/corrected_map
+    loop_closure:
+      enable: false
+      profile: balanced

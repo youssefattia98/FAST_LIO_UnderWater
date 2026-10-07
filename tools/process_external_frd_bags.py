@@ -77,7 +77,7 @@ def convert_dvl(message) -> TwistWithCovarianceStamped:
     transform_vector(converted.twist.twist.linear, FRD_TO_FLU_SIGNS)
     transform_vector(converted.twist.twist.angular, FRD_TO_FLU_SIGNS)
     # TwistStamped has no covariance. Zeros deliberately make UWFL2 use the
-    # configured dvl.velocity_cov rather than inventing sensor uncertainty.
+    # configured dvl.covariance rather than inventing sensor uncertainty.
     converted.twist.covariance = [0.0] * 36
     return converted
 

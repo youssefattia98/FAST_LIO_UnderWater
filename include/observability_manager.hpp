@@ -57,20 +57,20 @@ public:
         return now - last_sonar_time_;
     }
 
-    // Declare ROS2 parameters for this manager under the "mapping" namespace.
+    // Declare ROS2 parameters for this manager under the IMU namespace.
     static void declare_parameters(rclcpp::Node &node)
     {
-        node.declare_parameter<double>("mapping.obs_manager_sonar_timeout", 0.5);
-        node.declare_parameter<double>("mapping.obs_manager_ramp_time",     2.0);
-        node.declare_parameter<double>("mapping.obs_manager_freeze_cov",    1e-10);
+        node.declare_parameter<double>("imu.sonar_outage_timeout", 0.5);
+        node.declare_parameter<double>("imu.sonar_return_ramp_time", 2.0);
+        node.declare_parameter<double>("imu.unobservable_bias_covariance", 1e-10);
     }
 
     // Load parameters. normal_bg/ba_cov are taken from the existing b_gyr_cov / b_acc_cov config.
     void load_parameters(rclcpp::Node &node, double normal_bg_cov, double normal_ba_cov)
     {
-        node.get_parameter_or("mapping.obs_manager_sonar_timeout", p_.sonar_timeout_s, 0.5);
-        node.get_parameter_or("mapping.obs_manager_ramp_time",     p_.ramp_time_s,     2.0);
-        node.get_parameter_or("mapping.obs_manager_freeze_cov",    p_.freeze_cov,      1e-10);
+        node.get_parameter_or("imu.sonar_outage_timeout", p_.sonar_timeout_s, 0.5);
+        node.get_parameter_or("imu.sonar_return_ramp_time", p_.ramp_time_s, 2.0);
+        node.get_parameter_or("imu.unobservable_bias_covariance", p_.freeze_cov, 1e-10);
         p_.normal_bg_cov = normal_bg_cov;
         p_.normal_ba_cov = normal_ba_cov;
     }
