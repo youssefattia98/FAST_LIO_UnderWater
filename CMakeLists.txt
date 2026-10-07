@@ -7,17 +7,14 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-ADD_COMPILE_OPTIONS(-std=c++17)
-ADD_COMPILE_OPTIONS(-std=c++17)
-set(CMAKE_CXX_FLAGS "-std=c++17 -O3")
-
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fexceptions")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -pthread -fexceptions")
+# Preserve the inherited optimization and flag precedence; CMake supplies C++17.
+set(CMAKE_CXX_FLAGS "-O3 -pthread -fexceptions")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 message("Current CPU archtecture: ${CMAKE_SYSTEM_PROCESSOR}")
@@ -63,34 +60,32 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}   ${OpenMP_C_FLAGS}")
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(rclcpp_components REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-find_package(pcl_ros REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 set(dependencies
   ament_index_cpp
   rclcpp
-  rclcpp_components
   geometry_msgs
   nav_msgs
   sensor_msgs
   std_msgs
   std_srvs
   visualization_msgs
-  pcl_ros
+  tf2_ros
   pcl_conversions
 )
 
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common io kdtree)
+find_package(PCL REQUIRED COMPONENTS common io kdtree filters)
 find_package(GTSAM 4.2 REQUIRED MODULE)
 find_package(yaml-cpp REQUIRED)
 
