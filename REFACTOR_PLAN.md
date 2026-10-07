@@ -97,7 +97,8 @@ permission to implement multiple checkpoints together.
   Initial failures retained in colcon logs: test-only `Time::to_msg()` is not
   supported in Jazzy; a covariance fixture incorrectly assumed message covariance
   was ignored. Both fixtures corrected without estimator changes.
-  Replays: 40 sensor seconds at x5, two repetitions of FL2/INS/UWFL2 on both
+  Replays: first 40 seconds of bag recording time at x5 (not necessarily 40
+  simulated-clock seconds), two repetitions of FL2/INS/UWFL2 on both
   `DONE/sim3` and `DONE/backAndforth_CSSN3_processed`, domains 211--222,
   LC disabled, display publication disabled, sonar-run maps saved. Artifacts:
   `/home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline`.
@@ -117,10 +118,18 @@ permission to implement multiple checkpoints together.
   The new comparison reports count/coverage differences rather than asserting
   identical publication schedules. Commit: see `git log --oneline --grep='CP-002'`.
 
-- [ ] **CP-003 - Remove unused plotting integration.** Remove the unused Python
+- [x] **CP-003 - Remove unused plotting integration.** Remove the unused Python
   plotting include, `matplotlibcpp.h`, and their CMake requirements. Preserve
   Python analysis tools. **Depends on:** CP-002. **Validation:** clean build,
   complete active test suite, and executable startup.
+  **Result (2026-10-07):** deleted the 2,498-line unused wrapper, `Python.h`,
+  plotting discovery and Python C++ linkage/includes. Python analysis and test
+  tools remain. Fresh `build_refactor_clean`/`install_refactor_clean` build
+  passed in 206 s; all nine CTest targets passed in 2.04 s. `readelf -d` confirms
+  no `libpython` dependency. Disabled-LC sim3 FL2 startup/replay/map-save passed;
+  all 822 shared-timestamp poses/covariances and map SHA matched the baseline
+  exactly. Results: `REFACTOR_RESULTS/cp003_smoke/cleanup_comparison.json`.
+  Commit: see `git log --oneline --grep='CP-003'`.
 
 - [ ] **CP-004 - Delete confirmed legacy mapping/state code.** Delete confirmed
   unused mapping helpers, globals, legacy `StatesGroup`, the unused duplicate
@@ -313,3 +322,23 @@ cd /home/attia/ros2_ws/src/FAST_LIO_UnderWater
 `runs.json` retains each expanded replay command; `repeatability.json` retains
 all six comparisons. Failed strict sample-by-sample comparison is preserved as
 `sim3_FL2_1/comparison.json`, not replaced by a passing report.
+
+### CP-003 Commands
+
+CP-002 commit: `cd333fe`. Fresh build/test as above, substituting
+`build_refactor_clean` and `install_refactor_clean`. Startup/regression command:
+
+```bash
+/usr/bin/python3 tools/run_lc_benchmark.py --label cp003_sim3_FL2 --domain-id 223 \
+  --bag /home/attia/ros2_ws/bags/DONE/sim3 \
+  --config /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline/sim3_FL2.yaml \
+  --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp003_smoke \
+  --workspace-setup /home/attia/ros2_ws/install_refactor_clean/setup.bash \
+  --duration 40 --rate 5 --loop-closure false --map-publication false \
+  --map-save true --drain-seconds 3
+readelf -d /home/attia/ros2_ws/build_refactor_clean/fast_lio/fastlio_mapping
+```
+
+Comparison uses `shared_pose_comparison`, `odometry_fields`, `disabled_loop`,
+and `matching_maps` from the repaired tools; asserts zero shared-pose/covariance
+differences and equal saved-map hashes. No production tuning or frame changes.

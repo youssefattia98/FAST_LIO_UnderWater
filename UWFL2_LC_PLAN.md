@@ -2357,6 +2357,29 @@ ros2 bag play \
 
 ## Stop Conditions
 
+## Behavior-Preserving Refactor (2026-10-07)
+
+Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-004 only.
+
+- [x] CP-001: verification tools repaired; eight initial Python fixtures passed.
+  Commit `69c778f`.
+- [x] CP-002: characterization and repeated disabled-LC baselines established.
+  Commit `cd333fe`; 60 C++ cases plus nine Python fixtures, nine CTest targets.
+  Twelve first-40-recording-second replays, x5, isolated domains 211--222;
+  shared state/covariance/twist identical and all four saved-map pairs identical.
+  Artifacts `/home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline` include
+  commands, hashes, dirty diff, resources, and repeatability report. Failed
+  strict sequence comparison retained: publication coalescing changes counts.
+- [x] CP-003: unused C++ plotting integration removed; clean build 206 s,
+  complete suite 2.04 s, sim3 FL2 startup/replay/map-save regression passed.
+  Domain 223, x5, results `REFACTOR_RESULTS/cp003_smoke`; 822 common poses and
+  covariance identical, saved map byte-identical. No state/math/frame edits.
+  Commit: `git log --oneline --grep='CP-003'`.
+- [ ] CP-004: confirmed legacy mapping/state deletion; pending build and replay.
+
+Exact commands and failures are recorded in `REFACTOR_PLAN.md`; each replay
+manifest retains the expanded command. Existing user YAML/RViz edits preserved.
+
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
 
 - GTSAM cannot be provided reproducibly for ROS 2 Jazzy and Jetson aarch64.
