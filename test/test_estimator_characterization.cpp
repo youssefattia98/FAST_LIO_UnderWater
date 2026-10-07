@@ -3,9 +3,58 @@
 
 #include "IMU_Processing.hpp"
 #include "auxiliary_sensor_fusion.hpp"
+#include "mapping_input_buffers.hpp"
+#include <thread>
 
 namespace
 {
+TEST(InputBuffers, RegressionClearsPairedSonarQueuesAndPredictionHistory)
+{
+    uwfl2::MappingInputBuffers buffers;
+    auto cloud = std::make_shared<PointCloudXYZI>();
+    buffers.PushSonar(cloud, 2.0);
+    buffers.PushSonar(cloud, 3.0);
+    buffers.lidar_pushed = true;
+    buffers.PushSonar(cloud, 1.0);
+    EXPECT_FALSE(buffers.lidar_pushed);
+    ASSERT_EQ(buffers.time_buffer.size(), 1U);
+    ASSERT_EQ(buffers.lidar_buffer.size(), 1U);
+    EXPECT_DOUBLE_EQ(buffers.time_buffer.front(), 1.0);
+    for (const double time : {2.0, 3.0, 1.0})
+    {
+        auto message = std::make_shared<sensor_msgs::msg::Imu>();
+        message->header.stamp = get_ros_time(time);
+        buffers.PushImu(message);
+    }
+    EXPECT_EQ(buffers.imu_buffer.size(), 1U);
+    EXPECT_EQ(buffers.odometry_prediction_imu_buffer.size(), 1U);
+    EXPECT_DOUBLE_EQ(buffers.last_timestamp_imu, 1.0);
+}
+
+TEST(InputBuffers, ConcurrentSensorsKeepQueuesPairedAndHistoryBounded)
+{
+    uwfl2::MappingInputBuffers buffers;
+    auto cloud = std::make_shared<PointCloudXYZI>();
+    std::thread sonar([&] {
+        for (int i = 0; i < 200; ++i) buffers.PushSonar(cloud, 1.0 + i * 0.1);
+    });
+    std::thread imu([&] {
+        for (int i = 0; i < 4100; ++i)
+        {
+            auto message = std::make_shared<sensor_msgs::msg::Imu>();
+            message->header.stamp = get_ros_time(1.0 + i * 0.001);
+            buffers.PushImu(message);
+        }
+    });
+    sonar.join();
+    imu.join();
+    EXPECT_EQ(buffers.time_buffer.size(), 200U);
+    EXPECT_EQ(buffers.lidar_buffer.size(), buffers.time_buffer.size());
+    EXPECT_EQ(buffers.imu_buffer.size(), 4100U);
+    EXPECT_EQ(buffers.odometry_prediction_imu_buffer.size(), 4000U);
+    EXPECT_EQ(buffers.imu_buffer.back(), buffers.odometry_prediction_imu_buffer.back());
+}
+
 using Ekf = ImuProcess::Ekf;
 
 struct RosContext
