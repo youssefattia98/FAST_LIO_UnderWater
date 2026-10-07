@@ -2380,8 +2380,9 @@ Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-004 only.
   first-40-recording-second windows, domains 211--216; artifacts
   `/home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp004_candidate/comparison.json`.
   Live transforms, removed-point-history drain, dense `/map_save`, sensors,
-  IKFOM, propagation and LC ownership unchanged. Commit:
-  `git log --oneline --grep='CP-004'`. Stopped; no later checkpoint implemented.
+  IKFOM, propagation and LC ownership unchanged. Commit `2c82a96`.
+  Stopped; no later checkpoint implemented. Replay wall totals: baseline twelve
+  windows 632.3 s, final six windows 315.8 s; these are not speedup claims.
 
 Exact commands and failures are recorded in `REFACTOR_PLAN.md`; each replay
 manifest retains the expanded command. Existing user YAML/RViz edits preserved.

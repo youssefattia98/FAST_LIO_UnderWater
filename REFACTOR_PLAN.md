@@ -322,6 +322,18 @@ When requested to `Execute CP-XXX`:
 
 ## Execution Log
 
+| Completed checkpoint | Implementation commit |
+| --- | --- |
+| CP-001 | `69c778f` |
+| CP-002 | `cd333fe` |
+| CP-003 | `efc20d4` |
+| CP-004 | `2c82a96` |
+
+Replay totals: CP-002 632.3 s across twelve windows; CP-004 315.8 s across
+six windows. CP-003 adds one short startup/regression run. Artifacts retain
+per-process CPU/RAM and timing measurements; no performance improvement is
+claimed from these wall-time totals. No checkpoint after CP-004 was executed.
+
 - Plan saved after read-only inspection; all implementation checkpoints remain
   pending. Production code, existing configuration edits, and RViz edits were
   left unchanged.
