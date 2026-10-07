@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 import rosbag2_py
 from nav_msgs.msg import Odometry
 from rclpy.serialization import deserialize_message
-from sensor_msgs.msg import PointCloud2
 
 from analyze_lc_run import read_trajectories, rotation_angle
 
@@ -42,7 +42,7 @@ def header_stamps(path: Path) -> dict[str, np.ndarray]:
             input_serialization_format="cdr", output_serialization_format="cdr"
         ),
     )
-    topics = {"/Odometry": Odometry, "/cloud_registered": PointCloud2}
+    topics = {"/Odometry": Odometry}
     reader.set_filter(rosbag2_py.StorageFilter(topics=list(topics)))
     result: dict[str, list[float]] = {topic: [] for topic in topics}
     while reader.has_next():
@@ -57,7 +57,10 @@ def header_stamps(path: Path) -> dict[str, np.ndarray]:
 def max_pose_difference(
     baseline: dict[str, Any], candidate: dict[str, Any]
 ) -> tuple[float, float]:
-    if len(baseline["odom_poses"]) != len(candidate["odom_poses"]):
+    if (not len(baseline["odom_poses"])
+            or len(baseline["odom_poses"]) != len(candidate["odom_poses"])
+            or not np.isfinite(baseline["odom_poses"]).all()
+            or not np.isfinite(candidate["odom_poses"]).all()):
         return math.inf, math.inf
     position = np.linalg.norm(
         baseline["odom_poses"][:, :3, 3] - candidate["odom_poses"][:, :3, 3], axis=1
@@ -71,6 +74,22 @@ def max_pose_difference(
             else rotation_angle(a[:3, :3].T @ b[:3, :3])
         )
     return float(np.max(position, initial=0.0)), float(np.max(rotation, initial=0.0))
+
+
+def matching_maps(baseline: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    left, right = baseline.get("map", {}), candidate.get("map", {})
+    return bool(left.get("exists") and right.get("exists")
+                and left.get("points", 0) and right.get("points", 0)
+                and left.get("sha256") and left["sha256"] == right.get("sha256"))
+
+
+def disabled_loop(path: Path) -> bool:
+    document = yaml.safe_load((path / "runtime_config.yaml").read_text())
+    try:
+        disabled = document["/**"]["ros__parameters"]["loop_closure"]["enable"] is False
+    except (KeyError, TypeError):
+        return False
+    return disabled and not (path / "keyframes.csv").exists()
 
 
 def main() -> int:
@@ -95,6 +114,8 @@ def main() -> int:
             stamp_differences[topic] = None
             if args.check_message_counts:
                 failures.append(f"{topic} count differs: {len(left)} != {len(right)}")
+            if args.check_timestamps:
+                failures.append(f"{topic} timestamp comparison unavailable: unequal counts")
         else:
             difference = float(np.max(np.abs(left - right), initial=0.0))
             stamp_differences[topic] = difference
@@ -105,16 +126,12 @@ def main() -> int:
         failures.append(f"maximum position difference {position_max:.3e} m")
     if rotation_max > args.rotation_tolerance_rad:
         failures.append(f"maximum rotation difference {rotation_max:.3e} rad")
-    map_hash_equal = (
-        baseline_metrics["map"].get("sha256")
-        == candidate_metrics["map"].get("sha256")
-    )
+    map_hash_equal = matching_maps(baseline_metrics, candidate_metrics)
     if args.check_map and not map_hash_equal:
-        failures.append("map SHA-256 differs")
+        failures.append("map evidence missing, empty, or SHA-256 differs")
     if args.require_no_loop:
-        runtime = (candidate / "runtime_config.yaml").read_text()
-        if "enable: false" not in runtime or (candidate / "keyframes.csv").exists():
-            failures.append("candidate is not a clean disabled-loop run")
+        if not disabled_loop(baseline) or not disabled_loop(candidate):
+            failures.append("both runs must explicitly disable loop closure")
 
     baseline_lag = baseline_metrics.get("monitor", {}).get(
         "ros_time_processing_lag_s", {}

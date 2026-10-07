@@ -273,10 +273,14 @@ def write_runtime_config(args: argparse.Namespace, output: Path) -> Path:
     if not isinstance(loop_parameters, dict):
         raise ValueError("loop_closure must be a parameter mapping")
     loop_parameters["enable"] = args.loop_closure == "true"
-    loop_parameters["automatic_detection_enable"] = args.detection == "true"
-    loop_parameters["diagnostics_directory"] = str(output)
-    if args.loop_visualization is not None:
-        loop_parameters["visualization_enable"] = args.loop_visualization == "true"
+    # Detection and markers are built-in when LC is enabled, not independent knobs.
+    if args.detection is not None and (args.detection == "true") != loop_parameters["enable"]:
+        raise ValueError("--detection cannot differ from --loop-closure")
+    if args.loop_visualization is not None and (args.loop_visualization == "true") != loop_parameters["enable"]:
+        raise ValueError("--loop-visualization cannot differ from --loop-closure")
+    mapping_parameters = parameters.setdefault("mapping", {})
+    if not isinstance(mapping_parameters, dict):
+        raise ValueError("mapping must be a parameter mapping")
     for argument, parameter in (
         (args.max_iteration, "max_iteration"),
         (args.filter_size_surf, "filter_size_surf"),
@@ -284,12 +288,15 @@ def write_runtime_config(args: argparse.Namespace, output: Path) -> Path:
         (args.cube_side_length, "cube_side_length"),
     ):
         if argument is not None:
-            parameters[parameter] = argument
+            mapping_parameters[parameter] = argument
+    if args.map_save == "true":
+        mapping_parameters["map_save_enable"] = True
+        mapping_parameters["map_file_path"] = str(output / "test.pcd")
     if args.map_publication is not None:
         publish_parameters = parameters.setdefault("publish", {})
         if not isinstance(publish_parameters, dict):
             raise ValueError("publish must be a parameter mapping")
-        publish_parameters["map_en"] = args.map_publication == "true"
+        publish_parameters["corrected_map_enable"] = args.map_publication == "true"
     runtime_config = output / "runtime_config.yaml"
     runtime_config.write_text(yaml.safe_dump(document, sort_keys=False))
     return runtime_config
@@ -327,7 +334,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--loop-closure", choices=("true", "false"), default="false")
-    parser.add_argument("--detection", choices=("true", "false"), default="false")
+    parser.add_argument("--detection", choices=("true", "false"))
     parser.add_argument("--loop-visualization", choices=("true", "false"))
     parser.add_argument("--map-publication", choices=("true", "false"))
     parser.add_argument(
@@ -343,6 +350,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rviz", action="store_true")
     parser.add_argument("--inject-loop", type=Path)
     parser.add_argument("--workspace", type=Path, default=Path("/home/attia/ros2_ws"))
+    parser.add_argument("--workspace-setup", type=Path,
+                        help="Explicit setup.bash for an isolated validation build.")
     parser.add_argument("--ros-setup", type=Path, default=Path("/opt/ros/jazzy/setup.bash"))
     parser.add_argument("--drain-seconds", type=float, default=10.0)
     parser.add_argument("--startup-timeout", type=float, default=60.0)
@@ -375,7 +384,7 @@ def validate_args(args: argparse.Namespace, source_root: Path) -> None:
         (args.bag, "bag"),
         (args.config, "config"),
         (args.ros_setup, "ROS setup"),
-        (args.workspace / "install" / "setup.bash", "workspace setup"),
+        (args.workspace_setup or args.workspace / "install" / "setup.bash", "workspace setup"),
         (source_root / "launch" / "mapping.launch.py", "mapping launch file"),
     ):
         if not path.exists():
@@ -401,7 +410,9 @@ def main() -> int:
     args.ros_setup = args.ros_setup.expanduser().resolve()
     if args.inject_loop is not None:
         args.inject_loop = args.inject_loop.expanduser().resolve()
-    workspace_setup = args.workspace / "install" / "setup.bash"
+    if args.workspace_setup is not None:
+        args.workspace_setup = args.workspace_setup.expanduser().resolve()
+    workspace_setup = args.workspace_setup or args.workspace / "install" / "setup.bash"
     ros_distro = args.ros_setup.parent.name
     validate_args(args, source_root)
 
@@ -427,7 +438,8 @@ def main() -> int:
         "started_utc": utc_now(),
         "branch_required": "feature/uwfl2-ltaom-loop-closure",
         "loop_closure_requested": args.loop_closure == "true",
-        "automatic_detection_requested": args.detection == "true",
+        "automatic_detection_requested": args.loop_closure == "true",
+        "workspace_setup": str(workspace_setup),
         "manual_loop_request": str(args.inject_loop) if args.inject_loop else None,
         "bag": str(args.bag),
         "bag_metadata_sha256": sha256(args.bag / "metadata.yaml"),
@@ -481,6 +493,9 @@ def main() -> int:
     )
     manifest["commands"]["git_status"] = command_output(
         ["git", "status", "--short", "--branch"], cwd=source_root, env=metadata_env
+    )
+    manifest["commands"]["worktree_diff"] = command_output(
+        ["git", "diff"], cwd=source_root, env=metadata_env
     )
     manifest["commands"]["default_config_diff"] = command_output(
         ["git", "diff", "--", "config/default.yaml"],
@@ -759,6 +774,9 @@ def main() -> int:
         "points": pcd_point_count(map_path),
         "sha256": sha256(map_path) if map_path.exists() else None,
     }
+    if not failure and args.map_save == "true" and not manifest["map"]["points"]:
+        failure = "map_save produced no non-empty PCD at the requested path"
+        manifest["failure"] = failure
     manifest["status"] = "failed" if failure else "complete"
     write_manifest()
 

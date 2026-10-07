@@ -157,6 +157,9 @@ endif()
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
 if(BUILD_TESTING)
+  find_program(UWFL2_TEST_PYTHON python3 REQUIRED)
+  add_test(NAME test_benchmark_tools
+    COMMAND ${UWFL2_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_tools.py)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_loop_closure_core test/test_loop_closure_core.cpp)
   target_include_directories(test_loop_closure_core PRIVATE include)
