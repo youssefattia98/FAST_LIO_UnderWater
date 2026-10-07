@@ -2668,9 +2668,12 @@ private:
             registration.graph_anchor_covariance_position_rotation;
         correction_covariance =
             0.5 * (correction_covariance + correction_covariance.transpose());
-        const auto corrected_covariance =
+        const auto transported_covariance =
             uwfl2::loop_closure::transport_uwfl2_covariance(
-                kf.get_P(), correction_rotation, correction_covariance);
+                kf.get_P(), correction_rotation);
+        const auto corrected_covariance =
+            uwfl2::loop_closure::apply_pose_covariance_update(
+                transported_covariance, correction_covariance);
         if (!corrected_state.pos.allFinite() ||
             !corrected_state.vel.allFinite() ||
             !corrected_state.rot.toRotationMatrix().allFinite() ||
@@ -2737,6 +2740,14 @@ private:
             position_last = state_point.pos;
             loop_closure_->notify_correction_result(
                 true, elapsed_ms(), "committed");
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Loop covariance posterior committed: position trace %.6g -> %.6g m^2, "
+                "attitude trace %.6g -> %.6g rad^2.",
+                transported_covariance.block<3, 3>(0, 0).trace(),
+                corrected_covariance.block<3, 3>(0, 0).trace(),
+                transported_covariance.block<3, 3>(3, 3).trace(),
+                corrected_covariance.block<3, 3>(3, 3).trace());
             if (corrected_mapping_output.cloud)
             {
                 {
@@ -3119,7 +3130,8 @@ private:
         T_vehicle_sonar.translation = state.offset_T_L_I;
 
         const auto pose_covariance =
-            uwfl2::loop_closure::extract_graph_pose_covariance(kf.get_P());
+            uwfl2::loop_closure::extract_graph_pose_covariance(
+                kf.get_P(), state.rot.toRotationMatrix());
         ++latest_scan_generation_;
         const auto scan_points = loop_closure_->notify_latest_scan(
             timestamp, latest_scan_generation_, active_tree_generation_,

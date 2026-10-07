@@ -75,21 +75,34 @@ inline bool covariance_is_valid(const Matrix6d &covariance, double tolerance = 1
     return solver.info() == Eigen::Success && solver.eigenvalues().minCoeff() >= -tolerance;
 }
 
-// IKFOM orders the pose error as [position, right-attitude]. The graph uses
-// GTSAM Pose3 tangent ordering [rotation, translation].
+// IKFOM orders pose error as [position_local, right-attitude_body]. GTSAM
+// Pose3 uses [right-rotation_body, right-translation_body].
 template <typename Covariance>
-Matrix6d extract_graph_pose_covariance(const Covariance &ikf_covariance)
+Matrix6d extract_graph_pose_covariance(
+    const Covariance &ikf_covariance,
+    const Eigen::Matrix3d &R_local_body)
 {
-    Matrix6d graph_covariance = Matrix6d::Zero();
-    graph_covariance.template block<3, 3>(0, 0) =
-        ikf_covariance.template block<3, 3>(3, 3);
-    graph_covariance.template block<3, 3>(0, 3) =
-        ikf_covariance.template block<3, 3>(3, 0);
-    graph_covariance.template block<3, 3>(3, 0) =
-        ikf_covariance.template block<3, 3>(0, 3);
-    graph_covariance.template block<3, 3>(3, 3) =
-        ikf_covariance.template block<3, 3>(0, 0);
+    Eigen::Matrix<double, 6, 6> transform =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    transform.block<3, 3>(0, 3).setIdentity();
+    transform.block<3, 3>(3, 0) = R_local_body.transpose();
+    Matrix6d graph_covariance =
+        transform * ikf_covariance.template block<6, 6>(0, 0) *
+        transform.transpose();
     return 0.5 * (graph_covariance + graph_covariance.transpose());
+}
+
+inline Matrix6d graph_pose_covariance_to_ikf(
+    const Matrix6d &graph_covariance,
+    const Eigen::Matrix3d &R_local_body)
+{
+    Eigen::Matrix<double, 6, 6> transform =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    transform.block<3, 3>(0, 3) = R_local_body;
+    transform.block<3, 3>(3, 0).setIdentity();
+    Matrix6d ikf_covariance =
+        transform * graph_covariance * transform.transpose();
+    return 0.5 * (ikf_covariance + ikf_covariance.transpose());
 }
 
 struct PointXYZI

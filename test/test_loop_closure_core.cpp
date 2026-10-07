@@ -86,7 +86,7 @@ TEST(LoopClosurePose, GtsamConversionPreservesRollPitchYawAndZ)
                      input);
 }
 
-TEST(LoopClosureCovariance, ReordersIkfPositionAttitudeToGraphAttitudePosition)
+TEST(LoopClosureCovariance, ConvertsIkfAndGraphPoseTangentFrames)
 {
     Eigen::Matrix<double, 27, 27> covariance =
         Eigen::Matrix<double, 27, 27>::Zero();
@@ -95,12 +95,18 @@ TEST(LoopClosureCovariance, ReordersIkfPositionAttitudeToGraphAttitudePosition)
     covariance.block<3, 3>(0, 3).setConstant(0.25);
     covariance.block<3, 3>(3, 0) = covariance.block<3, 3>(0, 3).transpose();
 
-    const lc::Matrix6d graph = lc::extract_graph_pose_covariance(covariance);
+    const Eigen::Matrix3d rotation =
+        Eigen::AngleAxisd(M_PI_2, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    const lc::Matrix6d graph =
+        lc::extract_graph_pose_covariance(covariance, rotation);
     EXPECT_DOUBLE_EQ(graph(0, 0), 4.0);
     EXPECT_DOUBLE_EQ(graph(2, 2), 6.0);
-    EXPECT_DOUBLE_EQ(graph(3, 3), 1.0);
+    EXPECT_NEAR(graph(3, 3), 2.0, 1e-12);
+    EXPECT_NEAR(graph(4, 4), 1.0, 1e-12);
     EXPECT_DOUBLE_EQ(graph(5, 5), 3.0);
-    EXPECT_DOUBLE_EQ(graph(0, 3), 0.25);
+    const lc::Matrix6d round_trip =
+        lc::graph_pose_covariance_to_ikf(graph, rotation);
+    EXPECT_TRUE(round_trip.isApprox(covariance.block<6, 6>(0, 0), 1e-12));
 }
 
 TEST(KeyframeSelector, SelectsVerticalAndRollMotion)
@@ -860,19 +866,51 @@ TEST(StateTransport, AnalyticJacobianMatchesFullSe3FiniteDifference)
     EXPECT_LT((analytic - numerical).cwiseAbs().maxCoeff(), 2e-8);
 }
 
-TEST(StateTransport, KeepsProtectedBlocksAndProducesPsdCovariance)
+TEST(StateTransport, DeterministicCorrectionPreservesProtectedMarginal)
 {
     lc::Matrix27d covariance = lc::Matrix27d::Identity() * 0.01;
     covariance.block<3, 3>(0, 15).setConstant(1e-4);
     covariance.block<3, 3>(15, 0) = covariance.block<3, 3>(0, 15).transpose();
     const Eigen::Matrix3d rotation =
         Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitY()).toRotationMatrix();
-    lc::Matrix6d correction_covariance = lc::Matrix6d::Identity() * 1e-3;
     const auto transported = lc::transport_uwfl2_covariance(
-        covariance, rotation, correction_covariance);
+        covariance, rotation);
     EXPECT_TRUE(lc::covariance27_is_valid(transported));
     EXPECT_TRUE((transported.block<12, 12>(15, 15).isApprox(
         covariance.block<12, 12>(15, 15), 1e-14)));
     EXPECT_TRUE((transported.block<3, 3>(0, 15).isApprox(
         rotation * covariance.block<3, 3>(0, 15), 1e-14)));
+}
+
+TEST(StateTransport, PoseUpdateReducesMarginalAndPreservesPsd)
+{
+    Eigen::Matrix<double, 27, 27> generator =
+        Eigen::Matrix<double, 27, 27>::Zero();
+    generator.diagonal().setLinSpaced(0.5, 1.8);
+    generator.block<6, 21>(0, 6).setConstant(0.015);
+    lc::Matrix27d prior =
+        generator * generator.transpose() + lc::Matrix27d::Identity() * 0.1;
+    const lc::Matrix6d measurement = lc::Matrix6d::Identity() * 0.2;
+
+    const auto posterior =
+        lc::apply_pose_covariance_update(prior, measurement);
+    ASSERT_TRUE(lc::covariance27_is_valid(posterior));
+    EXPECT_LT((posterior.block<3, 3>(0, 0).trace()),
+              (prior.block<3, 3>(0, 0).trace()));
+    EXPECT_LT((posterior.block<3, 3>(3, 3).trace()),
+              (prior.block<3, 3>(3, 3).trace()));
+    EXPECT_LT((posterior.block<6, 21>(0, 6).norm()),
+              (prior.block<6, 21>(0, 6).norm()));
+}
+
+TEST(StateTransport, UncorrelatedProtectedStatesRemainUnchanged)
+{
+    lc::Matrix27d prior = lc::Matrix27d::Identity();
+    lc::Matrix6d measurement = lc::Matrix6d::Identity() * 0.1;
+    const auto posterior =
+        lc::apply_pose_covariance_update(prior, measurement);
+    ASSERT_TRUE(lc::covariance27_is_valid(posterior));
+    EXPECT_TRUE((posterior.block<21, 21>(6, 6).isApprox(
+        prior.block<21, 21>(6, 6), 1e-14)));
+    EXPECT_TRUE((posterior.block<6, 21>(0, 6).isZero(1e-14)));
 }
