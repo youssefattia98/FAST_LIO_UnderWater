@@ -2162,6 +2162,20 @@ and docking `16233`. Sunken-boat LF5 already had no sonar-frame parent and was
 left unchanged. No temporary copies remain and disk use returned to its
 pre-repair level.
 
+### Explicit Configuration Schema Follow-up (2026-10-07)
+
+- [x] Cross-check every YAML against all parameters declared by the mapping,
+  auxiliary-fusion, observability, and loop-closure code.
+- [x] Preserve existing tuned values and make every previously implicit C++
+  default explicit in all eight configuration files.
+- [x] Remove obsolete `earth_field_imu` and `b_mag_*` entries from the legacy
+  NTNU and pillars configurations.
+- [x] Validate YAML key parity and start the mapping node with every config.
+
+Each config now defines exactly the same `122` declared parameter paths, with
+zero missing or obsolete keys. All eight files passed isolated ROS 2 node
+startup; this was a configuration-only check and no rosbag replay was needed.
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:

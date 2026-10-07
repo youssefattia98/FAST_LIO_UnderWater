@@ -9,6 +9,10 @@
         cube_side_length: 60.0
         map_file_path: "./test.pcd"
 
+        feature_extract_enable: false
+        filter_size_corner: 0.5
+        point_filter_num: 2
+
         common:
             lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
@@ -27,9 +31,13 @@
             lidar_timeout: 0.25
             gravity_m_s2: 9.8
 
+            odometry_publish_rate_hz: 100.0
         preprocess:
             blind: 0.2
 
+            scan_line: 16
+            scan_rate: 10
+            timestamp_unit: 2
         mapping:
             minimum_scan_points: 5
             minimum_effective_features: 1
@@ -60,6 +68,9 @@
                 0.0,         1.0, 0.0,
                 -0.104528463, 0.0, 0.994521895 ]
 
+            accel_attitude_cov: 1.2184697e-3
+            accel_attitude_norm_gate: 2.0
+            laser_point_cov: 0.001
         dvl:
             enable: true
             topic: "/auv/dvl"
@@ -85,6 +96,7 @@
             innovation_gate_sigma: 0.0
             surface_z: 0.0
 
+            bias_init_cov: 1.0e4
         magnetometer:
             enable: true
             topic: "/auv/imu/magnetic_field"
@@ -100,10 +112,12 @@
             innovation_gate_sigma: 0.0
             mag_timeout: 0.25
 
+            debug_csv_path: ""
         publish:
             map_en: true
             path_en:  false
 
+            effect_map_en: false
         pcd_save:
             pcd_save_en: false
             interval: -1
@@ -122,3 +136,33 @@
             std_accepted_loop_cooldown_s: 30.0
             registration_maximum_iterations: 24
             loop_maximum_initial_nis: 4000.0
+
+            corrected_map_maximum_input_points: 3000000
+            corrected_map_maximum_keyframes: 1000
+            corrected_map_radius_m: 80.0
+            diagnostics_directory: ""
+            keyframe_minimum_interval_s: 0.5
+            keyframe_minimum_points: 20
+            keyframe_rotation_deg: 10.0
+            keyframe_translation_m: 1.0
+            loop_maximum_initial_rotation_error_deg: 45.0
+            loop_maximum_initial_translation_error_m: 10.0
+            loop_maximum_pose_correction_rotation_deg: 45.0
+            loop_maximum_pose_correction_translation_m: 20.0
+            loop_minimum_initial_nis: 0.0
+            loop_minimum_keyframe_separation: 5
+            odometry_rotation_variance_floor: 1.0e-8
+            odometry_translation_variance_floor: 1.0e-6
+            prior_rotation_sigma_rad: 1.0e-4
+            prior_translation_sigma_m: 1.0e-4
+            queue_capacity: 8
+            registration_maximum_neighbor_distance_m: 2.25
+            registration_maximum_rotation_deg: 15.0
+            registration_maximum_translation_m: 2.0
+            registration_minimum_effective_points: 30
+            registration_plane_threshold_m: 0.12
+            std_minimum_keyframe_separation: 20
+            std_minimum_ransac_inliers: 5
+            std_minimum_triangle_matches: 5
+            std_overlap_distance_m: 0.35
+            std_voxel_size_m: 0.6
