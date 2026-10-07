@@ -2176,6 +2176,46 @@ Each config now defines exactly the same `122` declared parameter paths, with
 zero missing or obsolete keys. All eight files passed isolated ROS 2 node
 startup; this was a configuration-only check and no rosbag replay was needed.
 
+### Simplified Loop-Closure Configuration (2026-10-07)
+
+- [x] Replace low-level detector, graph, registration, and shadow-map YAML
+  parameters with `enable`, `profile`, and `diagnostics_directory`.
+- [x] Preserve the established settings as `balanced`, `simulation`, and
+  `sparse_sonar` profiles.
+- [x] Make automatic place recognition and RViz markers active whenever loop
+  closure is enabled.
+- [x] Remove the elapsed-time gate while retaining keyframe separation against
+  adjacent-scan self-matches.
+- [x] Build, run package tests, validate all YAML files, and verify the marker
+  publisher with loop closure enabled.
+
+The package built successfully and its focused result contained `55` tests
+with zero failures. All eight YAML files contain the same `83` parameter paths
+and started the node successfully. A short x15 back-and-forth replay received
+an actual transient-local `/uwfl2_lc/markers` message containing raw/optimized
+keyframes, proposed/rejected/accepted loop namespaces, and the LC status text.
+The earlier missing markers were caused by the contradictory combination
+`enable: true` with `automatic_detection_enable: false`; that combination is
+no longer representable. The bare launch command still uses `default.yaml`,
+where LC remains disabled by repository policy.
+
+The first unscoped `colcon test-result --verbose` also reported two previously
+stored `sonar3d` lint failures from another workspace package. No `sonar3d`
+tests were run or modified here; scoping the result base to `build/fast_lio`
+confirmed the UWFL2 result above.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+colcon test-result --test-result-base build/fast_lio --verbose
+ROS_DOMAIN_ID=221 ros2 bag play \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed \
+  --rate 15 --playback-duration 30
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:

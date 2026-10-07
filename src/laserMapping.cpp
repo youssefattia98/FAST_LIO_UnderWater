@@ -46,6 +46,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <stdexcept>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -1116,52 +1117,8 @@ public:
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
         this->declare_parameter<bool>("loop_closure.enable", false);
-        this->declare_parameter<bool>("loop_closure.automatic_detection_enable", false);
-        this->declare_parameter<bool>("loop_closure.visualization_enable", false);
-        this->declare_parameter<double>("loop_closure.keyframe_translation_m", 1.0);
-        this->declare_parameter<double>("loop_closure.keyframe_rotation_deg", 10.0);
-        this->declare_parameter<double>("loop_closure.keyframe_minimum_interval_s", 0.5);
-        this->declare_parameter<double>("loop_closure.keyframe_maximum_interval_s", 5.0);
-        this->declare_parameter<int>("loop_closure.keyframe_minimum_points", 20);
-        this->declare_parameter<int>("loop_closure.queue_capacity", 8);
+        this->declare_parameter<string>("loop_closure.profile", "balanced");
         this->declare_parameter<string>("loop_closure.diagnostics_directory", "");
-        this->declare_parameter<double>("loop_closure.prior_rotation_sigma_rad", 1e-4);
-        this->declare_parameter<double>("loop_closure.prior_translation_sigma_m", 1e-4);
-        this->declare_parameter<double>("loop_closure.odometry_rotation_variance_floor", 1e-8);
-        this->declare_parameter<double>("loop_closure.odometry_translation_variance_floor", 1e-6);
-        this->declare_parameter<int>("loop_closure.loop_minimum_keyframe_separation", 5);
-        this->declare_parameter<double>("loop_closure.loop_maximum_initial_translation_error_m", 10.0);
-        this->declare_parameter<double>("loop_closure.loop_maximum_initial_rotation_error_deg", 45.0);
-        this->declare_parameter<double>("loop_closure.loop_minimum_initial_nis", 0.0);
-        this->declare_parameter<double>("loop_closure.loop_maximum_initial_nis", 12.592);
-        this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_translation_m", 20.0);
-        this->declare_parameter<double>("loop_closure.loop_maximum_pose_correction_rotation_deg", 45.0);
-        this->declare_parameter<double>("loop_closure.corrected_map_radius_m", 80.0);
-        this->declare_parameter<int>("loop_closure.corrected_map_maximum_keyframes", 1000);
-        this->declare_parameter<int>("loop_closure.corrected_map_maximum_input_points", 3000000);
-        this->declare_parameter<int>("loop_closure.registration_maximum_iterations", 12);
-        this->declare_parameter<int>("loop_closure.registration_minimum_effective_points", 30);
-        this->declare_parameter<double>("loop_closure.registration_maximum_neighbor_distance_m", 2.25);
-        this->declare_parameter<double>("loop_closure.registration_plane_threshold_m", 0.12);
-        this->declare_parameter<double>("loop_closure.registration_maximum_translation_m", 2.0);
-        this->declare_parameter<double>("loop_closure.registration_maximum_rotation_deg", 15.0);
-        this->declare_parameter<int>("loop_closure.std_minimum_keyframe_separation", 20);
-        this->declare_parameter<double>(
-            "loop_closure.std_minimum_loop_duration_s", 0.0);
-        this->declare_parameter<double>("loop_closure.std_voxel_size_m", 0.6);
-        this->declare_parameter<int>("loop_closure.std_minimum_triangle_matches", 5);
-        this->declare_parameter<int>("loop_closure.std_minimum_ransac_inliers", 5);
-        this->declare_parameter<double>("loop_closure.std_overlap_minimum", 0.20);
-        this->declare_parameter<double>("loop_closure.std_overlap_distance_m", 0.35);
-        this->declare_parameter<int>("loop_closure.std_required_confirmations", 2);
-        this->declare_parameter<double>(
-            "loop_closure.std_single_detection_overlap_minimum", 0.80);
-        this->declare_parameter<double>(
-            "loop_closure.std_accepted_loop_cooldown_s", 0.0);
-        this->declare_parameter<double>(
-            "loop_closure.std_confirmation_translation_m", 1.0);
-        this->declare_parameter<double>(
-            "loop_closure.std_confirmation_rotation_deg", 10.0);
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1334,150 +1291,40 @@ public:
             get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         uwfl2::loop_closure::LoopClosureConfig loop_config;
-        this->get_parameter_or<bool>("loop_closure.enable", loop_config.enabled, false);
-        this->get_parameter_or<bool>("loop_closure.automatic_detection_enable",
-                                     loop_config.automatic_detection_enabled, false);
-        this->get_parameter_or<bool>("loop_closure.visualization_enable",
-                                     loop_visualization_enabled_, false);
-        double keyframe_rotation_deg = 10.0;
-        int keyframe_minimum_points = 20;
-        int loop_queue_capacity = 8;
-        int loop_minimum_keyframe_separation = 5;
-        double loop_maximum_initial_rotation_error_deg = 45.0;
-        double loop_maximum_pose_correction_rotation_deg = 45.0;
-        int corrected_map_maximum_keyframes = 1000;
-        int corrected_map_maximum_input_points = 3000000;
-        int registration_maximum_iterations = 12;
-        int registration_minimum_effective_points = 30;
-        int std_minimum_keyframe_separation = 20;
-        int std_minimum_triangle_matches = 5;
-        int std_minimum_ransac_inliers = 5;
-        int std_required_confirmations = 2;
-        double registration_maximum_rotation_deg = 15.0;
+        string loop_profile;
         string diagnostics_directory;
-        this->get_parameter_or<double>("loop_closure.keyframe_translation_m",
-                                       loop_config.keyframes.translation_m, 1.0);
-        this->get_parameter_or<double>("loop_closure.keyframe_rotation_deg",
-                                       keyframe_rotation_deg, 10.0);
-        this->get_parameter_or<double>("loop_closure.keyframe_minimum_interval_s",
-                                       loop_config.keyframes.minimum_interval_s, 0.5);
-        this->get_parameter_or<double>("loop_closure.keyframe_maximum_interval_s",
-                                       loop_config.keyframes.maximum_interval_s, 5.0);
-        this->get_parameter_or<int>("loop_closure.keyframe_minimum_points",
-                                    keyframe_minimum_points, 20);
-        this->get_parameter_or<int>("loop_closure.queue_capacity", loop_queue_capacity, 8);
+        this->get_parameter_or<bool>("loop_closure.enable", loop_config.enabled, false);
+        this->get_parameter_or<string>("loop_closure.profile", loop_profile, "balanced");
         this->get_parameter_or<string>("loop_closure.diagnostics_directory",
                                        diagnostics_directory, "");
-        this->get_parameter_or<double>("loop_closure.prior_rotation_sigma_rad",
-                                       loop_config.pose_graph.prior_rotation_sigma_rad, 1e-4);
-        this->get_parameter_or<double>("loop_closure.prior_translation_sigma_m",
-                                       loop_config.pose_graph.prior_translation_sigma_m, 1e-4);
-        this->get_parameter_or<double>("loop_closure.odometry_rotation_variance_floor",
-                                       loop_config.pose_graph.odometry_rotation_variance_floor, 1e-8);
-        this->get_parameter_or<double>("loop_closure.odometry_translation_variance_floor",
-                                       loop_config.pose_graph.odometry_translation_variance_floor, 1e-6);
-        this->get_parameter_or<int>("loop_closure.loop_minimum_keyframe_separation",
-                                    loop_minimum_keyframe_separation, 5);
-        this->get_parameter_or<double>("loop_closure.loop_maximum_initial_translation_error_m",
-                                       loop_config.pose_graph.loop_maximum_initial_translation_error_m, 10.0);
-        this->get_parameter_or<double>("loop_closure.loop_maximum_initial_rotation_error_deg",
-                                       loop_maximum_initial_rotation_error_deg, 45.0);
-        this->get_parameter_or<double>("loop_closure.loop_minimum_initial_nis",
-                                       loop_config.pose_graph.loop_minimum_initial_nis, 0.0);
-        this->get_parameter_or<double>("loop_closure.loop_maximum_initial_nis",
-                                       loop_config.pose_graph.loop_maximum_initial_nis, 12.592);
-        this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_translation_m",
-                                       loop_config.pose_graph.loop_maximum_pose_correction_translation_m, 20.0);
-        this->get_parameter_or<double>("loop_closure.loop_maximum_pose_correction_rotation_deg",
-                                       loop_maximum_pose_correction_rotation_deg, 45.0);
-        this->get_parameter_or<double>("loop_closure.corrected_map_radius_m",
-                                       loop_config.shadow_map.radius_m, 80.0);
-        this->get_parameter_or<int>("loop_closure.corrected_map_maximum_keyframes",
-                                    corrected_map_maximum_keyframes, 1000);
-        this->get_parameter_or<int>("loop_closure.corrected_map_maximum_input_points",
-                                    corrected_map_maximum_input_points, 3000000);
-        this->get_parameter_or<int>("loop_closure.registration_maximum_iterations",
-                                    registration_maximum_iterations, 12);
-        this->get_parameter_or<int>("loop_closure.registration_minimum_effective_points",
-                                    registration_minimum_effective_points, 30);
-        this->get_parameter_or<double>("loop_closure.registration_maximum_neighbor_distance_m",
-                                       loop_config.registration.maximum_neighbor_distance_m, 2.25);
-        this->get_parameter_or<double>("loop_closure.registration_plane_threshold_m",
-                                       loop_config.registration.plane_fit_threshold_m, 0.12);
-        this->get_parameter_or<double>("loop_closure.registration_maximum_translation_m",
-                                       loop_config.registration.maximum_registration_translation_m, 2.0);
-        this->get_parameter_or<double>("loop_closure.registration_maximum_rotation_deg",
-                                       registration_maximum_rotation_deg, 15.0);
-        this->get_parameter_or<int>("loop_closure.std_minimum_keyframe_separation",
-                                    std_minimum_keyframe_separation, 20);
-        this->get_parameter_or<double>(
-            "loop_closure.std_minimum_loop_duration_s",
-            loop_config.std_detection.minimum_loop_duration_s, 0.0);
-        this->get_parameter_or<double>("loop_closure.std_voxel_size_m",
-                                       loop_config.std_detection.voxel_size_m, 0.6);
-        this->get_parameter_or<int>("loop_closure.std_minimum_triangle_matches",
-                                    std_minimum_triangle_matches, 5);
-        this->get_parameter_or<int>("loop_closure.std_minimum_ransac_inliers",
-                                    std_minimum_ransac_inliers, 5);
-        this->get_parameter_or<double>("loop_closure.std_overlap_minimum",
-                                       loop_config.std_detection.geometric_overlap_minimum, 0.20);
-        this->get_parameter_or<double>("loop_closure.std_overlap_distance_m",
-                                       loop_config.std_detection.geometric_overlap_distance_m, 0.35);
-        this->get_parameter_or<int>("loop_closure.std_required_confirmations",
-                                    std_required_confirmations, 2);
-        this->get_parameter_or<double>(
-            "loop_closure.std_single_detection_overlap_minimum",
-            loop_config.std_detection.single_detection_overlap_minimum, 0.80);
-        this->get_parameter_or<double>(
-            "loop_closure.std_accepted_loop_cooldown_s",
-            loop_config.std_detection.accepted_loop_cooldown_s, 0.0);
-        this->get_parameter_or<double>(
-            "loop_closure.std_confirmation_translation_m",
-            loop_config.std_detection.confirmation_translation_m, 1.0);
-        double std_confirmation_rotation_deg = 10.0;
-        this->get_parameter_or<double>(
-            "loop_closure.std_confirmation_rotation_deg",
-            std_confirmation_rotation_deg, 10.0);
-        loop_config.std_detection.confirmation_rotation_rad =
-            std::max(0.0, std_confirmation_rotation_deg) * PI_M / 180.0;
-        loop_config.keyframes.rotation_rad =
-            std::max(0.0, keyframe_rotation_deg) * PI_M / 180.0;
-        loop_config.keyframes.minimum_points =
-            static_cast<std::size_t>(std::max(1, keyframe_minimum_points));
-        loop_config.queue_capacity =
-            static_cast<std::size_t>(std::max(1, loop_queue_capacity));
-        loop_config.pose_graph.loop_minimum_keyframe_separation =
-            static_cast<std::size_t>(std::max(1, loop_minimum_keyframe_separation));
-        loop_config.pose_graph.loop_maximum_initial_rotation_error_rad =
-            std::max(0.0, loop_maximum_initial_rotation_error_deg) * PI_M / 180.0;
-        loop_config.pose_graph.loop_maximum_pose_correction_rotation_rad =
-            std::max(0.0, loop_maximum_pose_correction_rotation_deg) * PI_M / 180.0;
-        loop_config.std_detection.maximum_pose_distance_m =
-            1.5 * std::max(0.0,
-                loop_config.pose_graph.loop_maximum_initial_translation_error_m);
-        loop_config.std_detection.maximum_prior_translation_error_m =
-            loop_config.pose_graph.loop_maximum_initial_translation_error_m;
-        loop_config.std_detection.maximum_prior_rotation_rad =
-            loop_config.pose_graph.loop_maximum_initial_rotation_error_rad;
+        loop_config.automatic_detection_enabled = true;
+        loop_visualization_enabled_ = loop_config.enabled;
+        loop_config.std_detection.minimum_loop_duration_s = 0.0;
+        if (loop_profile == "simulation")
+        {
+            loop_config.pose_graph.odometry_rotation_variance_floor = 1e-6;
+            loop_config.pose_graph.odometry_translation_variance_floor = 1e-4;
+            loop_config.pose_graph.loop_minimum_initial_nis = 1.0;
+            loop_config.pose_graph.loop_maximum_initial_nis = 30.0;
+            loop_config.std_detection.accepted_loop_cooldown_s = 30.0;
+        }
+        else if (loop_profile == "sparse_sonar")
+        {
+            loop_config.registration.maximum_iterations = 24;
+            loop_config.pose_graph.loop_maximum_initial_nis = 4000.0;
+            loop_config.std_detection.geometric_overlap_minimum = 0.60;
+            loop_config.std_detection.single_detection_overlap_minimum = 0.95;
+            loop_config.std_detection.accepted_loop_cooldown_s = 30.0;
+            loop_config.std_detection.confirmation_translation_m = 2.0;
+            loop_config.std_detection.confirmation_rotation_rad = 20.0 * PI_M / 180.0;
+        }
+        else if (loop_profile != "balanced")
+        {
+            throw std::invalid_argument(
+                "Unknown loop_closure.profile '" + loop_profile +
+                "' (expected balanced, simulation, or sparse_sonar)");
+        }
         loop_config.shadow_map.voxel_size_m = filter_size_map_min;
-        loop_config.shadow_map.maximum_keyframes = static_cast<std::size_t>(
-            std::max(1, corrected_map_maximum_keyframes));
-        loop_config.shadow_map.maximum_input_points = static_cast<std::size_t>(
-            std::max(1, corrected_map_maximum_input_points));
-        loop_config.registration.maximum_iterations =
-            std::max(1, registration_maximum_iterations);
-        loop_config.registration.minimum_effective_points = static_cast<std::size_t>(
-            std::max(6, registration_minimum_effective_points));
-        loop_config.registration.maximum_registration_rotation_rad =
-            std::max(0.0, registration_maximum_rotation_deg) * PI_M / 180.0;
-        loop_config.std_detection.minimum_keyframe_separation =
-            static_cast<std::size_t>(std::max(1, std_minimum_keyframe_separation));
-        loop_config.std_detection.minimum_triangle_matches =
-            static_cast<std::size_t>(std::max(1, std_minimum_triangle_matches));
-        loop_config.std_detection.minimum_ransac_inliers =
-            static_cast<std::size_t>(std::max(1, std_minimum_ransac_inliers));
-        loop_config.std_detection.required_consistent_detections =
-            static_cast<std::size_t>(std::max(1, std_required_confirmations));
         loop_config.diagnostics_directory = diagnostics_directory;
         benchmark_diagnostics_directory_ = diagnostics_directory;
         if (!benchmark_diagnostics_directory_.empty())
@@ -1501,7 +1348,9 @@ public:
             loop_closure_ =
                 std::make_unique<uwfl2::loop_closure::LoopClosureManager>(loop_config);
             RCLCPP_INFO(this->get_logger(),
-                        "Loop closure enabled: asynchronous full-SE(3) keyframes and pose graph active.");
+                        "Loop closure enabled with '%s' profile: automatic place-based "
+                        "detection and RViz markers active (no elapsed-time gate).",
+                        loop_profile.c_str());
         }
 
         /*** ROS subscribe initialization ***/
