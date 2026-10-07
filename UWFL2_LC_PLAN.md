@@ -2081,6 +2081,47 @@ static transform was `body -> uwfl2_sonar`, translation
 corrected map emitted 42 messages for 41 scans, confirming scan-rate backend
 publication without blocking the estimator callback.
 
+### Accelerated-Replay Output And Dense-Map Follow-up (2026-10-07)
+
+- [x] Remove `/uwfl2/sonar_live`; `/sonar_point_cloud` is again the only sonar
+  cloud topic and remains the estimator input.
+- [x] Coalesce prediction output automatically above 2x replay while retaining
+  fixed 100 Hz sensor-time output at real-time rate.
+- [x] Batch queued corrected-map additions into one backend publication.
+- [x] Retain dense scans through shared scan storage and assemble a contiguous
+  PCL cloud only for save/correction, rather than copying the growing mission
+  map after every sonar frame.
+- [x] Build, run package tests, profile x15 with and without a map subscriber,
+  and verify x1 odometry plus dense PCD saving.
+
+The first x15 profile exposed a real front-end backlog: 348 sonar callbacks
+produced only 281 timed scans with 67 pending. Scan processing averaged
+30.51 ms, of which 27.83 ms was dense-map bookkeeping. After retaining scans
+by shared ownership, both x15 profiles processed all 348 callbacks with zero
+pending sonar scans. With a corrected-map subscriber attached, mean/p95 scan
+times were 3.12/3.85 ms and dense-map bookkeeping was 0.52/0.79 ms. The backend
+combined 348 scan additions into 183 map messages without delaying the IKF.
+
+The x1 regression produced monotonic odometry at 101.02 Hz with 10 ms
+median/p95 spacing. `/map_save` assembled and wrote all 395322 retained points.
+The scoped build and all four package test executables passed; the test result
+contains 55 clean XML records.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+ROS_DOMAIN_ID=160 ros2 bag play \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed \
+  --rate 15 --playback-duration 60
+ROS_DOMAIN_ID=161 ros2 bag play \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed \
+  --rate 1 --playback-duration 12
+ROS_DOMAIN_ID=161 ros2 service call /map_save std_srvs/srv/Trigger '{}'
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
