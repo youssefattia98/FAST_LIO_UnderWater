@@ -2178,6 +2178,8 @@ startup; this was a configuration-only check and no rosbag replay was needed.
 
 ### Simplified Loop-Closure Configuration (2026-10-07)
 
+Implementation commit: `f6abaef`.
+
 - [x] Replace low-level detector, graph, registration, and shadow-map YAML
   parameters with `enable`, `profile`, and `diagnostics_directory`.
 - [x] Preserve the established settings as `balanced`, `simulation`, and
