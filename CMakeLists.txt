@@ -206,7 +206,9 @@ endif()
 
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping uwfl2_loop_closure uwfl2_ikdtree
-  DESTINATION lib/${PROJECT_NAME}
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
 )
 
 install(
