@@ -141,6 +141,27 @@ TEST(MagneticCharacterization, HeadingOnlyGainAndJosephCovariance)
     EXPECT_GE(Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(posterior).eigenvalues().minCoeff(), -1e-12);
 }
 
+TEST(AuxiliaryCharacterization, MissingMessagesLeaveStateAndCovarianceUnchanged)
+{
+    AuxiliarySensorFusion fusion;
+    Ekf filter;
+    InitializeFilter(filter);
+    const auto state = filter.get_x();
+    const auto covariance = filter.get_P();
+    for (const auto kind : {AuxiliarySensorFusion::MeasurementKind::Dvl,
+                            AuxiliarySensorFusion::MeasurementKind::Pressure,
+                            AuxiliarySensorFusion::MeasurementKind::Magnetometer})
+    {
+        AuxiliarySensorFusion::TimedMeasurement measurement;
+        measurement.kind = kind;
+        EXPECT_FALSE(fusion.apply_timed_measurement(measurement, {}, filter));
+        Ekf::vectorized_state difference = Ekf::vectorized_state::Zero();
+        filter.get_x().boxminus(difference, state);
+        EXPECT_EQ(difference.norm(), 0.0);
+        EXPECT_TRUE(filter.get_P().isApprox(covariance, 0.0));
+    }
+}
+
 TEST(PressureCharacterization, TwentyReferenceSamplesAreNotReusedAsUpdates)
 {
     RosContext context;
@@ -155,7 +176,6 @@ TEST(PressureCharacterization, TwentyReferenceSamplesAreNotReusedAsUpdates)
         InitializeFilter(filter);
         fusion.initialize_pressure_reference_pose(filter.get_x());
         const auto prior = filter.get_P();
-        AuxiliarySensorFusion::UpdateSummary summary;
         auto message = std::make_shared<AuxiliarySensorFusion::PressureMsg>();
         message->fluid_pressure = 110000.0;
         AuxiliarySensorFusion::TimedMeasurement measurement;
@@ -163,15 +183,14 @@ TEST(PressureCharacterization, TwentyReferenceSamplesAreNotReusedAsUpdates)
         measurement.pressure = message;
         for (int i = 0; i < 20; ++i)
         {
-            EXPECT_FALSE(fusion.apply_timed_measurement(measurement, {}, filter, summary));
+            EXPECT_FALSE(fusion.apply_timed_measurement(measurement, {}, filter));
             EXPECT_TRUE(filter.get_P().isApprox(prior, 0.0));
         }
         message->fluid_pressure += 100.0;
-        EXPECT_TRUE(fusion.apply_timed_measurement(measurement, {}, filter, summary));
+        EXPECT_TRUE(fusion.apply_timed_measurement(measurement, {}, filter));
         EXPECT_LT(filter.get_x().pos.z(), 0.0);
         EXPECT_EQ(filter.get_x().pos.x(), 0.0);
         EXPECT_EQ(filter.get_x().pos.y(), 0.0);
-        EXPECT_EQ(summary.pressure_accepted, 1);
         EXPECT_TRUE(filter.get_P().allFinite());
     }
 }
@@ -196,13 +215,12 @@ TEST(DvlCharacterization, ConfiguredCovarianceFloorsTightMessageCovariance)
         measurement.timestamp = 1.1;
         measurement.kind = AuxiliarySensorFusion::MeasurementKind::Dvl;
         measurement.dvl = message;
-        AuxiliarySensorFusion::UpdateSummary summary;
         const auto imu = StationaryInterval(1.0, 1.2).imu;
-        ASSERT_TRUE(fusion.apply_timed_measurement(measurement, imu, first, summary));
+        ASSERT_TRUE(fusion.apply_timed_measurement(measurement, imu, first));
         message->twist.covariance[0] = 0.001;
         message->twist.covariance[7] = 0.001;
         message->twist.covariance[14] = 0.001;
-        ASSERT_TRUE(fusion.apply_timed_measurement(measurement, imu, second, summary));
+        ASSERT_TRUE(fusion.apply_timed_measurement(measurement, imu, second));
         EXPECT_GT(first.get_x().vel.x(), 0.0);
         EXPECT_TRUE(first.get_x().vel.isApprox(second.get_x().vel, 0.0));
         EXPECT_TRUE(first.get_P().isApprox(second.get_P(), 0.0));

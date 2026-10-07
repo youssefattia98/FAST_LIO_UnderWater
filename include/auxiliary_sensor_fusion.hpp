@@ -33,116 +33,6 @@ public:
     using PressureMsg = sensor_msgs::msg::FluidPressure;
     using MagMsg = sensor_msgs::msg::MagneticField;
 
-    struct UpdateSummary
-    {
-        int dvl_count = 0;
-        int dvl_accepted = 0;
-        int dvl_rejected = 0;
-        int pressure_count = 0;
-        int pressure_accepted = 0;
-        int pressure_rejected = 0;
-        int mag_count = 0;
-        int mag_accepted = 0;
-        int mag_rejected = 0;
-        double dvl_res_norm_sum = 0.0;
-        double dvl_res_norm_max = 0.0;
-        V3D dvl_res_sum = V3D::Zero();
-        V3D dvl_res_abs_max = V3D::Zero();
-        V3D dvl_meas_sum = V3D::Zero();
-        V3D dvl_pred_sum = V3D::Zero();
-        V3D dvl_body_vel_sum = V3D::Zero();
-        double pressure_res_depth_sum = 0.0;
-        double pressure_res_depth_max = 0.0;
-        double mag_res_norm_sum = 0.0;
-        double mag_res_norm_max = 0.0;
-        bool dvl_updated = false;
-        bool pressure_updated = false;
-        bool mag_updated = false;
-
-        bool updated() const
-        {
-            return dvl_updated || pressure_updated || mag_updated;
-        }
-
-        double mean_dvl_residual() const
-        {
-            return dvl_count > 0 ? dvl_res_norm_sum / static_cast<double>(dvl_count) : 0.0;
-        }
-
-        V3D mean_dvl_residual_axis() const
-        {
-            if (dvl_count <= 0)
-            {
-                return V3D::Zero();
-            }
-            return dvl_res_sum / static_cast<double>(dvl_count);
-        }
-
-        V3D mean_dvl_measurement() const
-        {
-            if (dvl_count <= 0)
-            {
-                return V3D::Zero();
-            }
-            return dvl_meas_sum / static_cast<double>(dvl_count);
-        }
-
-        V3D mean_dvl_prediction() const
-        {
-            if (dvl_count <= 0)
-            {
-                return V3D::Zero();
-            }
-            return dvl_pred_sum / static_cast<double>(dvl_count);
-        }
-
-        V3D mean_dvl_body_velocity() const
-        {
-            if (dvl_count <= 0)
-            {
-                return V3D::Zero();
-            }
-            return dvl_body_vel_sum / static_cast<double>(dvl_count);
-        }
-
-        double mean_pressure_depth_residual() const
-        {
-            return pressure_count > 0 ? pressure_res_depth_sum / static_cast<double>(pressure_count) : 0.0;
-        }
-
-        double mean_mag_residual() const
-        {
-            return mag_count > 0 ? mag_res_norm_sum / static_cast<double>(mag_count) : 0.0;
-        }
-
-        void merge(const UpdateSummary &other)
-        {
-            dvl_count += other.dvl_count;
-            dvl_accepted += other.dvl_accepted;
-            dvl_rejected += other.dvl_rejected;
-            pressure_count += other.pressure_count;
-            pressure_accepted += other.pressure_accepted;
-            pressure_rejected += other.pressure_rejected;
-            mag_count += other.mag_count;
-            mag_accepted += other.mag_accepted;
-            mag_rejected += other.mag_rejected;
-            dvl_res_norm_sum += other.dvl_res_norm_sum;
-            dvl_res_norm_max = std::max(dvl_res_norm_max, other.dvl_res_norm_max);
-            dvl_res_sum += other.dvl_res_sum;
-            dvl_res_abs_max = dvl_res_abs_max.cwiseMax(other.dvl_res_abs_max);
-            dvl_meas_sum += other.dvl_meas_sum;
-            dvl_pred_sum += other.dvl_pred_sum;
-            dvl_body_vel_sum += other.dvl_body_vel_sum;
-            pressure_res_depth_sum += other.pressure_res_depth_sum;
-            pressure_res_depth_max = std::max(pressure_res_depth_max, other.pressure_res_depth_max);
-            mag_res_norm_sum += other.mag_res_norm_sum;
-            mag_res_norm_max = std::max(mag_res_norm_max, other.mag_res_norm_max);
-            dvl_updated = dvl_updated || other.dvl_updated;
-            pressure_updated = pressure_updated || other.pressure_updated;
-            mag_updated = mag_updated || other.mag_updated;
-        }
-    };
-
     enum class MeasurementKind
     {
         Dvl,
@@ -398,8 +288,7 @@ public:
     bool apply_timed_measurement(
         const TimedMeasurement &measurement,
         const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
-        Ekf &kf,
-        UpdateSummary &summary)
+        Ekf &kf)
     {
         const ImuAngularSample imu_sample =
             imu_angular_sample_at_time(measurement.timestamp, imu_msgs);
@@ -407,72 +296,14 @@ public:
         switch (measurement.kind)
         {
             case MeasurementKind::Dvl:
-            {
-                if (!measurement.dvl)
-                {
-                    return false;
-                }
-                const auto &msg = *measurement.dvl;
-                const state_ikfom state = kf.get_x();
-                const DvlLinearization dvl =
-                    build_dvl_linearization(make_dvl_observation(msg, imu_sample, state), state);
-                summary.dvl_count++;
-                if (dvl.valid)
-                {
-                    summary.dvl_res_norm_sum += dvl.residual.norm();
-                    summary.dvl_res_norm_max =
-                        std::max(summary.dvl_res_norm_max, dvl.residual.norm());
-                    summary.dvl_res_sum += dvl.residual;
-                    summary.dvl_res_abs_max =
-                        summary.dvl_res_abs_max.cwiseMax(dvl.residual.cwiseAbs());
-                    summary.dvl_meas_sum += dvl.measurement;
-                    summary.dvl_pred_sum += dvl.prediction;
-                    summary.dvl_body_vel_sum += dvl.dvl_origin_velocity_vehicle;
-                }
-                const bool accepted = apply_dvl_update(msg, imu_sample, kf);
-                summary.dvl_accepted += accepted ? 1 : 0;
-                summary.dvl_rejected += accepted ? 0 : 1;
-                summary.dvl_updated = accepted || summary.dvl_updated;
-                return accepted;
-            }
+                return measurement.dvl &&
+                       apply_dvl_update(*measurement.dvl, imu_sample, kf);
             case MeasurementKind::Pressure:
-            {
-                if (!measurement.pressure)
-                {
-                    return false;
-                }
-                const auto &msg = *measurement.pressure;
-                const state_ikfom state = kf.get_x();
-                const double residual_pa = pressure_residual(msg, state);
-                const double residual_depth = residual_pa / pressure_scale(state);
-                summary.pressure_count++;
-                summary.pressure_res_depth_sum += std::abs(residual_depth);
-                summary.pressure_res_depth_max = std::max(summary.pressure_res_depth_max,
-                                                          std::abs(residual_depth));
-                const bool accepted = apply_pressure_update(msg, kf);
-                summary.pressure_accepted += accepted ? 1 : 0;
-                summary.pressure_rejected += accepted ? 0 : 1;
-                summary.pressure_updated = accepted || summary.pressure_updated;
-                return accepted;
-            }
+                return measurement.pressure &&
+                       apply_pressure_update(*measurement.pressure, kf);
             case MeasurementKind::Magnetometer:
-            {
-                if (!measurement.magnetometer)
-                {
-                    return false;
-                }
-                const auto &msg = *measurement.magnetometer;
-                double residual = 0.0;
-                const bool accepted = apply_mag_update(msg, kf, &residual);
-                summary.mag_count++;
-                summary.mag_res_norm_sum += std::abs(residual);
-                summary.mag_res_norm_max =
-                    std::max(summary.mag_res_norm_max, std::abs(residual));
-                summary.mag_accepted += accepted ? 1 : 0;
-                summary.mag_rejected += accepted ? 0 : 1;
-                summary.mag_updated = accepted || summary.mag_updated;
-                return accepted;
-            }
+                return measurement.magnetometer &&
+                       apply_mag_update(*measurement.magnetometer, kf);
         }
         return false;
     }
@@ -511,16 +342,6 @@ public:
     bool dvl_enabled() const { return dvl_enable_; }
     bool pressure_enabled() const { return pressure_enable_; }
     bool mag_enabled() const { return mag_enable_; }
-    const std::string &dvl_topic() const { return dvl_topic_; }
-    const std::string &pressure_topic() const { return pressure_topic_; }
-    const std::string &mag_topic() const { return mag_topic_; }
-    double dvl_frequency() const { return dvl_frequency_; }
-    double dvl_timeout() const { return dvl_timeout_; }
-    double pressure_timeout() const { return pressure_timeout_; }
-    double mag_timeout() const { return mag_timeout_; }
-    const V3D &dvl_T() const { return dvl_T_; }
-    const V3D &pressure_T() const { return pressure_T_; }
-    double dvl_velocity_cov() const { return dvl_velocity_cov_; }
     double dvl_b_init_cov() const { return dvl_b_init_cov_; }
     double pressure_b_init_cov() const { return pressure_b_init_cov_; }
 
@@ -569,7 +390,6 @@ private:
         V3D measurement = V3D::Zero();
         V3D prediction = V3D::Zero();
         V3D residual = V3D::Zero();
-        V3D dvl_origin_velocity_vehicle = V3D::Zero();
         Eigen::Matrix<double, 3, state_ikfom::DOF> H =
             Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
         M3D R = M3D::Identity();
@@ -714,7 +534,6 @@ private:
         result.measurement = observation.measurement;
         result.prediction = model.prediction_dvl;
         result.residual = result.measurement - result.prediction;
-        result.dvl_origin_velocity_vehicle = model.dvl_origin_velocity_vehicle;
         result.H = model.H;
         result.R = observation.covariance;
 
@@ -1299,15 +1118,8 @@ private:
         return messages;
     }
 
-    bool apply_mag_update(const MagMsg &msg,
-                          Ekf &kf,
-                          double *innovation_out = nullptr)
+    bool apply_mag_update(const MagMsg &msg, Ekf &kf)
     {
-        if (innovation_out)
-        {
-            *innovation_out = 0.0;
-        }
-
         const state_ikfom state = kf.get_x();
         const V3D measured = mag_corrected(msg);
 
@@ -1330,10 +1142,6 @@ private:
         if (!observation.valid)
         {
             return false;
-        }
-        if (innovation_out)
-        {
-            *innovation_out = observation.innovation;
         }
 
         const M3D calibrated_covariance = mag_calibrated_covariance();
