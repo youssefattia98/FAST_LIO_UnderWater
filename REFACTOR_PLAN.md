@@ -131,11 +131,30 @@ permission to implement multiple checkpoints together.
   exactly. Results: `REFACTOR_RESULTS/cp003_smoke/cleanup_comparison.json`.
   Commit: see `git log --oneline --grep='CP-003'`.
 
-- [ ] **CP-004 - Delete confirmed legacy mapping/state code.** Delete confirmed
+- [x] **CP-004 - Delete confirmed legacy mapping/state code.** Delete confirmed
   unused mapping helpers, globals, legacy `StatesGroup`, the unused duplicate
   math header, and the never-populated shutdown-save buffer/path. Preserve
   `/map_save` behavior. **Depends on:** CP-002. **Validation:** usage search,
   build/tests, and saved-map comparison on a short disabled-LC replay.
+  **Result (2026-10-07):** repository-wide `rg` found no live consumers of
+  `StatesGroup`, its `DIM_STATE`/`INIT_COV` macros, `Exp_mat.h`,
+  `esti_normvector`, `pointBodyToWorld_ikfom`, `RGBpointBodyLidarToIMU`,
+  `root_dir`, `featsFromMap`, `_featsArray`, or `downSizeFilterMap`. Deleted
+  these, three unused local variables, and the never-filled `pcl_wait_save`
+  allocation/shutdown write. `/map_save`, dense history, compact-tree insertion,
+  live point transforms and sensor/state/covariance logic remain unchanged.
+  Deliberately retained the matrix `pointBodyToWorld` overload (used by local
+  map segmentation) and `acquire_removed_points` drain (has a storage side effect).
+  Signal/shutdown handling and write-only diagnostics remain for later checkpoints.
+  Build passed in 128 s; all nine CTest targets passed in 2.06 s (69 test cases).
+  All six post-cleanup replay comparisons passed: shared pose, full published
+  covariance and twist differences are exactly zero; all four sonar maps are
+  byte-identical to baseline. Published covariance remains finite/PSD. INS
+  correctly saves no map. Artifacts: `REFACTOR_RESULTS/cp004_candidate`, including
+  `comparison.json`, individual manifests/logs/maps and exact commands. No full
+  LC replay or Jetson build was needed/performed for these inactive-code deletions.
+  Commit: see `git log --oneline --grep='CP-004'`. Stopped here; CP-005 onward
+  and newly recorded CP-015 are not implemented.
 
 - [ ] **CP-005 - Simplify preprocessing and remove no-op parameters.** Delete
   unreachable preprocessing machinery. Remove obsolete `sonar.scan_line`,
@@ -205,6 +224,17 @@ permission to implement multiple checkpoints together.
   behavior, LC-enabled replay, rollback behavior, and runtime/memory comparison.
 
 ## Validation Policy
+
+### Newly Discovered Follow-Up
+
+- [ ] **CP-015 - Tighten benchmark serialization and timestamp evidence.**
+  The intentionally retained strict-comparison failure contains JSON `Infinity`.
+  Represent unavailable differences with standard JSON `null` plus explicit
+  failure reasons; retain native integer ROS stamps and compare frame identifiers.
+  Validate saved-file existence against stored manifest evidence. **Depends on:**
+  CP-001 and CP-002. **Validation:** missing/unequal/non-finite fixtures and
+  one-nanosecond/frame mismatch cases. Safe priority before structural refactors;
+  recorded only, not included in CP-001--CP-004 execution.
 
 ### Inspection Result
 
@@ -342,3 +372,31 @@ readelf -d /home/attia/ros2_ws/build_refactor_clean/fast_lio/fastlio_mapping
 Comparison uses `shared_pose_comparison`, `odometry_fields`, `disabled_loop`,
 and `matching_maps` from the repaired tools; asserts zero shared-pose/covariance
 differences and equal saved-map hashes. No production tuning or frame changes.
+
+### CP-004 Commands
+
+CP-003 commit: `efc20d4`. Usage proof before and after deletion:
+
+```bash
+rg -n 'StatesGroup|Exp_mat.h|esti_normvector|pointBodyToWorld_ikfom|RGBpointBodyLidarToIMU|pcl_wait_save|featsFromMap|_featsArray|downSizeFilterMap|root_dir|nearest_search_en|rematch_num|DIM_STATE|INIT_COV' src include
+```
+
+After deletion there are no matches. Build/CTest used the same
+`build_refactor_clean`/`install_refactor_clean` commands as CP-003. Replays:
+
+```bash
+/usr/bin/python3 tools/run_refactor_replays.py \
+  --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp004_candidate \
+  --workspace-setup /home/attia/ros2_ws/install_refactor_clean/setup.bash
+/usr/bin/python3 tools/compare_refactor_replays.py \
+  --baseline /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline \
+  --candidate /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp004_candidate \
+  --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp004_candidate/comparison.json
+git diff --check
+```
+
+Six x5, first-40-recording-second windows on isolated domains 211--216; no RViz
+or original config/bag edits. Current validated overlay is
+`/home/attia/ros2_ws/install_refactor_clean/setup.bash`; the ordinary workspace
+install was deliberately not overwritten. These are short-window preservation
+tests, not a new accuracy claim or full-dataset/LC performance evaluation.

@@ -2355,8 +2355,6 @@ ros2 bag play \
   /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed --rate 15
 ```
 
-## Stop Conditions
-
 ## Behavior-Preserving Refactor (2026-10-07)
 
 Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-004 only.
@@ -2374,11 +2372,21 @@ Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-004 only.
   complete suite 2.04 s, sim3 FL2 startup/replay/map-save regression passed.
   Domain 223, x5, results `REFACTOR_RESULTS/cp003_smoke`; 822 common poses and
   covariance identical, saved map byte-identical. No state/math/frame edits.
-  Commit: `git log --oneline --grep='CP-003'`.
-- [ ] CP-004: confirmed legacy mapping/state deletion; pending build and replay.
+  Commit `efc20d4`.
+- [x] CP-004: confirmed legacy mapping/state deletion; build 128 s, complete
+  suite 2.06 s. All six FL2/INS/UWFL2 disabled-LC comparisons on sim3 and real
+  back-and-forth passed: shared pose/covariance/twist differences exactly zero,
+  four saved-map hashes identical, published covariance finite/PSD. Six x5
+  first-40-recording-second windows, domains 211--216; artifacts
+  `/home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp004_candidate/comparison.json`.
+  Live transforms, removed-point-history drain, dense `/map_save`, sensors,
+  IKFOM, propagation and LC ownership unchanged. Commit:
+  `git log --oneline --grep='CP-004'`. Stopped; no later checkpoint implemented.
 
 Exact commands and failures are recorded in `REFACTOR_PLAN.md`; each replay
 manifest retains the expanded command. Existing user YAML/RViz edits preserved.
+
+## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
 

@@ -103,7 +103,6 @@ const float MOV_THRESHOLD = 1.5f;
 mutex mtx_buffer;
 condition_variable sig_buffer;
 
-string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic, world_frame;
 
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -163,17 +162,14 @@ std::atomic<std::uint64_t> imu_buffer_messages_cleared{0};
 std::atomic<std::uint64_t> stale_lidar_scans_discarded{0};
 std::atomic<std::uint64_t> imu_only_packets_processed{0};
 
-PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_down_body(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_down_world(new PointCloudXYZI());
 PointCloudXYZI::Ptr normvec(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr laserCloudOri(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr corr_normvect(new PointCloudXYZI(100000, 1));
-PointCloudXYZI::Ptr _featsArray;
 
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
-pcl::VoxelGrid<PointType> downSizeFilterMap;
 
 std::shared_ptr<KD_TREE<PointType>> ikdtree =
     std::make_shared<KD_TREE<PointType>>();
@@ -205,18 +201,6 @@ void SigHandle(int sig)
     sig_buffer.notify_all();
     rclcpp::shutdown();
 }
-
-void pointBodyToWorld_ikfom(PointType const * const pi, PointType * const po, state_ikfom &s)
-{
-    V3D p_body(pi->x, pi->y, pi->z);
-    V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
-
-    po->x = p_global(0);
-    po->y = p_global(1);
-    po->z = p_global(2);
-    po->intensity = pi->intensity;
-}
-
 
 void pointBodyToWorld(PointType const * const pi, PointType * const po)
 {
@@ -251,22 +235,10 @@ void RGBpointBodyToWorld(PointType const * const pi, PointType * const po)
     po->intensity = pi->intensity;
 }
 
-void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
-{
-    V3D p_body_lidar(pi->x, pi->y, pi->z);
-    V3D p_body_imu(state_point.offset_R_L_I*p_body_lidar + state_point.offset_T_L_I);
-
-    po->x = p_body_imu(0);
-    po->y = p_body_imu(1);
-    po->z = p_body_imu(2);
-    po->intensity = pi->intensity;
-}
-
 void points_cache_collect()
 {
     PointVector points_history;
     ikdtree->acquire_removed_points(points_history);
-    // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
 }
 
 BoxPointType LocalMap_Points;
@@ -640,7 +612,6 @@ std::size_t map_incremental()
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
-PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
 std::mutex mapping_output_mutex;
 
 void save_to_pcd(const PointCloudXYZI &map)
@@ -1203,11 +1174,9 @@ public:
         FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
         HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
 
-        _featsArray.reset(new PointCloudXYZI());
 
         memset(point_selected_surf, true, sizeof(point_selected_surf));
         downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
-        downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
         memset(point_selected_surf, true, sizeof(point_selected_surf));
 
         if (extrinT.size() != 3)
@@ -2006,7 +1975,6 @@ private:
                                              lidar_update_result.reason));
                 return;
             }
-            int featsFromMapNum = ikdtree->validnum();
             kdtree_size_st = ikdtree->size();
 
             /*** ICP and iterated Kalman filter update ***/
@@ -2015,8 +1983,6 @@ private:
 
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
-            int  rematch_num = 0;
-            bool nearest_search_en = true; //
 
             t2 = omp_get_wtime();
             
@@ -3233,16 +3199,6 @@ int main(int argc, char** argv)
 
     if (rclcpp::ok())
         rclcpp::shutdown();
-    /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. pcd save will largely influence the real-time performences **/
-    if (pcl_wait_save->size() > 0 && pcd_save_en)
-    {
-        string file_name = string("scans.pcd");
-        string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
-        pcl::PCDWriter pcd_writer;
-        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
-    }
 
     return 0;
 }
