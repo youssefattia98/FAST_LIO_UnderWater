@@ -2357,7 +2357,7 @@ ros2 bag play \
 
 ## Behavior-Preserving Refactor (2026-10-07)
 
-Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-004 only.
+Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-005 only.
 
 - [x] CP-001: verification tools repaired; eight initial Python fixtures passed.
   Commit `69c778f`.
@@ -2383,6 +2383,16 @@ Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-004 only.
   IKFOM, propagation and LC ownership unchanged. Commit `2c82a96`.
   Stopped; no later checkpoint implemented. Replay wall totals: baseline twelve
   windows 632.3 s, final six windows 315.8 s; these are not speedup claims.
+
+- [x] CP-005: unreachable preprocessing removed; active generic decoder preserved.
+  Six ineffective sonar parameters removed from declarations and all eight YAMLs.
+  Build 139 s; nine CTest targets/70 cases passed in 2.06 s. All ten config/profile
+  startups passed. Six disabled-LC x5 short comparisons passed with zero shared
+  pose/covariance/twist differences and four byte-identical saved maps; domains
+  211--216. Artifacts `REFACTOR_RESULTS/cp005_startup` and
+  `REFACTOR_RESULTS/cp005_candidate/comparison.json` retain commands/hashes/logs.
+  No estimator, timing, frame or LC changes; no full LC replay or Jetson build.
+  Commit: see `git log --oneline --grep='CP-005'`. Stopped before CP-006.
 
 Exact commands and failures are recorded in `REFACTOR_PLAN.md`; each replay
 manifest retains the expanded command. Existing user YAML/RViz edits preserved.

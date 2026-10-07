@@ -120,8 +120,8 @@ std::deque<std::pair<double, V3D>> accel_attitude_window;
 double accel_attitude_last_stamp = -1.0;
 double accel_attitude_last_update_stamp = -1.0;
 ObservabilityManager obs_manager;
-double filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
-double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+double filter_size_surf_min = 0, filter_size_map_min = 0;
+double cube_len = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double last_processed_time = -1.0, lidar_timeout = 0.25, sonar_frequency_hz = 4.0,
        imu_rate_hz = 100.0;
 double odometry_publish_rate_hz = 100.0;
@@ -991,16 +991,10 @@ public:
         this->declare_parameter<double>("sonar.frequency", 4.0);
         this->declare_parameter<vector<double>>("sonar.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("sonar.extrinsic_R", vector<double>());
-        this->declare_parameter<double>("sonar.fov_degree", 180.0);
         this->declare_parameter<float>("sonar.max_range", 300.0F);
         this->declare_parameter<double>("sonar.min_range", 0.01);
         this->declare_parameter<double>("sonar.xy_covariance", LASER_POINT_COV_DEFAULT);
         this->declare_parameter<double>("sonar.z_covariance", LASER_POINT_COV_DEFAULT);
-        this->declare_parameter<int>("sonar.scan_line", 16);
-        this->declare_parameter<int>("sonar.scan_rate", 10);
-        this->declare_parameter<int>("sonar.timestamp_unit", US);
-        this->declare_parameter<int>("sonar.point_filter_num", 2);
-        this->declare_parameter<bool>("sonar.feature_extract_enable", false);
 
         this->declare_parameter<string>("imu.topic", "/imu/data");
         this->declare_parameter<double>("imu.frequency", 100.0);
@@ -1048,20 +1042,12 @@ public:
                                                vector<double>());
         this->get_parameter_or<vector<double>>("sonar.extrinsic_R", extrinR,
                                                vector<double>());
-        this->get_parameter_or<double>("sonar.fov_degree", fov_deg, 180.0);
         this->get_parameter_or<float>("sonar.max_range", DET_RANGE, 300.0F);
         this->get_parameter_or<double>("sonar.min_range", p_pre->blind, 0.01);
         this->get_parameter_or<double>("sonar.xy_covariance", LASER_POINT_COV_XY,
                                        double(LASER_POINT_COV_DEFAULT));
         this->get_parameter_or<double>("sonar.z_covariance", LASER_POINT_COV_Z,
                                        double(LASER_POINT_COV_DEFAULT));
-        this->get_parameter_or<int>("sonar.scan_line", p_pre->N_SCANS, 16);
-        this->get_parameter_or<int>("sonar.scan_rate", p_pre->SCAN_RATE, 10);
-        this->get_parameter_or<int>("sonar.timestamp_unit", p_pre->time_unit, US);
-        this->get_parameter_or<int>("sonar.point_filter_num",
-                                    p_pre->point_filter_num, 2);
-        this->get_parameter_or<bool>("sonar.feature_extract_enable",
-                                     p_pre->feature_enabled, false);
 
         this->get_parameter_or<string>("imu.topic", imu_topic, "/imu/data");
         this->get_parameter_or<double>("imu.frequency", imu_rate_hz, 100.0);
@@ -1171,8 +1157,6 @@ public:
         // double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
         // bool flg_EKF_converged, EKF_stop_flg = 0;
 
-        FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
-        HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
 
 
         memset(point_selected_surf, true, sizeof(point_selected_surf));

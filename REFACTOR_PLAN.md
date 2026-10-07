@@ -156,7 +156,7 @@ permission to implement multiple checkpoints together.
   Commit: see `git log --oneline --grep='CP-004'`. Stopped here; CP-005 onward
   and newly recorded CP-015 are not implemented.
 
-- [ ] **CP-005 - Simplify preprocessing and remove no-op parameters.** Delete
+- [x] **CP-005 - Simplify preprocessing and remove no-op parameters.** Delete
   unreachable preprocessing machinery. Remove obsolete `sonar.scan_line`,
   `sonar.scan_rate`, `sonar.timestamp_unit`, `sonar.point_filter_num`,
   `sonar.feature_extract_enable`, and `sonar.fov_degree` declarations and shipped
@@ -164,6 +164,46 @@ permission to implement multiple checkpoints together.
   previously ineffective options. Document the configuration migration.
   **Depends on:** CP-002. **Validation:** identical decoded points and metadata
   for supported input fixtures, all-config startup, and disabled-LC replay.
+  **Result (2026-10-07):** removed unreachable vendor handlers, feature extraction,
+  their buffers/settings, and unused FOV calculations. The active generic XYZI
+  decoder is text-identical except for clearing two unused buffers. Expanded
+  fixtures passed on both old and cleaned code: all eight field datatypes,
+  reordered fields, row padding, range filtering, missing intensity, empty
+  output and inherited metadata behavior. Build passed in 139 s; all nine CTest
+  targets passed in 2.06 s (61 C++ cases plus nine Python fixtures). All eight
+  node YAMLs and both LC profiles initialized and shut down successfully;
+  startup evidence: `REFACTOR_RESULTS/cp005_startup/results.json`.
+  Six x5 disabled-LC, first-40-recording-second FL2/INS/UWFL2 windows on sim3
+  and real back-and-forth passed against CP-002: shared poses, published
+  covariance and twist exactly unchanged; four saved maps byte-identical;
+  covariance finite/PSD. Domains 211--216, evidence and per-run commands/hashes:
+  `REFACTOR_RESULTS/cp005_candidate/comparison.json`.
+  **Migration:** delete the six listed sonar keys from external YAMLs; they
+  previously had no effect and have no replacement. Keep `sonar.min_range` and
+  mapping voxel settings unchanged. Shipped YAMLs changed only by these removals;
+  existing user tuning and RViz edits preserved. Standard install untouched;
+  no Jetson or full LC replay claimed. Commit: see `git log --oneline --grep='CP-005'`.
+  Stopped here; CP-006 onward remain unimplemented.
+
+  Commands (from workspace for build, repository for Python tools):
+  ```bash
+  source /opt/ros/jazzy/setup.bash
+  MAKEFLAGS=-j2 colcon build --packages-select fast_lio --symlink-install \
+    --build-base build_refactor_clean --install-base install_refactor_clean \
+    --cmake-args -DBUILD_TESTING=ON
+  ROS_DOMAIN_ID=229 ctest --test-dir /home/attia/ros2_ws/build_refactor_clean/fast_lio --output-on-failure
+  source /home/attia/ros2_ws/install_refactor_clean/setup.bash
+  /usr/bin/python3 test/check_config_startup.py \
+    --executable /home/attia/ros2_ws/build_refactor_clean/fast_lio/fastlio_mapping \
+    --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp005_startup
+  /usr/bin/python3 tools/run_refactor_replays.py \
+    --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp005_candidate \
+    --workspace-setup /home/attia/ros2_ws/install_refactor_clean/setup.bash
+  /usr/bin/python3 tools/compare_refactor_replays.py \
+    --baseline /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp002_baseline \
+    --candidate /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp005_candidate \
+    --output /home/attia/ros2_ws/bags/REFACTOR_RESULTS/cp005_candidate/comparison.json
+  ```
 
 - [ ] **CP-006 - Remove unused diagnostic work.** Remove unreachable front-end
   diagnostic writers, write-only status, unused auxiliary summaries/getters,

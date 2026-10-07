@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cstring>
+#include <limits>
 #include "preprocess.h"
 
 TEST(PreprocessCharacterization, PaddedRowsAndRangeFilterPreserveIntensity)
@@ -27,7 +28,6 @@ TEST(PreprocessCharacterization, PaddedRowsAndRangeFilterPreserveIntensity)
                         point, sizeof(point));
         }
     Preprocess preprocess;
-    preprocess.time_unit = US;
     preprocess.blind = 0.2;
     PointCloudXYZI::Ptr output(new PointCloudXYZI());
     preprocess.process(cloud, output);
@@ -40,11 +40,78 @@ TEST(PreprocessCharacterization, PaddedRowsAndRangeFilterPreserveIntensity)
     }
 }
 
+namespace
+{
+template<typename T>
+void CheckDatatype(uint8_t datatype)
+{
+    auto cloud = std::make_unique<sensor_msgs::msg::PointCloud2>();
+    cloud->header.frame_id = "fixture_sonar";
+    cloud->header.stamp.sec = 17;
+    cloud->width = 1;
+    cloud->height = 1;
+    cloud->point_step = 4 * sizeof(T);
+    cloud->row_step = cloud->point_step;
+    cloud->data.resize(cloud->row_step);
+    const T values[] = {T(7), T(3), T(2), T(1)};
+    std::memcpy(cloud->data.data(), values, sizeof(values));
+    const std::vector<std::string> names = {"intensity", "z", "y", "x"};
+    for (std::size_t index = 0; index < names.size(); ++index)
+    {
+        sensor_msgs::msg::PointField field;
+        field.name = names[index];
+        field.offset = index * sizeof(T);
+        field.datatype = datatype;
+        field.count = 1;
+        cloud->fields.push_back(field);
+    }
+    Preprocess preprocess;
+    PointCloudXYZI::Ptr output(new PointCloudXYZI());
+    preprocess.process(cloud, output);
+    ASSERT_EQ(output->size(), 1u);
+    EXPECT_EQ(output->front().x, 1);
+    EXPECT_EQ(output->front().y, 2);
+    EXPECT_EQ(output->front().z, 3);
+    EXPECT_EQ(output->front().intensity, 7);
+    EXPECT_EQ(output->front().normal_x, 0);
+    EXPECT_EQ(output->front().normal_y, 0);
+    EXPECT_EQ(output->front().normal_z, 0);
+    EXPECT_EQ(output->front().curvature, 0);
+    EXPECT_EQ(output->width, 1u);
+    EXPECT_EQ(output->height, 1u);
+    EXPECT_TRUE(output->is_dense);
+    // The inherited decoder does not transfer the ROS header to the PCL output.
+    EXPECT_TRUE(output->header.frame_id.empty());
+    EXPECT_EQ(output->header.stamp, 0u);
+    cloud->fields.erase(cloud->fields.begin());
+    preprocess.process(cloud, output);
+    ASSERT_EQ(output->size(), 1u);
+    EXPECT_EQ(output->front().intensity, std::numeric_limits<float>::max());
+    cloud->width = 0;
+    preprocess.process(cloud, output);
+    EXPECT_TRUE(output->empty());
+    EXPECT_EQ(output->width, 0u);
+    EXPECT_EQ(output->height, 0u);
+}
+}
+
+TEST(PreprocessCharacterization, AllSupportedDatatypesAndMetadata)
+{
+    using Field = sensor_msgs::msg::PointField;
+    CheckDatatype<int8_t>(Field::INT8);
+    CheckDatatype<uint8_t>(Field::UINT8);
+    CheckDatatype<int16_t>(Field::INT16);
+    CheckDatatype<uint16_t>(Field::UINT16);
+    CheckDatatype<int32_t>(Field::INT32);
+    CheckDatatype<uint32_t>(Field::UINT32);
+    CheckDatatype<float>(Field::FLOAT32);
+    CheckDatatype<double>(Field::FLOAT64);
+}
+
 TEST(PreprocessCharacterization, MissingCoordinatesProduceEmptyCloud)
 {
     auto cloud = std::make_unique<sensor_msgs::msg::PointCloud2>();
     Preprocess preprocess;
-    preprocess.time_unit = US;
     PointCloudXYZI::Ptr output(new PointCloudXYZI());
     preprocess.process(cloud, output);
     EXPECT_TRUE(output->empty());

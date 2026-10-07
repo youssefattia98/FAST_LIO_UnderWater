@@ -5,16 +5,10 @@
       frequency: 4.0
       extrinsic_T: [0.09382, -0.02148, 0.11593]
       extrinsic_R: [0.965925826, 0.0, 0.258819045, 0.0, 1.0, 0.0, -0.258819045, 0.0, 0.965925826]
-      fov_degree: 90.0
       max_range: 15.0
       min_range: 0.2
       xy_covariance: 0.003
       z_covariance: 0.003
-      scan_line: 16
-      scan_rate: 10
-      timestamp_unit: 2
-      point_filter_num: 2
-      feature_extract_enable: false
     imu:
       topic: /auv/imu/data_raw
       frequency: 300.0
