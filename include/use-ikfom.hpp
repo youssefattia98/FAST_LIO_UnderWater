@@ -1,6 +1,8 @@
 #ifndef USE_IKFOM_H
 #define USE_IKFOM_H
 
+#include <cmath>
+#include <Eigen/Core>
 #include <IKFoM_toolkit/esekfom/esekfom.hpp>
 
 typedef MTK::vect<3, double> vect3;
@@ -39,7 +41,7 @@ static_assert(state_ikfom::DOF == 27,
 static_assert(process_noise_ikfom::DOF == 12,
               "Process noise must contain IMU and IMU-bias noise only.");
 
-MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
+inline MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 {
 	MTK::get_cov<process_noise_ikfom>::type cov = MTK::get_cov<process_noise_ikfom>::type::Zero();
 	MTK::setDiagonal<process_noise_ikfom, vect3, 0>(cov, &process_noise_ikfom::ng, 0.0001);
@@ -50,7 +52,7 @@ MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 }
 
 //vect3 Lidar_offset_to_IMU(L_offset_to_I, 3);
-Eigen::Matrix<double, state_ikfom::DIM, 1> get_f(state_ikfom &s, const input_ikfom &in)
+inline Eigen::Matrix<double, state_ikfom::DIM, 1> get_f(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, state_ikfom::DIM, 1> res = Eigen::Matrix<double, state_ikfom::DIM, 1>::Zero();
 	vect3 omega;
@@ -64,7 +66,7 @@ Eigen::Matrix<double, state_ikfom::DIM, 1> get_f(state_ikfom &s, const input_ikf
 	return res;
 }
 
-Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> df_dx(state_ikfom &s, const input_ikfom &in)
+inline Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> df_dx(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> cov = Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF>::Zero();
 	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
@@ -83,7 +85,7 @@ Eigen::Matrix<double, state_ikfom::DIM, state_ikfom::DOF> df_dx(state_ikfom &s, 
 }
 
 
-Eigen::Matrix<double, state_ikfom::DIM, process_noise_ikfom::DOF> df_dw(state_ikfom &s, const input_ikfom &in)
+inline Eigen::Matrix<double, state_ikfom::DIM, process_noise_ikfom::DOF> df_dw(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, state_ikfom::DIM, process_noise_ikfom::DOF> cov =
 		Eigen::Matrix<double, state_ikfom::DIM, process_noise_ikfom::DOF>::Zero();
@@ -94,7 +96,7 @@ Eigen::Matrix<double, state_ikfom::DIM, process_noise_ikfom::DOF> df_dw(state_ik
 	return cov;
 }
 
-vect3 SO3ToEuler(const SO3 &orient) 
+inline vect3 SO3ToEuler(const SO3 &orient)
 {
 	Eigen::Matrix<double, 3, 1> _ang;
 	Eigen::Vector4d q_data = orient.coeffs().transpose();

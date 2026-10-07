@@ -1,4 +1,9 @@
+#pragma once
+
 #include <algorithm>
+#include <cstddef>
+#include <memory>
+#include <vector>
 #include <cmath>
 #include <math.h>
 #include <deque>
@@ -13,6 +18,7 @@
 #include <pcl/point_types.h>
 #include <condition_variable>
 #include <functional>
+#include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <pcl/common/transforms.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -26,7 +32,7 @@
 
 #define MAX_INI_COUNT (10)
 
-const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
+inline const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 
 /// *************IMU Process and undistortion
 class ImuProcess
@@ -116,7 +122,7 @@ class ImuProcess
   bool   imu_need_init_ = true;
 };
 
-ImuProcess::ImuProcess()
+inline ImuProcess::ImuProcess()
     : b_first_frame_(true), imu_need_init_(true), gravity_m_s2_(G_m_s2), start_timestamp_(-1), last_lidar_end_time_(-1.0)
 {
   init_iter_num = 1;
@@ -142,9 +148,9 @@ ImuProcess::ImuProcess()
   last_imu_.reset(new sensor_msgs::msg::Imu());
 }
 
-ImuProcess::~ImuProcess() {}
+inline ImuProcess::~ImuProcess() {}
 
-void ImuProcess::Reset() 
+inline void ImuProcess::Reset()
 {
   // ROS_WARN("Reset ImuProcess");
   mean_acc      = V3D(0, 0, -1.0);
@@ -160,68 +166,68 @@ void ImuProcess::Reset()
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
 
-void ImuProcess::set_extrinsic(const MD(4,4) &T)
+inline void ImuProcess::set_extrinsic(const MD(4,4) &T)
 {
   Lidar_T_wrt_IMU = T.block<3,1>(0,3);
   Lidar_R_wrt_IMU = T.block<3,3>(0,0);
 }
 
-void ImuProcess::set_extrinsic(const V3D &transl)
+inline void ImuProcess::set_extrinsic(const V3D &transl)
 {
   Lidar_T_wrt_IMU = transl;
   Lidar_R_wrt_IMU.setIdentity();
 }
 
-void ImuProcess::set_extrinsic(const V3D &transl, const M3D &rot)
+inline void ImuProcess::set_extrinsic(const V3D &transl, const M3D &rot)
 {
   Lidar_T_wrt_IMU = transl;
   Lidar_R_wrt_IMU = rot;
 }
 
-void ImuProcess::set_gyr_cov(const V3D &scaler)
+inline void ImuProcess::set_gyr_cov(const V3D &scaler)
 {
   cov_gyr_scale = scaler;
 }
 
-void ImuProcess::set_acc_cov(const V3D &scaler)
+inline void ImuProcess::set_acc_cov(const V3D &scaler)
 {
   cov_acc_scale = scaler;
 }
 
-void ImuProcess::set_gyr_bias_cov(const V3D &b_g)
+inline void ImuProcess::set_gyr_bias_cov(const V3D &b_g)
 {
   cov_bias_gyr = b_g;
 }
 
-void ImuProcess::set_acc_bias_cov(const V3D &b_a)
+inline void ImuProcess::set_acc_bias_cov(const V3D &b_a)
 {
   cov_bias_acc = b_a;
 }
 
-void ImuProcess::set_initial_cov(const V3D &b_g, const V3D &b_a, double grav)
+inline void ImuProcess::set_initial_cov(const V3D &b_g, const V3D &b_a, double grav)
 {
   init_cov_bias_gyr = b_g;
   init_cov_bias_acc = b_a;
   init_cov_grav = grav;
 }
 
-void ImuProcess::set_initial_aux_cov(const V3D &b_dvl, double b_pressure)
+inline void ImuProcess::set_initial_aux_cov(const V3D &b_dvl, double b_pressure)
 {
   init_cov_b_dvl = b_dvl;
   init_cov_b_pressure = b_pressure;
 }
 
-void ImuProcess::set_gravity(const double gravity_m_s2)
+inline void ImuProcess::set_gravity(const double gravity_m_s2)
 {
   gravity_m_s2_ = gravity_m_s2;
 }
 
-bool ImuProcess::IsInitialized() const
+inline bool ImuProcess::IsInitialized() const
 {
   return !imu_need_init_;
 }
 
-double ImuProcess::AccelerationScale() const
+inline double ImuProcess::AccelerationScale() const
 {
   const double mean_norm = mean_acc.norm();
   return std::isfinite(mean_norm) && mean_norm > 1e-9
@@ -229,7 +235,7 @@ double ImuProcess::AccelerationScale() const
              : 1.0;
 }
 
-void ImuProcess::IMU_init(
+inline void ImuProcess::IMU_init(
     const MeasureGroup &meas,
     esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state,
     int &N)
@@ -295,7 +301,7 @@ void ImuProcess::IMU_init(
 
 }
 
-bool ImuProcess::ReconstructContinuousDeskewPoses(
+inline bool ImuProcess::ReconstructContinuousDeskewPoses(
     const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
     double scan_begin_time,
     double scan_end_time,
@@ -447,7 +453,7 @@ bool ImuProcess::ReconstructContinuousDeskewPoses(
   return true;
 }
 
-void ImuProcess::UndistortPcl(
+inline void ImuProcess::UndistortPcl(
     const MeasureGroup &meas,
     Ekf &kf_state,
     PointCloudXYZI &pcl_out,
@@ -631,7 +637,7 @@ void ImuProcess::UndistortPcl(
   }
 }
 
-void ImuProcess::UndistortPclFastLio(
+inline void ImuProcess::UndistortPclFastLio(
     const MeasureGroup &meas,
     Ekf &kf_state,
     PointCloudXYZI &pcl_out)
@@ -743,7 +749,7 @@ void ImuProcess::UndistortPclFastLio(
   }
 }
 
-void ImuProcess::Process(
+inline void ImuProcess::Process(
     const MeasureGroup &meas,
     Ekf &kf_state,
     PointCloudXYZI::Ptr cur_pcl_un_,

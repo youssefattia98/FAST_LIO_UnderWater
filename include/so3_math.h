@@ -1,6 +1,7 @@
 #ifndef SO3_MATH_H
 #define SO3_MATH_H
 
+#include <cmath>
 #include <math.h>
 #include <Eigen/Core>
 

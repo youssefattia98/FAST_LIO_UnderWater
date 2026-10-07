@@ -189,6 +189,16 @@ if(BUILD_TESTING)
   target_include_directories(test_preprocess_characterization PRIVATE src ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_preprocess_characterization ${PCL_LIBRARIES})
   ament_target_dependencies(test_preprocess_characterization rclcpp sensor_msgs pcl_conversions)
+
+  ament_add_gtest(test_header_link
+    test/test_header_link.cpp test/header_link_other.cpp)
+  target_include_directories(test_header_link PRIVATE include src ${PCL_INCLUDE_DIRS})
+  ament_target_dependencies(test_header_link ${dependencies})
+  if(COMMAND rosidl_get_typesupport_target)
+    target_link_libraries(test_header_link ${cpp_typesupport_target})
+  else()
+    rosidl_target_interfaces(test_header_link ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  endif()
 endif()
 
 # ---------------- Install --------------- #
