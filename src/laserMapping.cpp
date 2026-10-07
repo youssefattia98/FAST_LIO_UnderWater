@@ -1527,7 +1527,12 @@ public:
             // sensor publishers and are supported by ROS 2 Humble and newer.
             lidar_qos.best_effort();
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                lid_topic, lidar_qos, standard_pcl_cbk, lidar_options);
+                lid_topic, lidar_qos,
+                [this](sensor_msgs::msg::PointCloud2::UniquePtr message) {
+                    ensure_sonar_frame_attached_to_body(message->header.frame_id);
+                    standard_pcl_cbk(std::move(message));
+                },
+                lidar_options);
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, rclcpp::QoS(rclcpp::KeepLast(200000)), imu_cbk, sensor_options);
@@ -1638,6 +1643,50 @@ public:
     }
 
 private:
+
+    void ensure_sonar_frame_attached_to_body(const std::string &frame_id)
+    {
+        if (frame_id.empty())
+        {
+            if (!empty_sonar_frame_warned_)
+            {
+                RCLCPP_WARN(this->get_logger(),
+                            "Incoming sonar cloud has an empty frame_id; RViz cannot place it in the UWFL2 TF tree.");
+                empty_sonar_frame_warned_ = true;
+            }
+            return;
+        }
+        if (frame_id == "body" || frame_id == sonar_frame_id_)
+        {
+            return;
+        }
+        if (!sonar_frame_id_.empty())
+        {
+            RCLCPP_ERROR(this->get_logger(),
+                         "Sonar frame changed from '%s' to '%s'; refusing to create a second static sensor transform.",
+                         sonar_frame_id_.c_str(), frame_id.c_str());
+            return;
+        }
+
+        Eigen::Quaterniond body_to_sonar_quat(Lidar_R_wrt_IMU);
+        body_to_sonar_quat.normalize();
+        geometry_msgs::msg::TransformStamped body_to_sonar;
+        body_to_sonar.header.stamp = this->get_clock()->now();
+        body_to_sonar.header.frame_id = "body";
+        body_to_sonar.child_frame_id = frame_id;
+        body_to_sonar.transform.translation.x = Lidar_T_wrt_IMU.x();
+        body_to_sonar.transform.translation.y = Lidar_T_wrt_IMU.y();
+        body_to_sonar.transform.translation.z = Lidar_T_wrt_IMU.z();
+        body_to_sonar.transform.rotation.x = body_to_sonar_quat.x();
+        body_to_sonar.transform.rotation.y = body_to_sonar_quat.y();
+        body_to_sonar.transform.rotation.z = body_to_sonar_quat.z();
+        body_to_sonar.transform.rotation.w = body_to_sonar_quat.w();
+        static_tf_broadcaster_->sendTransform(body_to_sonar);
+        sonar_frame_id_ = frame_id;
+        RCLCPP_INFO(this->get_logger(),
+                    "Attached sonar frame '%s' to UWFL2 body using mapping.extrinsic_R/T.",
+                    sonar_frame_id_.c_str());
+    }
 
     void reset_high_rate_odometry_prediction_locked()
     {
@@ -3354,6 +3403,8 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
+    std::string sonar_frame_id_;
+    bool empty_sonar_frame_warned_ = false;
     std::atomic<bool> corrected_map_publish_requested_{false};
     std::size_t corrected_map_subscriber_count_ = 0;
     std::int32_t next_corrected_map_marker_id_ = 1;

@@ -2122,6 +2122,36 @@ ROS_DOMAIN_ID=161 ros2 bag play \
 ROS_DOMAIN_ID=161 ros2 service call /map_save std_srvs/srv/Trigger '{}'
 ```
 
+### Single-Topic Sonar TF Ownership Follow-up (2026-10-07)
+
+- [x] Keep `/sonar_point_cloud` as the sole sonar cloud topic.
+- [x] Attach the incoming cloud frame to `body` with
+  `mapping.extrinsic_R/T`, without altering estimator measurements.
+- [x] Add a lossless bag repair tool that removes only a recorded transform
+  whose child is the sonar cloud frame and whose parent is not `body`.
+- [x] Build, run all package tests, and verify the transform on a short replay.
+
+The original back-and-forth bag contains both `World -> base_link` and static
+`base_link -> sonar_frame`, which makes RViz follow the external vehicle pose.
+Connecting that tree to UWFL2 would mix two odometries, while publishing a
+second parent for `sonar_frame` would violate the TF tree. The input bag was
+therefore preserved and a repaired copy was generated with:
+
+```bash
+tools/repair_sonar_tf_bag.py \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed_uwfl2_frames \
+  --force
+```
+
+The tool copied `709290` messages and removed the one conflicting static
+transform. A short isolated x1 replay confirmed `body -> sonar_frame` with
+translation `[0.09382,-0.02148,0.11593]` and `+6 deg` pitch, exactly matching
+the selected YAML extrinsic. The cloud remains tagged `sonar_frame`, and the
+repaired bag contains no recorded parent for that child. The build passed with
+only existing warnings; all four package test executables passed (`55` tests,
+zero errors or failures).
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
