@@ -2252,6 +2252,45 @@ colcon test --packages-select fast_lio --event-handlers console_cohesion+
 colcon test-result --test-result-base build/fast_lio --verbose
 ```
 
+### Sensor Parameter Schema Cleanup (2026-10-07)
+
+- [x] Replace legacy `common`, `preprocess`, and mixed `mapping` sensor keys
+  with explicit `sonar`, `imu`, `dvl`, `pressure`, and `magnetometer` groups.
+- [x] Remove unused debug, publication, scale, surface-reference, and
+  innovation-gate options without changing estimator behavior.
+- [x] Derive sonar and DVL timeouts from their configured frequencies.
+- [x] Initialize gravity from `imu.initial_gravity_estimate`, then use the
+  current IKF gravity-state magnitude for pressure conversion.
+- [x] Migrate every repository config with identical key coverage and preserve
+  its existing tuned numerical values.
+- [x] Build, run focused unit tests, start every config, and run short disabled-
+  mode estimator regressions before completing this checkpoint.
+
+Implementation commit: `13ba9bc`.
+
+All eight configs now exactly match the same `69` declared parameters and each
+started the mapping node successfully. The package build passed and the focused
+suite passed `59/59` tests. Short 120-second sensor-time replays at x15 using
+`sim3` and `backAndforth_CSSN3_processed` both initialized the map and published
+finite odometry with no NaN, negative-covariance, or parameter errors. DVL
+timeout diagnostics can occur during the bags' expected acoustic dropouts now
+that the warning interval is exactly one configured 15 Hz period; this warning
+does not reject or modify a measurement.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+colcon test-result --test-result-base build/fast_lio --verbose
+ros2 bag play /home/attia/ros2_ws/bags/DONE/sim3 \
+  --rate 15 --playback-duration 120
+ros2 bag play \
+  /home/attia/ros2_ws/bags/DONE/backAndforth_CSSN3_processed \
+  --rate 15 --playback-duration 120
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
