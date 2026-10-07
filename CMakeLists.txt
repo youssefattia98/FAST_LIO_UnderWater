@@ -125,7 +125,8 @@ target_include_directories(uwfl2_loop_closure PUBLIC
 )
 target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam yaml-cpp uwfl2_ikdtree ${PCL_LIBRARIES})
 
-add_executable(fastlio_mapping src/laserMapping.cpp src/preprocess.cpp)
+add_executable(fastlio_mapping src/laserMapping.cpp src/preprocess.cpp
+  src/auxiliary_sensor_fusion.cpp)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -175,7 +176,8 @@ if(BUILD_TESTING)
     test/test_odometry_covariance.cpp)
   target_include_directories(test_odometry_covariance PRIVATE include)
 
-  ament_add_gtest(test_estimator_characterization test/test_estimator_characterization.cpp)
+  ament_add_gtest(test_estimator_characterization test/test_estimator_characterization.cpp
+    src/auxiliary_sensor_fusion.cpp)
   target_include_directories(test_estimator_characterization PRIVATE include src ${PCL_INCLUDE_DIRS})
   ament_target_dependencies(test_estimator_characterization ${dependencies})
   if(COMMAND rosidl_get_typesupport_target)
@@ -191,7 +193,7 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_preprocess_characterization rclcpp sensor_msgs pcl_conversions)
 
   ament_add_gtest(test_header_link
-    test/test_header_link.cpp test/header_link_other.cpp)
+    test/test_header_link.cpp test/header_link_other.cpp src/auxiliary_sensor_fusion.cpp)
   target_include_directories(test_header_link PRIVATE include src ${PCL_INCLUDE_DIRS})
   ament_target_dependencies(test_header_link ${dependencies})
   if(COMMAND rosidl_get_typesupport_target)
