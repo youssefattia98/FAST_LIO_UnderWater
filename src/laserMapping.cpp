@@ -50,6 +50,7 @@
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <Eigen/Core>
@@ -74,6 +75,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "auxiliary_sensor_fusion.hpp"
+#include "loop_closure/config_profile.hpp"
 #include "loop_closure/loop_closure_manager.hpp"
 #include "loop_closure/state_transport.hpp"
 #include "corrected_map_visualization.hpp"
@@ -1118,7 +1120,6 @@ public:
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
         this->declare_parameter<bool>("loop_closure.enable", false);
         this->declare_parameter<string>("loop_closure.profile", "balanced");
-        this->declare_parameter<string>("loop_closure.diagnostics_directory", "");
         aux_fusion_.declare_parameters(*this);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
@@ -1290,59 +1291,24 @@ public:
         odometry_prediction_kf_.init_dyn_share(
             get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
-        uwfl2::loop_closure::LoopClosureConfig loop_config;
+        bool loop_enabled = false;
         string loop_profile;
-        string diagnostics_directory;
-        this->get_parameter_or<bool>("loop_closure.enable", loop_config.enabled, false);
+        this->get_parameter_or<bool>("loop_closure.enable", loop_enabled, false);
         this->get_parameter_or<string>("loop_closure.profile", loop_profile, "balanced");
-        this->get_parameter_or<string>("loop_closure.diagnostics_directory",
-                                       diagnostics_directory, "");
-        loop_config.automatic_detection_enabled = true;
-        loop_visualization_enabled_ = loop_config.enabled;
-        loop_config.std_detection.minimum_loop_duration_s = 0.0;
-        if (loop_profile == "simulation")
-        {
-            loop_config.pose_graph.odometry_rotation_variance_floor = 1e-6;
-            loop_config.pose_graph.odometry_translation_variance_floor = 1e-4;
-            loop_config.pose_graph.loop_minimum_initial_nis = 1.0;
-            loop_config.pose_graph.loop_maximum_initial_nis = 30.0;
-            loop_config.std_detection.accepted_loop_cooldown_s = 30.0;
-        }
-        else if (loop_profile == "sparse_sonar")
-        {
-            loop_config.registration.maximum_iterations = 24;
-            loop_config.pose_graph.loop_maximum_initial_nis = 4000.0;
-            loop_config.std_detection.geometric_overlap_minimum = 0.60;
-            loop_config.std_detection.single_detection_overlap_minimum = 0.95;
-            loop_config.std_detection.accepted_loop_cooldown_s = 30.0;
-            loop_config.std_detection.confirmation_translation_m = 2.0;
-            loop_config.std_detection.confirmation_rotation_rad = 20.0 * PI_M / 180.0;
-        }
-        else if (loop_profile != "balanced")
+        if (loop_profile != "balanced" && loop_profile != "simulation")
         {
             throw std::invalid_argument(
                 "Unknown loop_closure.profile '" + loop_profile +
-                "' (expected balanced, simulation, or sparse_sonar)");
+                "' (expected balanced or simulation)");
         }
+        const auto loop_profile_path = std::filesystem::path(
+            ament_index_cpp::get_package_share_directory("fast_lio")) /
+            "config" / "loop_closure" / (loop_profile + ".yaml");
+        auto loop_config =
+            uwfl2::loop_closure::load_config_profile(loop_profile_path);
+        loop_config.enabled = loop_enabled;
+        loop_visualization_enabled_ = loop_enabled;
         loop_config.shadow_map.voxel_size_m = filter_size_map_min;
-        loop_config.diagnostics_directory = diagnostics_directory;
-        benchmark_diagnostics_directory_ = diagnostics_directory;
-        if (!benchmark_diagnostics_directory_.empty())
-        {
-            std::filesystem::create_directories(
-                benchmark_diagnostics_directory_);
-            front_end_timing_.open(
-                benchmark_diagnostics_directory_ / "front_end_timing.csv");
-            front_end_timing_
-                << "scan_timestamp,status,elapsed_ms,effective_features,"
-                   "input_points,scan_accepted,map_points_inserted,map_points,"
-                   "sonar_dx_rot_deg,sonar_dx_pos_m,sonar_dx_roll_deg,"
-                   "sonar_dx_pitch_deg,sonar_dx_yaw_deg,sonar_dx_x_m,"
-                   "sonar_dx_y_m,sonar_dx_z_m,imu_aux_ms,"
-                   "fov_downsample_ms,lidar_iekf_ms,correspondence_ms,"
-                   "measurement_model_ms,odom_publish_ms,map_incremental_ms,"
-                   "loop_bookkeeping_ms\n";
-        }
         if (loop_config.enabled)
         {
             loop_closure_ =

@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -7,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "loop_closure/bounded_queue.hpp"
+#include "loop_closure/config_profile.hpp"
 #include "loop_closure/loop_closure_manager.hpp"
 #include "loop_closure/loop_closure_types.hpp"
 #include "loop_closure/pose_graph.hpp"
@@ -45,6 +47,22 @@ lc::Keyframe keyframe(std::uint64_t id, const lc::Pose3d &T_local_vehicle)
 }
 
 }  // namespace
+
+TEST(LoopClosureProfile, LoadsBalancedAndSimulationFiles)
+{
+    const auto root = std::filesystem::path(ROOT_DIR) / "config" / "loop_closure";
+    const auto balanced = lc::load_config_profile(root / "balanced.yaml");
+    const auto simulation = lc::load_config_profile(root / "simulation.yaml");
+
+    EXPECT_TRUE(balanced.automatic_detection_enabled);
+    EXPECT_TRUE(simulation.automatic_detection_enabled);
+    EXPECT_DOUBLE_EQ(balanced.std_detection.minimum_loop_duration_s, 0.0);
+    EXPECT_DOUBLE_EQ(simulation.std_detection.minimum_loop_duration_s, 0.0);
+    EXPECT_DOUBLE_EQ(balanced.pose_graph.loop_maximum_initial_nis, 12.592);
+    EXPECT_DOUBLE_EQ(simulation.pose_graph.loop_maximum_initial_nis, 30.0);
+    EXPECT_DOUBLE_EQ(balanced.std_detection.accepted_loop_cooldown_s, 0.0);
+    EXPECT_DOUBLE_EQ(simulation.std_detection.accepted_loop_cooldown_s, 30.0);
+}
 
 TEST(LoopClosurePose, UsesDocumentedFullSe3Direction)
 {

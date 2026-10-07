@@ -124,5 +124,4 @@
 
         loop_closure:
             enable: true
-            profile: "sparse_sonar"
-            diagnostics_directory: ""
+            profile: "balanced"

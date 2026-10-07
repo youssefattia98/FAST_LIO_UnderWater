@@ -123,4 +123,3 @@
         loop_closure:
             enable: false
             profile: "balanced"
-            diagnostics_directory: ""

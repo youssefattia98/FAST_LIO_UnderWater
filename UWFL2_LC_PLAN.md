@@ -2218,6 +2218,38 @@ ROS_DOMAIN_ID=221 ros2 bag play \
   --rate 15 --playback-duration 30
 ```
 
+### External Loop-Closure Profiles (2026-10-07)
+
+- [x] Remove `diagnostics_directory` from the public ROS/YAML interface.
+- [x] Remove the `sparse_sonar` profile and migrate its users to `balanced`.
+- [x] Move every advanced `balanced` and `simulation` value into profile files
+  under `config/loop_closure`; keep elapsed-time gating fixed off.
+- [x] Load the selected profile file at node startup instead of duplicating
+  profile constants in `laserMapping.cpp`.
+- [x] Build, test both profile loaders, validate all bag YAMLs, and run startup
+  checks with both profiles.
+
+The package built successfully and the focused suite passed `56/56` tests,
+including direct loading of both profile files and confirmation that elapsed
+time remains disabled as a detector gate. All eight bag YAMLs now contain the
+same `82` public parameter paths. Every configuration started successfully;
+the balanced and simulation startup messages confirmed the selected profile.
+The installed package also contains both profile files.
+
+The first parallel startup command assigned domain IDs `233--237`, above the
+valid ROS 2 range, so those five processes exited before node creation. They
+were rerun on isolated domains `220--224` and passed. This was a test-command
+error, not an estimator or configuration failure.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+colcon test-result --test-result-base build/fast_lio --verbose
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:

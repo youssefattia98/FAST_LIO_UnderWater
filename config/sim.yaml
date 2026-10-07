@@ -122,4 +122,3 @@
         loop_closure:
             enable: true
             profile: "simulation"
-            diagnostics_directory: ""

@@ -1,0 +1,73 @@
+# Simulation profile. It retains the more conservative graph covariance floors
+# and post-acceptance cooldown used by the validated simulation runs. Detection
+# remains independent of elapsed mission time.
+loop_closure:
+  queue_capacity: 8
+
+  keyframes:
+    translation_m: 1.0
+    rotation_deg: 10.0
+    minimum_interval_s: 0.5
+    maximum_interval_s: 5.0
+    minimum_points: 20
+
+  pose_graph:
+    prior_rotation_sigma_rad: 1.0e-4
+    prior_translation_sigma_m: 1.0e-4
+    odometry_rotation_variance_floor: 1.0e-6
+    odometry_translation_variance_floor: 1.0e-4
+    loop_minimum_keyframe_separation: 5
+    loop_maximum_initial_translation_error_m: 10.0
+    loop_maximum_initial_rotation_error_deg: 45.0
+    loop_minimum_initial_nis: 1.0
+    loop_maximum_initial_nis: 30.0
+    loop_maximum_pose_correction_translation_m: 20.0
+    loop_maximum_pose_correction_rotation_deg: 45.0
+
+  shadow_map:
+    radius_m: 80.0
+    maximum_keyframes: 1000
+    maximum_input_points: 3000000
+
+  registration:
+    maximum_iterations: 12
+    minimum_effective_points: 30
+    maximum_neighbor_distance_m: 2.25
+    plane_fit_threshold_m: 0.12
+    robust_huber_delta_m: 0.15
+    convergence_translation_m: 1.0e-4
+    convergence_rotation_deg: 0.00572957795
+    minimum_information_eigenvalue: 1.0e-5
+    maximum_information_condition: 1.0e10
+    maximum_translation_m: 2.0
+    maximum_rotation_deg: 15.0
+
+  std_detector:
+    minimum_keyframe_separation: 20
+    voxel_size_m: 0.6
+    minimum_voxel_points: 5
+    plane_eigenvalue_ratio: 0.08
+    maximum_keypoints: 80
+    triangle_neighbor_count: 8
+    maximum_triangles: 1000
+    triangle_minimum_side_m: 0.4
+    triangle_maximum_side_m: 12.0
+    triangle_side_resolution_m: 0.20
+    triangle_relative_error: 0.08
+    binary_similarity_minimum: 0.25
+    minimum_triangle_matches: 5
+    maximum_candidates: 8
+    minimum_ransac_inliers: 5
+    ransac_vertex_threshold_m: 0.35
+    geometric_overlap_distance_m: 0.35
+    geometric_overlap_minimum: 0.20
+    refinement_iterations: 6
+    required_consistent_detections: 2
+    single_detection_overlap_minimum: 0.80
+    accepted_loop_cooldown_s: 30.0
+    confirmation_translation_m: 1.0
+    confirmation_rotation_deg: 10.0
+    confirmation_target_id_tolerance: 5
+    maximum_pose_distance_m: 15.0
+    maximum_prior_translation_error_m: 10.0
+    maximum_prior_rotation_error_deg: 45.0

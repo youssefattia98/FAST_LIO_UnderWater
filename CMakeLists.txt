@@ -64,6 +64,7 @@ find_path(MATPLOTLIB_CPP_INCLUDE_DIRS "matplotlibcpp.h")
 
 # ROS dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -77,6 +78,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 set(dependencies
+  ament_index_cpp
   rclcpp
   rclcpp_components
   geometry_msgs
@@ -93,6 +95,7 @@ set(dependencies
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io kdtree)
 find_package(GTSAM 4.2 REQUIRED MODULE)
+find_package(yaml-cpp REQUIRED)
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
@@ -117,6 +120,7 @@ target_include_directories(uwfl2_ikdtree PUBLIC
 target_link_libraries(uwfl2_ikdtree PUBLIC ${PCL_LIBRARIES})
 
 add_library(uwfl2_loop_closure
+  src/loop_closure/config_profile.cpp
   src/loop_closure/loop_closure_manager.cpp
   src/loop_closure/latest_scan_registration.cpp
   src/loop_closure/pose_graph.cpp
@@ -127,7 +131,7 @@ target_include_directories(uwfl2_loop_closure PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam uwfl2_ikdtree ${PCL_LIBRARIES})
+target_link_libraries(uwfl2_loop_closure PUBLIC Eigen3::Eigen gtsam yaml-cpp uwfl2_ikdtree ${PCL_LIBRARIES})
 
 add_executable(fastlio_mapping src/laserMapping.cpp src/preprocess.cpp)
 target_include_directories(fastlio_mapping PUBLIC

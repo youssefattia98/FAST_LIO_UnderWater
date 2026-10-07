@@ -119,5 +119,4 @@
         # Loop closure remains optional and disabled by default.
         loop_closure:
             enable: false
-            profile: "sparse_sonar"
-            diagnostics_directory: ""
+            profile: "balanced"
