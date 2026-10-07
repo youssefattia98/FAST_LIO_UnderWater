@@ -1,0 +1,129 @@
+/**:
+    ros__parameters:
+        max_iteration: 8
+        filter_size_surf: 0.3
+        filter_size_map: 0.3
+        cube_side_length: 100.0
+        map_file_path: "./test.pcd"
+
+        common:
+            lid_topic: "/sonar_point_cloud"
+            imu_topic: "/auv/imu/data_raw"
+            world_frame: "World"
+
+            # Dataset-specific initial poses cannot be averaged element-wise:
+            # doing so would not produce a valid SE(3) rotation. Start NTNU in
+            # its own local World frame and replace this pose if surveyed.
+            world_to_camera_init_T: [ 0.0, 0.0, 0.0 ]
+            world_to_camera_init_R: [ 1.0, 0.0, 0.0,
+                                      0.0, 1.0, 0.0,
+                                      0.0, 0.0, 1.0 ]
+            imu_rate_hz: 100.0
+            lidar_timeout: 1.0
+            gravity_m_s2: 9.806
+
+        preprocess:
+            blind: 0.2
+
+        mapping:
+            minimum_scan_points: 5
+            minimum_effective_features: 1
+            noiseless_imu: false
+            obs_manager_sonar_timeout: 0.5
+            obs_manager_ramp_time: 1.0
+            obs_manager_freeze_cov: 1.0e-10
+            imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
+
+            b_acc_cov: 0.12022
+            b_gyr_cov: 4.06e-5
+            init_b_acc_cov: 0.001
+            init_b_gyr_cov: 0.0001
+            init_grav_cov: 0.00001
+
+            acc_cov: 0.1
+            gyr_cov: 0.000001
+            imu_orientation_cov: 3.0461742e-6
+            imu_orientation_gate_sigma: 0.0
+            accel_attitude_cov: 1.2184697e-3
+            accel_attitude_norm_gate: 2.0
+            laser_point_cov_xy: 0.100002
+            laser_point_cov_z: 0.160002
+            fov_degree: 90.0
+            det_range: 15.0
+            extrinsic_T: [ 0.09382, 0.02148, 0.11593 ]
+            extrinsic_R: [ 0.994521895, 0.0, 0.104528463,
+                           0.0,         1.0, 0.0,
+                          -0.104528463, 0.0, 0.994521895 ]
+
+        dvl:
+            enable: true
+            topic: "/auv/dvl"
+            extrinsic_T: [ -0.24219, 0.16095, -0.11538 ]
+            extrinsic_R: [ 1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0 ]
+            dvl_timeout: 0.55
+            velocity_cov: 5.7e-4
+            innovation_gate_sigma: 0.0
+            bias_init_cov: 6.04e-9
+
+        pressure:
+            enable: true
+            topic: "/auv/pressure/scaled2"
+            extrinsic_T: [ -0.24219, -0.03954, 0.01898 ]
+            surface_pressure: 103889.6
+            pressure_timeout: 0.25
+            fluid_density: 1025.6
+            gravity: 9.80665
+            pressure_cov: 4.0652529e4
+            # Defined for completeness; matches the shared default/simulation value.
+            bias_init_cov: 1.0e-6
+            innovation_gate_sigma: 0.0
+            surface_z: 0.0
+
+        magnetometer:
+            enable: true
+            topic: "/auv/imu/magnetic_field"
+            extrinsic_R: [ 1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0 ]
+            hard_iron_offset: [-4.8399958768e-07, -2.1439576902e-06, -6.5980944961e-06]
+            soft_iron_matrix: [0.99935443753, -0.000517094627299, -0.00741214083726,
+                                -0.000517094627299, 1.01922807501, -0.00687066034456,
+                                -0.00741214083726, -0.00687066034456, 0.981870062061]
+            mag_cov: 75.2
+            # These estimator-state parameters occur in the LF vehicle config.
+            earth_field_imu: [ -279.57, 148.45, 513.70 ]
+            b_mag_init_cov: 1.0e6
+            b_mag_proc_cov: 0.001
+            # Mean of the four source files that define this parameter.
+            heading_cov_floor: 0.00250075
+            innovation_gate_sigma: 1.8
+            mag_timeout: 0.25
+
+        publish:
+            map_en: true
+            path_en: false
+
+        pcd_save:
+            pcd_save_en: true
+            interval: -1
+
+        # Loop closure remains optional and disabled by default.
+        loop_closure:
+            enable: false
+            automatic_detection_enable: true
+            visualization_enable: true
+            keyframe_maximum_interval_s: 5.0
+            std_minimum_loop_duration_s: 300.0
+            std_overlap_minimum: 0.60
+            std_required_confirmations: 2
+            std_single_detection_overlap_minimum: 0.95
+            std_confirmation_translation_m: 2.0
+            std_confirmation_rotation_deg: 20.0
+            std_accepted_loop_cooldown_s: 30.0
+            registration_maximum_iterations: 24
+            odometry_rotation_variance_floor: 1.0e-6
+            odometry_translation_variance_floor: 1.0e-4
+            loop_minimum_initial_nis: 1.0
+            loop_maximum_initial_nis: 4000.0

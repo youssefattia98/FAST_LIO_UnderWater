@@ -48,7 +48,7 @@
 
 
             acc_cov: 0.1
-            gyr_cov: 1e-6
+            gyr_cov: 0.0000055
             imu_orientation_cov: 3.0461742e-6
             imu_orientation_gate_sigma: 0.0
             laser_point_cov_xy: 1e-5
@@ -93,7 +93,7 @@
             soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
                                  0.000000, -1.257623, 0.000000,
                                  0.000000,  0.000000, -1.000000 ]
-            mag_cov: 100.0
+            mag_cov: 1.0
             b_mag_init_cov: 1.0e6
             b_mag_proc_cov: 0.001
             innovation_gate_sigma: 0.0

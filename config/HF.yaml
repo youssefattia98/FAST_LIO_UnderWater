@@ -15,10 +15,10 @@
             world_frame: "World"
             
             #HF
-            world_to_camera_init_T: [ 0.0, 0.0, 0.0 ]
-            world_to_camera_init_R: [ 1.0, 0.0, 0.0,
-                                      0.0, 1.0, 0.0,
-                                      0.0, 0.0, 1.0 ]
+            world_to_camera_init_T: [ -9.668248175874515, -0.37430017392994963, -1.75814490575442 ]
+            world_to_camera_init_R: [ -0.017350, -0.999844,  0.003273,
+                                    0.999736, -0.017397, -0.015004,
+                                    0.015058,  0.003012,  0.999882 ]
             imu_rate_hz: 200.0
             lidar_timeout: 0.25
             gravity_m_s2: 9.81
@@ -36,14 +36,14 @@
             imu_gyro_scale: [ 1.0, 1.0, 1.0 ]
 
             b_acc_cov: 0.2
-            b_gyr_cov: 0.000001
+            b_gyr_cov: 0.055
             init_b_acc_cov: 0.001
             init_b_gyr_cov: 0.0001
             init_grav_cov: 0.00001
 
 
             acc_cov: 0.1
-            gyr_cov: 0.000001
+            gyr_cov: 0.055
             imu_orientation_cov: 3.0461742e-6
             imu_orientation_gate_sigma: 0.0
             accel_attitude_cov: 1.2184697e-3
@@ -91,9 +91,9 @@
             soft_iron_matrix: [ -1.257623, 0.000000, 0.000000,
                                  0.000000, -1.257623, 0.000000,
                                  0.000000,  0.000000, -1.000000 ]
-            mag_cov: 75.0
+            mag_cov: 0.000001
             heading_cov_floor: 1.0e-6
-            innovation_gate_sigma: 3.0
+            innovation_gate_sigma: 0.0
             mag_timeout: 0.25
 
         publish:
