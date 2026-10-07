@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -44,24 +45,24 @@ def header_stamps(path: Path) -> dict[str, np.ndarray]:
     )
     topics = {"/Odometry": Odometry}
     reader.set_filter(rosbag2_py.StorageFilter(topics=list(topics)))
-    result: dict[str, list[float]] = {topic: [] for topic in topics}
+    result: dict[str, list[int]] = {topic: [] for topic in topics}
     while reader.has_next():
         topic, data, _ = reader.read_next()
         message = deserialize_message(data, topics[topic])
         result[topic].append(
-            float(message.header.stamp.sec) + float(message.header.stamp.nanosec) * 1e-9
+            message.header.stamp.sec * 10**9 + message.header.stamp.nanosec
         )
     return {topic: np.asarray(values) for topic, values in result.items()}
 
 
 def max_pose_difference(
     baseline: dict[str, Any], candidate: dict[str, Any]
-) -> tuple[float, float]:
+) -> tuple[float | None, float | None]:
     if (not len(baseline["odom_poses"])
             or len(baseline["odom_poses"]) != len(candidate["odom_poses"])
             or not np.isfinite(baseline["odom_poses"]).all()
             or not np.isfinite(candidate["odom_poses"]).all()):
-        return math.inf, math.inf
+        return None, None
     position = np.linalg.norm(
         baseline["odom_poses"][:, :3, 3] - candidate["odom_poses"][:, :3, 3], axis=1
     )
@@ -76,11 +77,25 @@ def max_pose_difference(
     return float(np.max(position, initial=0.0)), float(np.max(rotation, initial=0.0))
 
 
-def matching_maps(baseline: dict[str, Any], candidate: dict[str, Any]) -> bool:
+def matching_maps(baseline: dict[str, Any], candidate: dict[str, Any],
+                  baseline_run=None, candidate_run=None) -> bool:
     left, right = baseline.get("map", {}), candidate.get("map", {})
-    return bool(left.get("exists") and right.get("exists")
+    matching = bool(left.get("exists") and right.get("exists")
                 and left.get("points", 0) and right.get("points", 0)
                 and left.get("sha256") and left["sha256"] == right.get("sha256"))
+    if not matching:
+        return False
+    for evidence, run in ((left, baseline_run), (right, candidate_run)):
+        path = Path(evidence.get("path", ""))
+        if not path.is_file() or not path.stat().st_size:
+            return False
+        if hashlib.sha256(path.read_bytes()).hexdigest() != evidence["sha256"]:
+            return False
+        if run is not None:
+            manifest = json.loads((run / "manifest.json").read_text())
+            if manifest.get("map") != evidence or path.resolve() != (run / "test.pcd").resolve():
+                return False
+    return True
 
 
 def disabled_loop(path: Path) -> bool:
@@ -117,16 +132,22 @@ def main() -> int:
             if args.check_timestamps:
                 failures.append(f"{topic} timestamp comparison unavailable: unequal counts")
         else:
-            difference = float(np.max(np.abs(left - right), initial=0.0))
+            difference = float(np.max(np.abs(left - right), initial=0)) / 1e9
             stamp_differences[topic] = difference
             if args.check_timestamps and difference > args.timestamp_tolerance:
                 failures.append(f"{topic} timestamp difference {difference:.3e} s")
 
-    if position_max > args.position_tolerance:
+    if position_max is None or rotation_max is None:
+        failures.append("pose comparison unavailable: empty, unequal or non-finite samples")
+    elif position_max > args.position_tolerance:
         failures.append(f"maximum position difference {position_max:.3e} m")
-    if rotation_max > args.rotation_tolerance_rad:
+    if rotation_max is not None and rotation_max > args.rotation_tolerance_rad:
         failures.append(f"maximum rotation difference {rotation_max:.3e} rad")
-    map_hash_equal = matching_maps(baseline_metrics, candidate_metrics)
+    if baseline_trajectory["odom_frames"] != candidate_trajectory["odom_frames"]:
+        failures.append("odometry frame identifiers or frame sequence differ")
+    if baseline_metrics.get("status") != "complete" or candidate_metrics.get("status") != "complete":
+        failures.append("run status is not complete")
+    map_hash_equal = matching_maps(baseline_metrics, candidate_metrics, baseline, candidate)
     if args.check_map and not map_hash_equal:
         failures.append("map evidence missing, empty, or SHA-256 differs")
     if args.require_no_loop:
@@ -141,8 +162,11 @@ def main() -> int:
     ).get("p95")
     latency_ratio = None
     if baseline_lag and candidate_lag:
-        latency_ratio = candidate_lag / baseline_lag
-        if latency_ratio > 1.0 + args.latency_regression_fraction:
+        if not math.isfinite(baseline_lag) or not math.isfinite(candidate_lag):
+            failures.append("non-finite output-lag evidence")
+        else:
+            latency_ratio = candidate_lag / baseline_lag
+        if latency_ratio is not None and latency_ratio > 1.0 + args.latency_regression_fraction:
             failures.append(
                 f"p95 output-lag proxy regressed by {(latency_ratio - 1) * 100:.2f}%"
             )
@@ -159,8 +183,8 @@ def main() -> int:
         "map_hash_equal": map_hash_equal,
     }
     output = args.output.resolve() if args.output else candidate / "comparison.json"
-    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(report, indent=2, sort_keys=True))
+    output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
     return 0 if not failures else 1
 
 

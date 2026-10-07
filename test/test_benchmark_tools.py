@@ -2,6 +2,8 @@
 """Fixture coverage for benchmark configuration and missing-evidence checks."""
 
 import argparse
+import hashlib
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -68,8 +70,13 @@ class BenchmarkToolsTest(unittest.TestCase):
         self.assertFalse(compare.matching_maps(missing, missing))
         empty = {"map": {"exists": True, "sha256": "abc", "points": 0}}
         self.assertFalse(compare.matching_maps(empty, empty))
-        present = {"map": {"exists": True, "sha256": "abc", "points": 5}}
+        path = self.root / "test.pcd"
+        path.write_bytes(b"map fixture")
+        present = {"map": {"exists": True, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                           "points": 5, "path": str(path)}}
         self.assertTrue(compare.matching_maps(present, present))
+        path.unlink()
+        self.assertFalse(compare.matching_maps(present, present))
 
     def test_other_disabled_sensor_is_not_disabled_lc(self):
         (self.root / "runtime_config.yaml").write_text(yaml.safe_dump(self.document))
@@ -80,9 +87,9 @@ class BenchmarkToolsTest(unittest.TestCase):
 
     def test_empty_and_nonfinite_trajectories_fail(self):
         empty = {"odom_poses": np.empty((0, 4, 4))}
-        self.assertTrue(np.isinf(compare.max_pose_difference(empty, empty)).all())
+        self.assertEqual(compare.max_pose_difference(empty, empty), (None, None))
         bad = {"odom_poses": np.full((1, 4, 4), np.nan)}
-        self.assertTrue(np.isinf(compare.max_pose_difference(bad, bad)).all())
+        self.assertEqual(compare.max_pose_difference(bad, bad), (None, None))
         good = {"odom_poses": np.eye(4)[None, :, :]}
         self.assertEqual(compare.max_pose_difference(good, good), (0.0, 0.0))
 
@@ -94,8 +101,12 @@ class BenchmarkToolsTest(unittest.TestCase):
 
     def test_shared_timestamp_comparison_does_not_align_poses(self):
         left = {"odom_times": np.array([1.0, 2.0, 3.0]),
+                "odom_stamps_ns": np.array([10**9, 2*10**9, 3*10**9]),
+                "odom_frames": [("camera_init", "body")] * 3,
                 "odom_poses": np.repeat(np.eye(4)[None], 3, axis=0)}
         right = {"odom_times": np.array([1.0, 3.0]),
+                 "odom_stamps_ns": np.array([10**9, 3*10**9]),
+                 "odom_frames": [("camera_init", "body")] * 2,
                  "odom_poses": np.repeat(np.eye(4)[None], 2, axis=0)}
         report = shared_pose_comparison(left, right)
         self.assertEqual(report["shared_samples"], 2)
@@ -103,7 +114,32 @@ class BenchmarkToolsTest(unittest.TestCase):
         right["odom_poses"][1, 0, 3] = 0.2
         self.assertEqual(shared_pose_comparison(left, right)["position_max_m"], 0.2)
         right["odom_times"] += 10.0
+        right["odom_stamps_ns"] += 10*10**9
         self.assertEqual(shared_pose_comparison(left, right)["shared_samples"], 0)
+
+    def test_native_nanoseconds_and_frame_mismatch(self):
+        stamp = 1780000000 * 10**9
+        left = {"odom_times": np.array([1780000000.0]),
+                "odom_stamps_ns": np.array([stamp]),
+                "odom_frames": [("camera_init", "body")],
+                "odom_poses": np.eye(4)[None]}
+        right = dict(left, odom_stamps_ns=np.array([stamp + 1]))
+        self.assertEqual(shared_pose_comparison(left, right)["shared_samples"], 0)
+        right = dict(left, odom_frames=[("World", "body")])
+        self.assertFalse(shared_pose_comparison(left, right)["frames_equal"])
+
+    def test_manifest_map_evidence_and_standard_json(self):
+        path = self.root / "test.pcd"
+        path.write_bytes(b"map fixture")
+        evidence = {"path": str(path), "exists": True, "points": 1,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        metrics = {"map": evidence}
+        (self.root / "manifest.json").write_text(json.dumps(metrics))
+        self.assertTrue(compare.matching_maps(metrics, metrics, self.root, self.root))
+        (self.root / "manifest.json").write_text("{}")
+        self.assertFalse(compare.matching_maps(metrics, metrics, self.root, self.root))
+        missing = compare.max_pose_difference({"odom_poses": []}, {"odom_poses": []})
+        self.assertEqual(json.dumps(missing, allow_nan=False), "[null, null]")
 
 
 if __name__ == "__main__":

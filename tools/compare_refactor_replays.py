@@ -37,8 +37,8 @@ def odometry_fields(bag):
 
 
 def shared_pose_comparison(left, right):
-    first = np.rint(left["odom_times"] * 1e9).astype(np.int64)
-    second = np.rint(right["odom_times"] * 1e9).astype(np.int64)
+    first = left["odom_stamps_ns"]
+    second = right["odom_stamps_ns"]
     common, i, j = np.intersect1d(first, second, return_indices=True)
     if not len(common):
         return {"shared_samples": 0, "position_max_m": None, "rotation_matrix_max": None}
@@ -46,6 +46,8 @@ def shared_pose_comparison(left, right):
     return {
         "baseline_samples": len(first), "candidate_samples": len(second),
         "shared_samples": len(common),
+        "frames_equal": all(left["odom_frames"][a] == right["odom_frames"][b]
+                            for a, b in zip(i, j)),
         "shared_fraction": len(common) / min(len(first), len(second)),
         "shared_time_span_fraction": float((common[-1] - common[0]) /
             max(1, min(first[-1], second[-1]) - max(first[0], second[0]))),
@@ -84,7 +86,8 @@ def main():
             first_metrics = json.loads((baseline / "metrics.json").read_text())
             second_metrics = json.loads((candidate / "metrics.json").read_text())
             report.update({"bag": bag, "variant": variant,
-                           "map_hash_equal": matching_maps(first_metrics, second_metrics),
+                           "map_hash_equal": matching_maps(first_metrics, second_metrics,
+                                                          baseline, candidate),
                            "invalid_covariance_baseline": first["invalid_odom_covariance"],
                            "invalid_covariance_candidate": second["invalid_odom_covariance"],
                            "baseline": str(baseline), "candidate": str(candidate)})
@@ -96,6 +99,7 @@ def main():
                 and first_metrics.get("status") == "complete"
                 and second_metrics.get("status") == "complete"
                 and report["shared_samples"] >= 100
+                and report["frames_equal"]
                 and report["shared_time_span_fraction"] >= 0.9
                 and np.isfinite(report["position_max_m"])
                 and report["position_max_m"] <= 1e-9
@@ -112,8 +116,13 @@ def main():
                 and np.isfinite(report["minimum_covariance_eigenvalue"])
                 and report["minimum_covariance_eigenvalue"] >= -1e-9
                 and (variant == "INS" or report["map_hash_equal"]))
+            if not report["passed"]:
+                report["failure_reason"] = "Insufficient shared coverage, frame/state/covariance mismatch, invalid covariance, or missing map/run evidence"
+            for key, value in list(report.items()):
+                if isinstance(value, float) and not np.isfinite(value):
+                    report[key] = None
             reports.append(report)
-    args.output.write_text(json.dumps(reports, indent=2) + "\n")
+    args.output.write_text(json.dumps(reports, indent=2, allow_nan=False) + "\n")
     for report in reports:
         print(f"{report['bag']} {report['variant']}: pass={report['passed']} "
               f"shared={report['shared_samples']} pos={report['position_max_m']} "

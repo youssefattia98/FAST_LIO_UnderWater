@@ -106,7 +106,7 @@ def read_trajectories(bag_path: Path) -> dict[str, Any]:
         rosbag2_py.StorageFilter(topics=["/Odometry", "/tf", "/tf_static"])
     )
 
-    odom: list[tuple[float, np.ndarray]] = []
+    odom = []
     gt: list[tuple[float, np.ndarray]] = []
     world_from_camera = np.eye(4)
     invalid_odom_covariance = 0
@@ -119,7 +119,9 @@ def read_trajectories(bag_path: Path) -> dict[str, Any]:
             transform = transform_from_components(
                 message.pose.pose.position, message.pose.pose.orientation
             )
-            odom.append((stamp_to_sec(message.header.stamp), transform))
+            odom.append((stamp_to_sec(message.header.stamp), transform,
+                         message.header.stamp.sec * 10**9 + message.header.stamp.nanosec,
+                         (message.header.frame_id, message.child_frame_id)))
             covariance = np.asarray(message.pose.covariance, dtype=float).reshape(6, 6)
             covariance = 0.5 * (covariance + covariance.T)
             if np.all(np.isfinite(covariance)):
@@ -146,7 +148,7 @@ def read_trajectories(bag_path: Path) -> dict[str, Any]:
             elif parent == "World" and child == "BROV_low":
                 gt.append((stamp_to_sec(transform_message.header.stamp), transform))
 
-    odom.sort(key=lambda item: item[0])
+    odom.sort(key=lambda item: item[2])
     gt.sort(key=lambda item: item[0])
     odom_times = np.asarray([item[0] for item in odom], dtype=float)
     odom_poses = np.asarray([world_from_camera @ item[1] for item in odom])
@@ -155,6 +157,8 @@ def read_trajectories(bag_path: Path) -> dict[str, Any]:
 
     return {
         "odom_times": odom_times,
+        "odom_stamps_ns": np.asarray([item[2] for item in odom], dtype=np.int64),
+        "odom_frames": [item[3] for item in odom],
         "odom_poses": odom_poses,
         "gt_times": gt_times,
         "gt_poses": gt_poses,
@@ -526,13 +530,13 @@ def input_delivery_metrics(run: Path, manifest: dict[str, Any]) -> dict[str, Any
     source = metadata_metrics(bag / "metadata.yaml")
     runtime = yaml.safe_load((run / "runtime_config.yaml").read_text())
     params = runtime.get("/**", {}).get("ros__parameters", {})
-    lidar_topic = params.get("common", {}).get("lid_topic", "")
-    imu_topic = params.get("common", {}).get("imu_topic", "")
+    lidar_topic = params.get("sonar", {}).get("topic", "")
+    imu_topic = params.get("imu", {}).get("topic", "")
     topics = source.get("topic_counts", {})
     lidar_expected = int(topics.get(lidar_topic, 0)) if lidar_topic else 0
     imu_expected = int(topics.get(imu_topic, 0)) if imu_topic else 0
-    lidar_received = int(summary.get("lidar_callbacks_received", 0))
-    imu_received = int(summary.get("imu_callbacks_received", 0))
+    lidar_received = summary.get("lidar_callbacks_received")
+    imu_received = summary.get("imu_callbacks_received")
     return {
         "source_topic_counts": {
             "lidar_topic": lidar_topic,
@@ -542,9 +546,11 @@ def input_delivery_metrics(run: Path, manifest: dict[str, Any]) -> dict[str, Any
         },
         "callback_delivery": {
             "lidar_received": lidar_received,
-            "lidar_missing": max(0, lidar_expected - lidar_received),
+            "lidar_missing": max(0, lidar_expected - lidar_received)
+            if lidar_received is not None else None,
             "imu_received": imu_received,
-            "imu_missing": max(0, imu_expected - imu_received),
+            "imu_missing": max(0, imu_expected - imu_received)
+            if imu_received is not None else None,
         },
         "front_end_summary": summary,
     }
