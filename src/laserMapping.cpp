@@ -78,6 +78,7 @@
 #include "corrected_map_visualization.hpp"
 #include "lidar_scan_quality.hpp"
 #include "odometry_covariance.hpp"
+#include "odometry_output.hpp"
 #include "observability_manager.hpp"
 #include "preprocess.h"
 #include "sensor_parameter_utils.hpp"
@@ -175,7 +176,6 @@ MainEkf kf;
 state_ikfom state_point;
 vect3 pos_lid;
 
-nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::Quaternion geoQuat;
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
@@ -598,19 +598,6 @@ void save_to_pcd(const PointCloudXYZI &map)
     pcd_writer.writeBinary(map_file_path, map);
 }
 
-template<typename T>
-void set_posestamp(T & out)
-{
-    out.pose.position.x = state_point.pos(0);
-    out.pose.position.y = state_point.pos(1);
-    out.pose.position.z = state_point.pos(2);
-    out.pose.orientation.x = geoQuat.x;
-    out.pose.orientation.y = geoQuat.y;
-    out.pose.orientation.z = geoQuat.z;
-    out.pose.orientation.w = geoQuat.w;
-    
-}
-
 void update_state_outputs()
 {
     state_point = kf.get_x();
@@ -808,28 +795,10 @@ bool apply_accel_attitude_update(
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
-    odomAftMapped.header.frame_id = "camera_init";
-    odomAftMapped.child_frame_id = "body";
-    odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
-    set_posestamp(odomAftMapped.pose);
-
-    const auto pose_covariance = uwfl2::make_ros_pose_covariance(
-        kf.get_P(), kf.get_x().rot.toRotationMatrix());
-    odomAftMapped.pose.covariance = pose_covariance.values;
-    pubOdomAftMapped->publish(odomAftMapped);
-
-    geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "camera_init";
-    trans.child_frame_id = "body";
-    trans.header.stamp = get_ros_time(lidar_end_time);
-    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
-    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
-    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
-    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
-    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
-    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
-    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-    tf_br->sendTransform(trans);
+    const auto odometry = uwfl2::make_odometry(
+        state_point, kf.get_P(), get_ros_time(lidar_end_time), geoQuat);
+    pubOdomAftMapped->publish(odometry);
+    tf_br->sendTransform(uwfl2::make_odometry_transform(odometry));
 }
 
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
@@ -1417,32 +1386,17 @@ private:
         const state_ikfom &state, const MainEkf::cov &covariance,
         double timestamp)
     {
-        nav_msgs::msg::Odometry odometry;
-        odometry.header.frame_id = "camera_init";
-        odometry.child_frame_id = "body";
-        odometry.header.stamp = get_ros_time(timestamp);
-        odometry.pose.pose.position.x = state.pos.x();
-        odometry.pose.pose.position.y = state.pos.y();
-        odometry.pose.pose.position.z = state.pos.z();
         const Eigen::Quaterniond orientation(
             state.rot.toRotationMatrix());
-        odometry.pose.pose.orientation.x = orientation.x();
-        odometry.pose.pose.orientation.y = orientation.y();
-        odometry.pose.pose.orientation.z = orientation.z();
-        odometry.pose.pose.orientation.w = orientation.w();
-        const auto pose_covariance = uwfl2::make_ros_pose_covariance(
-            covariance, state.rot.toRotationMatrix());
-        odometry.pose.covariance = pose_covariance.values;
+        geometry_msgs::msg::Quaternion quaternion;
+        quaternion.x = orientation.x();
+        quaternion.y = orientation.y();
+        quaternion.z = orientation.z();
+        quaternion.w = orientation.w();
+        const auto odometry = uwfl2::make_odometry(
+            state, covariance, get_ros_time(timestamp), quaternion);
         pubOdomAftMapped_->publish(odometry);
-
-        geometry_msgs::msg::TransformStamped transform;
-        transform.header = odometry.header;
-        transform.child_frame_id = "body";
-        transform.transform.translation.x = state.pos.x();
-        transform.transform.translation.y = state.pos.y();
-        transform.transform.translation.z = state.pos.z();
-        transform.transform.rotation = odometry.pose.pose.orientation;
-        tf_broadcaster_->sendTransform(transform);
+        tf_broadcaster_->sendTransform(uwfl2::make_odometry_transform(odometry));
     }
 
     void publish_high_rate_odometry_prediction()

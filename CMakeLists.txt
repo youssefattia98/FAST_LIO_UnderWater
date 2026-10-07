@@ -175,6 +175,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_odometry_covariance
     test/test_odometry_covariance.cpp)
   target_include_directories(test_odometry_covariance PRIVATE include)
+  ament_target_dependencies(test_odometry_covariance rclcpp nav_msgs geometry_msgs)
 
   ament_add_gtest(test_estimator_characterization test/test_estimator_characterization.cpp
     src/auxiliary_sensor_fusion.cpp src/IMU_Processing.cpp)

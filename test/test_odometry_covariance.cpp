@@ -5,6 +5,9 @@
 #include <Eigen/Geometry>
 
 #include "odometry_covariance.hpp"
+#include "odometry_output.hpp"
+#include <rclcpp/serialization.hpp>
+#include <rclcpp/serialized_message.hpp>
 
 namespace
 {
@@ -76,3 +79,51 @@ TEST(OdometryCovariance, RepairsSmallNegativeEigenvalueForRviz)
 }
 
 }  // namespace
+
+TEST(OdometryOutput, PreservesLegacySerializedFieldsAndQuaternionSigns)
+{
+    struct State
+    {
+        Eigen::Vector3d pos{1.0, -2.0, 3.0};
+        Eigen::Quaterniond rot{Eigen::AngleAxisd(0.7, Eigen::Vector3d(1, 2, 3).normalized())};
+    } state;
+    const Covariance27 covariance = Covariance27::Identity();
+    for (const double sign : {-1.0, 1.0})
+    {
+        geometry_msgs::msg::Quaternion orientation;
+        orientation.x = sign * state.rot.x();
+        orientation.y = sign * state.rot.y();
+        orientation.z = sign * state.rot.z();
+        orientation.w = sign * state.rot.w();
+        builtin_interfaces::msg::Time stamp;
+        stamp.sec = 1780000000;
+        stamp.nanosec = 123456789;
+        nav_msgs::msg::Odometry legacy;
+        legacy.header.frame_id = "camera_init";
+        legacy.child_frame_id = "body";
+        legacy.header.stamp = stamp;
+        legacy.pose.pose.position.x = state.pos.x();
+        legacy.pose.pose.position.y = state.pos.y();
+        legacy.pose.pose.position.z = state.pos.z();
+        legacy.pose.pose.orientation = orientation;
+        legacy.pose.covariance = uwfl2::make_ros_pose_covariance(
+            covariance, state.rot.toRotationMatrix()).values;
+        const auto output = uwfl2::make_odometry(state, covariance, stamp, orientation);
+        EXPECT_EQ(output, legacy);
+        rclcpp::Serialization<nav_msgs::msg::Odometry> serializer;
+        rclcpp::SerializedMessage before, after;
+        serializer.serialize_message(&legacy, &before);
+        serializer.serialize_message(&output, &after);
+        const auto &a = before.get_rcl_serialized_message();
+        const auto &b = after.get_rcl_serialized_message();
+        ASSERT_EQ(a.buffer_length, b.buffer_length);
+        EXPECT_TRUE(std::equal(a.buffer, a.buffer + a.buffer_length, b.buffer));
+        const auto transform = uwfl2::make_odometry_transform(output);
+        EXPECT_EQ(transform.header, legacy.header);
+        EXPECT_EQ(transform.child_frame_id, legacy.child_frame_id);
+        EXPECT_EQ(transform.transform.rotation, orientation);
+        EXPECT_DOUBLE_EQ(transform.transform.translation.x, state.pos.x());
+        EXPECT_DOUBLE_EQ(transform.transform.translation.y, state.pos.y());
+        EXPECT_DOUBLE_EQ(transform.transform.translation.z, state.pos.z());
+    }
+}
