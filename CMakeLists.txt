@@ -176,6 +176,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sensor_parameter_utils
     test/test_sensor_parameter_utils.cpp)
   target_include_directories(test_sensor_parameter_utils PRIVATE include)
+
+  ament_add_gtest(test_odometry_covariance
+    test/test_odometry_covariance.cpp)
+  target_include_directories(test_odometry_covariance PRIVATE include)
 endif()
 
 # ---------------- Install --------------- #

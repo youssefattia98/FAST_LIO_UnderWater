@@ -80,6 +80,7 @@
 #include "loop_closure/state_transport.hpp"
 #include "corrected_map_visualization.hpp"
 #include "lidar_scan_quality.hpp"
+#include "odometry_covariance.hpp"
 #include "observability_manager.hpp"
 #include "preprocess.h"
 #include "sensor_parameter_utils.hpp"
@@ -866,17 +867,9 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
 
-    auto P = kf.get_P();
-    for (int i = 0; i < 6; i ++)
-    {
-        int k = i < 3 ? i + 3 : i - 3;
-        odomAftMapped.pose.covariance[i*6 + 0] = P(k, 3);
-        odomAftMapped.pose.covariance[i*6 + 1] = P(k, 4);
-        odomAftMapped.pose.covariance[i*6 + 2] = P(k, 5);
-        odomAftMapped.pose.covariance[i*6 + 3] = P(k, 0);
-        odomAftMapped.pose.covariance[i*6 + 4] = P(k, 1);
-        odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
-    }
+    const auto pose_covariance = uwfl2::make_ros_pose_covariance(
+        kf.get_P(), kf.get_x().rot.toRotationMatrix());
+    odomAftMapped.pose.covariance = pose_covariance.values;
     pubOdomAftMapped->publish(odomAftMapped);
 
     geometry_msgs::msg::TransformStamped trans;
@@ -1496,16 +1489,9 @@ private:
         odometry.pose.pose.orientation.y = orientation.y();
         odometry.pose.pose.orientation.z = orientation.z();
         odometry.pose.pose.orientation.w = orientation.w();
-        for (int i = 0; i < 6; ++i)
-        {
-            const int k = i < 3 ? i + 3 : i - 3;
-            odometry.pose.covariance[i * 6 + 0] = covariance(k, 3);
-            odometry.pose.covariance[i * 6 + 1] = covariance(k, 4);
-            odometry.pose.covariance[i * 6 + 2] = covariance(k, 5);
-            odometry.pose.covariance[i * 6 + 3] = covariance(k, 0);
-            odometry.pose.covariance[i * 6 + 4] = covariance(k, 1);
-            odometry.pose.covariance[i * 6 + 5] = covariance(k, 2);
-        }
+        const auto pose_covariance = uwfl2::make_ros_pose_covariance(
+            covariance, state.rot.toRotationMatrix());
+        odometry.pose.covariance = pose_covariance.values;
         pubOdomAftMapped_->publish(odometry);
 
         geometry_msgs::msg::TransformStamped transform;
@@ -2765,6 +2751,11 @@ private:
                 }
                 corrected_map_publish_requested_.store(true);
             }
+            // The private 100 Hz predictor must restart from the same corrected
+            // state and covariance as the front end after the atomic LC commit.
+            std::lock_guard<std::mutex> prediction_lock(
+                odometry_prediction_state_mutex_);
+            reset_high_rate_odometry_prediction_locked();
         }
         catch (...)
         {
@@ -2779,6 +2770,9 @@ private:
             state_point = kf.get_x();
             pos_lid = state_point.pos +
                       state_point.rot * state_point.offset_T_L_I;
+            std::lock_guard<std::mutex> prediction_lock(
+                odometry_prediction_state_mutex_);
+            reset_high_rate_odometry_prediction_locked();
             reject("transaction_exception_rollback");
         }
     }

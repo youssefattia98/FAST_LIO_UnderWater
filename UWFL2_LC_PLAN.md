@@ -2291,6 +2291,34 @@ ros2 bag play \
   --rate 15 --playback-duration 120
 ```
 
+### ROS Odometry Covariance Publication (2026-10-07)
+
+- [x] Publish IKF pose covariance in ROS order `[position, orientation]` from
+  both corrected and 100 Hz predicted odometry paths.
+- [x] Transform the right-attitude tangent covariance into the odometry frame,
+  symmetrize it, and remove numerical negative eigenvalues in the published
+  copy without changing the IKF covariance.
+- [x] Reseed the private high-rate predictor from the transported covariance
+  after an atomic loop commit and after transaction rollback.
+- [x] Enable the existing RViz Odometry covariance display.
+- [x] Build, run the full suite, and validate live covariance publication.
+
+Build passed and all `63/63` tests passed. A short x15 `sim3` replay produced
+30/30 nonzero, finite pose covariances. Maximum asymmetry was `1.53e-17`, the
+minimum eigenvalue was `6.37e-08`, and the covariance changed during
+propagation. Existing full-SE(3) state-transport tests also passed.
+
+Commands:
+
+```bash
+cd /home/attia/ros2_ws
+colcon build --packages-select fast_lio --symlink-install
+colcon test --packages-select fast_lio --event-handlers console_cohesion+
+colcon test-result --test-result-base build/fast_lio --verbose
+ros2 bag play /home/attia/ros2_ws/bags/DONE/sim3 \
+  --rate 15 --playback-duration 180
+```
+
 ## Stop Conditions
 
 Stop at the active checkpoint and record the exact evidence when any of the following occurs:
