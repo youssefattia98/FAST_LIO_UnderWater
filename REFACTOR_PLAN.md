@@ -182,7 +182,7 @@ permission to implement multiple checkpoints together.
   previously had no effect and have no replacement. Keep `sonar.min_range` and
   mapping voxel settings unchanged. Shipped YAMLs changed only by these removals;
   existing user tuning and RViz edits preserved. Standard install untouched;
-  no Jetson or full LC replay claimed. Commit: see `git log --oneline --grep='CP-005'`.
+  no Jetson or full LC replay claimed. Implementation commit: `f2ccf19`.
   Stopped here; CP-006 onward remain unimplemented.
 
   Commands (from workspace for build, repository for Python tools):

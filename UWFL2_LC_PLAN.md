@@ -2392,7 +2392,7 @@ Scope and dependencies: `REFACTOR_PLAN.md` CP-001 through CP-005 only.
   211--216. Artifacts `REFACTOR_RESULTS/cp005_startup` and
   `REFACTOR_RESULTS/cp005_candidate/comparison.json` retain commands/hashes/logs.
   No estimator, timing, frame or LC changes; no full LC replay or Jetson build.
-  Commit: see `git log --oneline --grep='CP-005'`. Stopped before CP-006.
+  Implementation commit: `f2ccf19`. Stopped before CP-006.
 
 Exact commands and failures are recorded in `REFACTOR_PLAN.md`; each replay
 manifest retains the expanded command. Existing user YAML/RViz edits preserved.
