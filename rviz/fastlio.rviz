@@ -41,12 +41,12 @@ Visualization Manager:
           Color Style: Unique
           Frame: Local
           Offset: 1
-          Scale: 1
+          Scale: 10
           Value: true
         Position:
           Alpha: 0.30000001192092896
           Color: 204; 51; 204
-          Scale: 1
+          Scale: 10
           Value: true
         Value: true
       Enabled: true
