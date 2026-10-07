@@ -136,6 +136,73 @@ TEST(ImuCharacterization, NoScanPropagatesAndTimedCallbacksRemainOrdered)
     EXPECT_LT(filter.get_x().pos.norm(), 1e-6);
 }
 
+TEST(ImuCharacterization, RepeatedStartupUsesIdenticalInputsAndCorrectionEpochs)
+{
+    Ekf first, second;
+    InitializeFilter(first);
+    InitializeFilter(second);
+    state_ikfom initial;
+    initial.rot = SO3(Eigen::AngleAxisd(0.2, V3D(1, 2, 3).normalized()));
+    first.change_x(initial);
+    second.change_x(initial);
+    ImuProcess first_imu, second_imu;
+    PointCloudXYZI::Ptr first_cloud(new PointCloudXYZI());
+    PointCloudXYZI::Ptr second_cloud(new PointCloudXYZI());
+    // Explicit fixture correction epochs, not inferred from published odometry.
+    for (const int64_t end_ns : {1200000000LL, 1400000000LL, 1600000000LL})
+    {
+        const double end = end_ns / 1e9;
+        const auto interval = StationaryInterval(end - 0.2, end);
+        first_imu.Process(interval, first, first_cloud);
+        second_imu.Process(interval, second, second_cloud);
+        Ekf::vectorized_state difference = Ekf::vectorized_state::Zero();
+        first.get_x().boxminus(difference, second.get_x());
+        EXPECT_LE(difference.norm(), 1e-12);
+        EXPECT_LE((first.get_P() - second.get_P()).norm(), 1e-12);
+        EXPECT_LE((first_imu.Q - second_imu.Q).norm(), 1e-12);
+    }
+}
+
+TEST(ImuCharacterization, PredictionResetIsDeterministicAndDoesNotChangeMainFilter)
+{
+    Ekf main, first, second;
+    InitializeFilter(main);
+    InitializeFilter(first);
+    InitializeFilter(second);
+    ImuProcess imu;
+    PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
+    imu.Process(StationaryInterval(1.0, 1.2), main, cloud);
+    input_ikfom input;
+    input.gyro = V3D(0.01, -0.02, 0.03);
+    input.acc = V3D(0.2, -0.1, 9.81);
+    for (int reset = 0; reset < 3; ++reset)
+    {
+        auto state = main.get_x();
+        auto covariance = main.get_P();
+        first.change_x(state);
+        first.change_P(covariance);
+        second.change_x(state);
+        second.change_P(covariance);
+        auto first_noise = imu.Q, second_noise = imu.Q;
+        for (int step = 0; step < 20; ++step)
+        {
+            double first_dt = 0.01, second_dt = 0.01;
+            first.predict(first_dt, first_noise, input);
+            second.predict(second_dt, second_noise, input);
+            Ekf::vectorized_state difference = Ekf::vectorized_state::Zero();
+            first.get_x().boxminus(difference, second.get_x());
+            EXPECT_LE(difference.norm(), 1e-12);
+            EXPECT_LE((first.get_P() - second.get_P()).norm(), 1e-12);
+        }
+        Ekf::vectorized_state main_difference = Ekf::vectorized_state::Zero();
+        main.get_x().boxminus(main_difference, state);
+        EXPECT_EQ(main_difference.norm(), 0.0);
+        EXPECT_EQ((main.get_P() - covariance).norm(), 0.0);
+        imu.Process(StationaryInterval(1.2 + reset * 0.2, 1.4 + reset * 0.2),
+                    main, cloud);
+    }
+}
+
 TEST(DvlCharacterization, NativeFrameAndRightPerturbationJacobian)
 {
     state_ikfom state;

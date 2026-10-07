@@ -348,6 +348,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-size-map", type=float)
     parser.add_argument("--cube-side-length", type=float)
     parser.add_argument("--rviz", action="store_true")
+    parser.add_argument("--record-topic", action="append", default=[],
+                        help="Additional output topic to record for characterization")
     parser.add_argument("--inject-loop", type=Path)
     parser.add_argument("--workspace", type=Path, default=Path("/home/attia/ros2_ws"))
     parser.add_argument("--workspace-setup", type=Path,
@@ -473,7 +475,7 @@ def main() -> int:
             "memory_bytes": psutil.virtual_memory().total,
         },
         "ros_distro": ros_distro,
-        "record_topics": list(RECORD_TOPICS),
+        "record_topics": list(RECORD_TOPICS) + args.record_topic,
         "commands": {},
         "exit_codes": {},
     }
@@ -630,6 +632,7 @@ def main() -> int:
                 ("--node-name", f"uwfl2_benchmark_recorder_{args.domain_id}", "--topics")
             )
         record_args.extend(RECORD_TOPICS)
+        record_args.extend(args.record_topic)
         recorder_command = sourced_command(
             record_args,
             args.ros_setup,

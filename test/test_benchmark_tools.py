@@ -16,10 +16,38 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import compare_lc_runs as compare
 import run_lc_benchmark as benchmark
+import characterize_ins_startup as startup
 from compare_refactor_replays import shared_pose_comparison
 
 
 class BenchmarkToolsTest(unittest.TestCase):
+    def test_startup_report_keeps_native_epochs_and_marks_missing_trace(self):
+        baseline, repeat = self.root / "baseline", self.root / "repeat"
+        for run in (baseline, repeat):
+            run.mkdir()
+            (run / "manifest.json").write_text(json.dumps({
+                "bag_metadata_sha256": "bag",
+                "commands": {"git_head": {"output": "head"},
+                             "worktree_diff": {"output": "diff"}}}))
+        stamps = np.array([1780000000000000001, 1780000000500000001,
+                           1780000002000000001], dtype=np.int64)
+        data = {"odom_stamps_ns": stamps, "odom_times": stamps / 1e9,
+                "odom_frames": [("camera_init", "body")] * 3,
+                "odom_poses": np.repeat(np.eye(4)[None], 3, axis=0),
+                "invalid_odom_covariance": 0}
+        other = dict(data, odom_poses=data["odom_poses"].copy())
+        other["odom_poses"][0, 0, 3] = 0.01
+        fields = {int(t): (np.zeros(72), np.zeros(6)) for t in stamps}
+        with patch.object(startup, "read_trajectories", side_effect=[data, other]), \
+             patch.object(startup, "odometry_fields", return_value=fields):
+            report = startup.characterize(baseline, repeat)
+        self.assertEqual(report["differing_shared_stamps_ns"], [int(stamps[0])])
+        self.assertEqual(report["after_first_second"]["position_max_m"], 0.0)
+        self.assertTrue(report["same_worktree_diff"])
+        self.assertFalse(report["runtime_correction_epochs_available"])
+        self.assertFalse(report["callback_delivery_available"])
+        json.dumps(report, allow_nan=False)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
