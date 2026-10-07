@@ -2293,6 +2293,8 @@ ros2 bag play \
 
 ### ROS Odometry Covariance Publication (2026-10-07)
 
+Implementation commit: `5a9e0b6`.
+
 - [x] Publish IKF pose covariance in ROS order `[position, orientation]` from
   both corrected and 100 Hz predicted odometry paths.
 - [x] Transform the right-attitude tangent covariance into the odometry frame,
