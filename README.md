@@ -2,6 +2,10 @@ To Do
 
 colcon build --packages-select fast_lio --symlink-install
 
+The build requires `patch` (`sudo apt install patch`). CMake applies the
+ikd-tree neighbor/voxel tie fix to a build-directory copy; the upstream
+submodule is not modified. A patch mismatch stops configuration explicitly.
+
 ## Loop closure
 
 Loop closure has three user parameters:

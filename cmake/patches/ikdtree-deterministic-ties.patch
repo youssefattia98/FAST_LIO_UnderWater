@@ -1,0 +1,89 @@
+diff --git a/ikd-Tree/ikd_Tree.h b/ikd-Tree/ikd_Tree.h
+--- a/ikd-Tree/ikd_Tree.h
++++ b/ikd-Tree/ikd_Tree.h
+@@ -102,8 +102,9 @@
+         bool operator<(const PointType_CMP &a) const
+         {
+-            if (fabs(dist - a.dist) < 1e-10)
+-                return point.x < a.point.x;
+-            else
+-                return dist < a.dist;
++            // Complete ties consistently across asynchronous tree rebuilds.
++            if (dist != a.dist) return dist < a.dist;
++            if (point.x != a.point.x) return point.x < a.point.x;
++            if (point.y != a.point.y) return point.y < a.point.y;
++            return point.z < a.point.z;
+         }
+     };
+diff --git a/ikd-Tree/ikd_Tree.cpp b/ikd-Tree/ikd_Tree.cpp
+--- a/ikd-Tree/ikd_Tree.cpp
++++ b/ikd-Tree/ikd_Tree.cpp
+@@ -504,7 +504,8 @@
+             for (int index = 0; index < Downsample_Storage.size(); index++)
+             {
+                 tmp_dist = calc_dist(Downsample_Storage[index], mid_point);
+-                if (tmp_dist < min_dist)
++                if (PointType_CMP(Downsample_Storage[index], tmp_dist) <
++                    PointType_CMP(downsample_result, min_dist))
+                 {
+                     min_dist = tmp_dist;
+                     downsample_result = Downsample_Storage[index];
+@@ -1085,18 +1086,19 @@
+     if (!root->point_deleted)
+     {
+         float dist = calc_dist(point, root->point);
+-        if (dist <= max_dist_sqr && (q.size() < k_nearest || dist < q.top().dist))
++        PointType_CMP current_point{root->point, dist};
++        if (dist <= max_dist_sqr && (q.size() < k_nearest || current_point < q.top()))
+         {
+             if (q.size() >= k_nearest)
+                 q.pop();
+-            PointType_CMP current_point{root->point, dist};
+             q.push(current_point);
+         }
+     }
+     int cur_search_counter;
+     float dist_left_node = calc_box_dist(root->left_son_ptr, point);
+     float dist_right_node = calc_box_dist(root->right_son_ptr, point);
+-    if (q.size() < k_nearest || dist_left_node < q.top().dist && dist_right_node < q.top().dist)
++    // Equal-distance branches may contain a better coordinate tie-breaker.
++    if (q.size() < k_nearest || (dist_left_node <= q.top().dist && dist_right_node <= q.top().dist))
+     {
+         if (dist_left_node <= dist_right_node)
+         {
+@@ -1120,7 +1122,7 @@
+                 search_mutex_counter -= 1;
+                 pthread_mutex_unlock(&search_flag_mutex);
+             }
+-            if (q.size() < k_nearest || dist_right_node < q.top().dist)
++            if (q.size() < k_nearest || dist_right_node <= q.top().dist)
+             {
+                 if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->right_son_ptr)
+                 {
+@@ -1166,7 +1168,7 @@
+                 search_mutex_counter -= 1;
+                 pthread_mutex_unlock(&search_flag_mutex);
+             }
+-            if (q.size() < k_nearest || dist_left_node < q.top().dist)
++            if (q.size() < k_nearest || dist_left_node <= q.top().dist)
+             {
+                 if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->left_son_ptr)
+                 {
+@@ -1193,7 +1195,7 @@
+     }
+     else
+     {
+-        if (dist_left_node < q.top().dist)
++        if (dist_left_node <= q.top().dist)
+         {
+             if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->left_son_ptr)
+             {
+@@ -1216,7 +1218,7 @@
+                 pthread_mutex_unlock(&search_flag_mutex);
+             }
+         }
+-        if (dist_right_node < q.top().dist)
++        if (dist_right_node <= q.top().dist)
+         {
+             if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->right_son_ptr)
+             {

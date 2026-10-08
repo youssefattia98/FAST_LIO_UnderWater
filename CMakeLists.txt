@@ -103,7 +103,28 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
-add_library(uwfl2_ikdtree include/ikd-Tree/ikd_Tree.cpp)
+# Keep upstream pristine and apply the reviewed fix to a build-directory copy.
+find_program(UWFL2_PATCH_EXECUTABLE patch REQUIRED)
+set(UWFL2_IKDTREE_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/patched_include")
+set(UWFL2_IKDTREE_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/ikdtree-deterministic-ties.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${UWFL2_IKDTREE_PATCH}")
+foreach(file ikd_Tree.h ikd_Tree.cpp)
+  configure_file("include/ikd-Tree/${file}"
+    "${UWFL2_IKDTREE_INCLUDE}/ikd-Tree/${file}" COPYONLY)
+endforeach()
+execute_process(
+  COMMAND "${UWFL2_PATCH_EXECUTABLE}" --batch --forward --fuzz=0 -p1 -i "${UWFL2_IKDTREE_PATCH}"
+  WORKING_DIRECTORY "${UWFL2_IKDTREE_INCLUDE}"
+  RESULT_VARIABLE UWFL2_IKDTREE_PATCH_RESULT
+  OUTPUT_VARIABLE UWFL2_IKDTREE_PATCH_OUTPUT
+  ERROR_VARIABLE UWFL2_IKDTREE_PATCH_ERROR
+)
+if(NOT UWFL2_IKDTREE_PATCH_RESULT EQUAL 0)
+  message(FATAL_ERROR "Cannot apply ikd-tree tie fix: ${UWFL2_IKDTREE_PATCH_OUTPUT}${UWFL2_IKDTREE_PATCH_ERROR}")
+endif()
+# All translation units must use the same patched inline heap comparator.
+include_directories(BEFORE "${UWFL2_IKDTREE_INCLUDE}")
+add_library(uwfl2_ikdtree "${UWFL2_IKDTREE_INCLUDE}/ikd-Tree/ikd_Tree.cpp")
 target_include_directories(uwfl2_ikdtree PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -158,6 +179,9 @@ if(BUILD_TESTING)
   add_test(NAME test_benchmark_tools
     COMMAND ${UWFL2_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_tools.py)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_ikdtree_repeatability test/test_ikdtree_repeatability.cpp)
+  target_link_libraries(test_ikdtree_repeatability uwfl2_ikdtree)
+
   ament_add_gtest(test_loop_closure_core test/test_loop_closure_core.cpp)
   target_include_directories(test_loop_closure_core PRIVATE include)
   target_link_libraries(test_loop_closure_core uwfl2_loop_closure)
