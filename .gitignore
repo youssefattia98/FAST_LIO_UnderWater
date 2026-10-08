@@ -11,6 +11,9 @@ config/imu_only_debug.yaml
 config/lidar_debug.yaml
 AIContext/*.md
 .claude/*
-plotter.py
+test/
+.agents/
+.codex/
+tools/
 __pycache__/
 *.pyc

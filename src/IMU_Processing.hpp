@@ -56,10 +56,7 @@ class ImuProcess
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
   void set_initial_cov(const V3D &b_g, const V3D &b_a, double grav);
-  // Auxiliary-bias initial covariances (added with DVL/pressure fusion). Locking
-  // these in noiseless-IMU sim mode is what stops LiDAR scan-match residuals from
-  // bleeding into b_dvl/b_pressure via the P-inverse cross-correlations and
-  // breaking DVL/pressure observability mid-bag.
+  // Initial covariance of the DVL and pressure bias states.
   void set_initial_aux_cov(const V3D &b_dvl, double b_pressure);
   void set_gravity(const double gravity_m_s2);
   bool IsInitialized() const;

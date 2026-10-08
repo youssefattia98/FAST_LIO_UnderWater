@@ -80,6 +80,13 @@ public:
 
     void warn_timeouts(rclcpp::Node &node, double end_time) const;
 
+    struct Availability
+    {
+        double dvl_stamp, pressure_stamp, magnetometer_stamp;
+        double dvl_timeout, pressure_timeout, magnetometer_timeout;
+    };
+    Availability availability() const;
+
     bool dvl_enabled() const;
     bool pressure_enabled() const;
     bool mag_enabled() const;
@@ -239,7 +246,6 @@ private:
     double last_pressure_raw_ = 0.0;
     bool last_pressure_raw_valid_ = false;
     double mag_cov_ = 1849.0;
-    double mag_heading_cov_floor_ = 1e-6;
     static constexpr int kMagReferenceSamples = 20;
     V3D mag_reference_sum_local_ = V3D::Zero();
     std::vector<V3D> mag_reference_samples_local_;

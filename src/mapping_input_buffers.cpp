@@ -38,13 +38,17 @@ void MappingInputBuffers::NoteSonarReceipt(Clock::time_point now)
     sonar_processing = true;
 }
 
-bool MappingInputBuffers::SonarReceptionTimedOut(
-    double timeout_seconds, Clock::duration callback_grace, Clock::time_point now) const
+double MappingInputBuffers::PropagationWatermark(
+    double latest_imu_time, Clock::time_point now) const
 {
-    // Called under mtx_buffer: transport silence is not a sensor-time gap.
-    return !sonar_processing &&
-           now - last_sonar_receipt >=
-               std::chrono::duration<double>(timeout_seconds) + callback_grace;
+    // All modes share this transport budget, independent of sonar frequency.
+    // The private predictor publishes fresh odometry while the main filter
+    // retains acquisition history for slower sensor callbacks. Drain the tail
+    // only after IMU transport stops, including after rosbag playback ends.
+    constexpr double reorder_seconds = 0.02;
+    constexpr auto drain_grace = std::chrono::milliseconds(250);
+    return now - last_imu_receipt >= drain_grace
+        ? latest_imu_time : latest_imu_time - reorder_seconds;
 }
 
 void MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp)
@@ -55,6 +59,9 @@ void MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double tim
         last_sonar_receipt = Clock::now();
     }
     sonar_processing = false;
+    ++sonar_received;
+    max_sonar_acquisition_lag = std::max(
+        max_sonar_acquisition_lag, last_timestamp_imu - timestamp);
     if (!is_first_lidar && timestamp < last_timestamp_lidar)
     {
         lidar_buffer.clear();
@@ -80,6 +87,7 @@ void MappingInputBuffers::PushImu(const sensor_msgs::msg::Imu::ConstSharedPtr &m
         imu_buffer.clear();
     }
     last_timestamp_imu = timestamp;
+    last_imu_receipt = Clock::now();
     imu_buffer.push_back(message);
     {
         std::lock_guard<std::mutex> prediction_lock(odometry_prediction_imu_mutex);

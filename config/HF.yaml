@@ -3,8 +3,8 @@
     sonar:
       topic: /sonar_point_cloud
       frequency: 4.0
-      extrinsic_T: [0.09382, -0.02148, 0.11593]
-      extrinsic_R: [0.994521895, 0.0, 0.104528463, 0.0, 1.0, 0.0, -0.104528463, 0.0, 0.994521895]
+      translation: [0.09382, -0.02148, 0.11593]
+      rotation: [0.0, 6.0, 0.0] # RPY degrees
       max_range: 15.0
       min_range: 0.2
       xy_covariance: 0.2
@@ -12,35 +12,30 @@
     imu:
       topic: /auv/imu/data_raw
       frequency: 200.0
-      odometry_publish_frequency: 100.0
       initial_gravity_estimate: 9.81
-      noiseless: false
-      gyr_cov: 0.055
-      acc_cov: 0.1
-      b_gyr_cov: 0.055
-      b_acc_cov: 0.2
-      init_b_gyr_cov: 0.0001
-      init_b_acc_cov: 0.001
+      gyroscope_covariance: 0.055
+      accelerometer_covariance: 0.1
+      gyroscope_bias_covariance: 0.055
+      accelerometer_bias_covariance: 0.2
+      init_gyroscope_bias_covariance: 0.0001
+      init_accelerometer_bias_covariance: 0.001
       init_gravity_covariance: 1.0e-05
       orientation_covariance: 3.0461742e-06
       accel_attitude_covariance: 0.0012184697
       accel_attitude_norm_gate: 2.0
-      sonar_outage_timeout: 0.0
-      sonar_return_ramp_time: 0.0
-      unobservable_bias_covariance: 1.0e-10
     dvl:
       enable: true
       topic: /auv/dvl
       frequency: 15.0
-      extrinsic_T: [-0.079, -0.09691, -0.25938]
-      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      translation: [-0.079, -0.09691, -0.25938]
+      rotation: [0.0, 0.0, 0.0] # RPY degrees
       covariance: 0.0001
       init_covariance: 1.0e-08
     pressure:
       enable: true
       topic: /auv/pressure/scaled2
-      timeout: 0.25
-      extrinsic_T: [-0.24219, -0.03954, 0.01898]
+      frequency: 4.0
+      translation: [-0.24219, -0.03954, 0.01898]
       fluid_density: 1025.0
       covariance: 40652.529
       init_covariance: 10000.0
@@ -48,23 +43,19 @@
       enable: true
       topic: /auv/imu/magnetic_field
       timeout: 0.25
-      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      rotation: [0.0, 0.0, 0.0] # RPY degrees
       hard_iron_offset: [-0.3, -19.96, 86.7]
       soft_iron_matrix: [-1.257623, 0.0, 0.0, 0.0, -1.257623, 0.0, 0.0, 0.0, -1.0]
-      mag_cov: 1.0e-06
-      heading_cov_floor: 1.0e-06
+      covariance: 0.04083536711274948
     mapping:
       max_iteration: 4
       filter_size_surf: 0.3
       filter_size_map: 0.3
       cube_side_length: 100.0
-      minimum_scan_points: 5
-      minimum_effective_features: 1
       world_frame: World
-      world_to_camera_init_T: [-9.668248175874515, -0.37430017392994963, -1.75814490575442]
-      world_to_camera_init_R: [-0.01735, -0.999844, 0.003273, 0.999736, -0.017397, -0.015004, 0.015058, 0.003012, 0.999882]
+      world_initial_frame_translation: [-9.668248175874515, -0.37430017392994963, -1.75814490575442]
+      world_initial_frame_rotation: [0.172607108496508, -0.8628150476512, 90.9942339197354] # RPY degrees
       map_file_path: ./test.pcd
-      map_save_enable: true
     publish:
       corrected_map_enable: true
       corrected_map_topic: /uwfl2/corrected_map

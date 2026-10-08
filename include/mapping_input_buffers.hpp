@@ -17,8 +17,7 @@ struct MappingInputBuffers
 {
     using Clock = std::chrono::steady_clock;
     void NoteSonarReceipt(Clock::time_point now = Clock::now());
-    bool SonarReceptionTimedOut(double timeout_seconds,
-                                Clock::duration callback_grace,
+    double PropagationWatermark(double latest_imu_time,
                                 Clock::time_point now = Clock::now()) const;
     void PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp);
     void PushImu(const sensor_msgs::msg::Imu::ConstSharedPtr &message);
@@ -37,10 +36,15 @@ struct MappingInputBuffers
     double last_scan_end_time = -1.0;
     double lidar_mean_scantime = 0.0;
     int scan_num = 0;
+    std::size_t sonar_received = 0;
+    std::size_t sonar_late_dropped = 0;
+    double max_sonar_acquisition_lag = 0.0;
+    double max_sonar_late_age = 0.0;
     bool lidar_pushed = false;
     bool is_first_lidar = true;
     bool sonar_processing = false;
     Clock::time_point last_sonar_receipt{};
+    Clock::time_point last_imu_receipt{};
 };
 
 }  // namespace uwfl2

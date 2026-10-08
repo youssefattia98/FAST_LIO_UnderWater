@@ -4,17 +4,14 @@ void AuxiliarySensorFusion::declare_parameters(rclcpp::Node &node)
 {
     node.declare_parameter<bool>("dvl.enable", false);
     node.declare_parameter<std::string>("dvl.topic", "/auv/dvl");
-    node.declare_parameter<std::vector<double>>("dvl.extrinsic_T", {-0.079, -0.09691, -0.25938});
-    node.declare_parameter<std::vector<double>>("dvl.extrinsic_R",
-                                                {1.0, 0.0, 0.0,
-                                                 0.0, 1.0, 0.0,
-                                                 0.0, 0.0, 1.0});
+    node.declare_parameter<std::vector<double>>("dvl.translation", {-0.079, -0.09691, -0.25938});
+    node.declare_parameter<std::vector<double>>("dvl.rotation", {0.0, 0.0, 0.0});
     node.declare_parameter<double>("dvl.frequency", 15.0);
 
     node.declare_parameter<bool>("pressure.enable", false);
     node.declare_parameter<std::string>("pressure.topic", "/auv/pressure/scaled2");
-    node.declare_parameter<std::vector<double>>("pressure.extrinsic_T", {-0.24219, -0.03954, 0.01898});
-    node.declare_parameter<double>("pressure.timeout", 0.25);
+    node.declare_parameter<std::vector<double>>("pressure.translation", {-0.24219, -0.03954, 0.01898});
+    node.declare_parameter<double>("pressure.frequency", 4.0);
 
     node.declare_parameter<double>("dvl.covariance", 4e-4);
     node.declare_parameter<double>("dvl.init_covariance", 1e-8);
@@ -24,13 +21,11 @@ void AuxiliarySensorFusion::declare_parameters(rclcpp::Node &node)
 
     node.declare_parameter<bool>("magnetometer.enable", false);
     node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
-    node.declare_parameter<std::vector<double>>("magnetometer.extrinsic_R",
-        {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
+    node.declare_parameter<std::vector<double>>("magnetometer.rotation", {0.0, 0.0, 0.0});
     node.declare_parameter<std::vector<double>>("magnetometer.hard_iron_offset", {0.0, 0.0, 0.0});
     node.declare_parameter<std::vector<double>>("magnetometer.soft_iron_matrix",
         {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
-    node.declare_parameter<double>("magnetometer.mag_cov", 1849.0);
-    node.declare_parameter<double>("magnetometer.heading_cov_floor", 1e-6);
+    node.declare_parameter<double>("magnetometer.covariance", 1849.0);
     node.declare_parameter<double>("magnetometer.timeout", 0.5);
 }
 
@@ -44,7 +39,11 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
 
     node.get_parameter_or<bool>("pressure.enable", pressure_enable_, false);
     node.get_parameter_or<std::string>("pressure.topic", pressure_topic_, "/auv/pressure/scaled2");
-    node.get_parameter_or<double>("pressure.timeout", pressure_timeout_, 0.25);
+    double pressure_frequency;
+    node.get_parameter_or<double>("pressure.frequency", pressure_frequency, 4.0);
+    if (!std::isfinite(pressure_frequency) || pressure_frequency <= 0.0)
+        RCLCPP_WARN(node.get_logger(), "pressure.frequency must be positive. Using 4 Hz.");
+    pressure_timeout_ = uwfl2::timeout_from_frequency(pressure_frequency, 4.0);
     node.get_parameter_or<double>("pressure.covariance", pressure_cov_, 1e4);
     node.get_parameter_or<double>("pressure.init_covariance", pressure_b_init_cov_, 1e4);
     node.get_parameter_or<double>("pressure.fluid_density", pressure_fluid_density_, 1025.0);
@@ -52,12 +51,9 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     std::vector<double> dvl_T;
     std::vector<double> dvl_R;
     std::vector<double> pressure_T;
-    node.get_parameter_or<std::vector<double>>("dvl.extrinsic_T", dvl_T, {-0.079, -0.09691, -0.25938});
-    node.get_parameter_or<std::vector<double>>("dvl.extrinsic_R", dvl_R,
-                                               {1.0, 0.0, 0.0,
-                                                0.0, 1.0, 0.0,
-                                                0.0, 0.0, 1.0});
-    node.get_parameter_or<std::vector<double>>("pressure.extrinsic_T", pressure_T, {-0.24219, -0.03954, 0.01898});
+    node.get_parameter_or<std::vector<double>>("dvl.translation", dvl_T, {-0.079, -0.09691, -0.25938});
+    node.get_parameter_or<std::vector<double>>("dvl.rotation", dvl_R, {0.0, 0.0, 0.0});
+    node.get_parameter_or<std::vector<double>>("pressure.translation", pressure_T, {-0.24219, -0.03954, 0.01898});
 
     if (dvl_T.size() == 3)
     {
@@ -65,21 +61,11 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     }
     else
     {
-        RCLCPP_WARN(node.get_logger(), "dvl.extrinsic_T must have 3 values. Using zero translation.");
+        RCLCPP_WARN(node.get_logger(), "dvl.translation must have 3 values. Using zero translation.");
         dvl_T_.setZero();
     }
 
-    if (dvl_R.size() == 9)
-    {
-        dvl_R_ << dvl_R[0], dvl_R[1], dvl_R[2],
-                  dvl_R[3], dvl_R[4], dvl_R[5],
-                  dvl_R[6], dvl_R[7], dvl_R[8];
-    }
-    else
-    {
-        RCLCPP_WARN(node.get_logger(), "dvl.extrinsic_R must have 9 values. Using identity rotation.");
-        dvl_R_.setIdentity();
-    }
+    dvl_R_ = uwfl2::rotation_from_rpy_degrees(dvl_R);
 
     if (pressure_T.size() == 3)
     {
@@ -87,35 +73,22 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     }
     else
     {
-        RCLCPP_WARN(node.get_logger(), "pressure.extrinsic_T must have 3 values. Using zero translation.");
+        RCLCPP_WARN(node.get_logger(), "pressure.translation must have 3 values. Using zero translation.");
         pressure_T_.setZero();
     }
 
     node.get_parameter_or<bool>("magnetometer.enable", mag_enable_, false);
     node.get_parameter_or<std::string>("magnetometer.topic", mag_topic_, "/auv/imu/magnetic_field");
-    node.get_parameter_or<double>("magnetometer.mag_cov", mag_cov_, 1849.0);
-    node.get_parameter_or<double>("magnetometer.heading_cov_floor", mag_heading_cov_floor_, 1e-6);
+    node.get_parameter_or<double>("magnetometer.covariance", mag_cov_, 1849.0);
     node.get_parameter_or<double>("magnetometer.timeout", mag_timeout_, 0.5);
 
-    std::vector<double> mag_extrinsic_R, hard_iron, soft_iron;
-    node.get_parameter_or<std::vector<double>>("magnetometer.extrinsic_R", mag_extrinsic_R,
-        {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
+    std::vector<double> mag_rotation, hard_iron, soft_iron;
+    node.get_parameter_or<std::vector<double>>("magnetometer.rotation", mag_rotation, {0.0, 0.0, 0.0});
     node.get_parameter_or<std::vector<double>>("magnetometer.hard_iron_offset", hard_iron, {0., 0., 0.});
     node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron_matrix", soft_iron,
         {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
 
-    if (mag_extrinsic_R.size() == 9)
-    {
-        mag_R_BM_ << mag_extrinsic_R[0], mag_extrinsic_R[1], mag_extrinsic_R[2],
-                     mag_extrinsic_R[3], mag_extrinsic_R[4], mag_extrinsic_R[5],
-                     mag_extrinsic_R[6], mag_extrinsic_R[7], mag_extrinsic_R[8];
-    }
-    else
-    {
-        RCLCPP_WARN(node.get_logger(),
-                    "magnetometer.extrinsic_R must have 9 values. Using identity rotation.");
-        mag_R_BM_.setIdentity();
-    }
+    mag_R_BM_ = uwfl2::rotation_from_rpy_degrees(mag_rotation);
 
     if (hard_iron.size() == 3)
         mag_hard_iron_ << hard_iron[0], hard_iron[1], hard_iron[2];
@@ -151,7 +124,6 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     // (around 1e-15) or in uT^2 for real bags. Keep only a numerical floor
     // here; a 1e-6 floor silently disables Tesla-scale magnetometer fusion.
     mag_cov_ = std::max(1e-18, mag_cov_);
-    mag_heading_cov_floor_ = std::max(1e-12, mag_heading_cov_floor_);
 }
 
 void AuxiliarySensorFusion::create_subscriptions(rclcpp::Node &node,
@@ -253,6 +225,13 @@ AuxiliarySensorFusion::LateMeasurementCounts AuxiliarySensorFusion::take_late_me
     const LateMeasurementCounts counts = late_measurement_counts_;
     late_measurement_counts_ = {};
     return counts;
+}
+
+AuxiliarySensorFusion::Availability AuxiliarySensorFusion::availability() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {last_timestamp_dvl_, last_timestamp_pressure_, last_timestamp_mag_,
+            dvl_timeout_, pressure_timeout_, mag_timeout_};
 }
 
 void AuxiliarySensorFusion::warn_timeouts(rclcpp::Node &node, double end_time) const
@@ -1061,7 +1040,7 @@ bool AuxiliarySensorFusion::apply_mag_update(const MagMsg &msg, Ekf &kf)
     double heading_covariance =
         (observation.magnetic_jacobian * calibrated_covariance *
          observation.magnetic_jacobian.transpose())(0, 0) +
-        mag_heading_cov_floor_ + reference_variance;
+        reference_variance;
     heading_covariance = std::max(1e-12, heading_covariance);
 
     Eigen::RowVectorXd H = Eigen::RowVectorXd::Zero(state_ikfom::DOF);

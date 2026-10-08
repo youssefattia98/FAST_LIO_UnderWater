@@ -80,6 +80,8 @@
 #include "odometry_covariance.hpp"
 #include "odometry_output.hpp"
 #include "mapping_input_buffers.hpp"
+#include "imu_observation_calendar.hpp"
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #ifdef UWFL2_REPLAY_TRACE
 #include "replay_trace.hpp"
 #define TRACE_STATE(stage, timestamp, count, key) \
@@ -87,9 +89,9 @@
 #else
 #define TRACE_STATE(stage, timestamp, count, key)
 #endif
-#include "observability_manager.hpp"
 #include "preprocess.h"
 #include "sensor_parameter_utils.hpp"
+#include "map_file_utils.hpp"
 #include <ikd-Tree/ikd_Tree.h>
 
 #define INIT_TIME           (0.1)
@@ -99,7 +101,6 @@ double LASER_POINT_COV_Z = LASER_POINT_COV_DEFAULT;
 
 /*** Time Log Variables ***/
 int add_point_size = 0;
-bool   pcd_save_en = false;
 /**************************/
 
 float DET_RANGE = 300.0f;
@@ -108,31 +109,28 @@ const float MOV_THRESHOLD = 1.5f;
 
 string map_file_path, lid_topic, imu_topic, world_frame;
 
-double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
-double init_b_gyr_cov = 0.0001, init_b_acc_cov = 0.001, init_grav_cov = 0.00001;
+double gyroscope_covariance = 0.1, accelerometer_covariance = 0.1;
+double gyroscope_bias_covariance = 0.0001, accelerometer_bias_covariance = 0.0001;
+double init_gyroscope_bias_covariance = 0.0001, init_accelerometer_bias_covariance = 0.001;
+double init_grav_cov = 0.00001;
 double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4;
-bool noiseless_imu = false;
 double imu_orientation_cov = 3.0461742e-6;  // (0.1 deg)^2
 bool imu_orientation_ref_ready = false;
 Eigen::Quaterniond imu_orientation_ref = Eigen::Quaterniond::Identity();
 bool accel_attitude_ref_ready = false;
 double accel_attitude_cov = 1.2184697e-3;  // (2 deg)^2
 double accel_attitude_norm_gate = 2.0;
-std::deque<std::pair<double, V3D>> accel_attitude_window;
-double accel_attitude_last_stamp = -1.0;
-double accel_attitude_last_update_stamp = -1.0;
-ObservabilityManager obs_manager;
 double filter_size_surf_min = 0, filter_size_map_min = 0;
 double cube_len = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double lidar_timeout = 0.25, sonar_frequency_hz = 4.0,
        imu_rate_hz = 100.0;
-double odometry_publish_rate_hz = 100.0;
+constexpr double odometry_publish_rate_hz = 100.0;
 double initial_gravity_estimate = G_m_s2;
 int    effct_feat_num = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0;
 int    lidar_update_max_effective_features = 0;
-int    minimum_scan_points = 5, minimum_effective_features = 1;
-uwfl2::LidarScanQualityPolicy lidar_scan_quality;
+constexpr int minimum_scan_points = 1, minimum_effective_features = 1;
+uwfl2::LidarScanQualityPolicy lidar_scan_quality{1, 1};
 bool   point_selected_surf[100000] = {0};
 bool   flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool auxiliary_fusion_enabled = false;
@@ -144,7 +142,7 @@ vector<vector<int>>  pointSearchInd_surf;
 vector<BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points; 
 vector<double>       extrinT(3, 0.0);
-vector<double>       extrinR(9, 0.0);
+vector<double>       extrinR(3, 0.0);
 
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_down_body(new PointCloudXYZI());
@@ -281,9 +279,7 @@ double expected_imu_timeout()
 
 double imu_only_packet_duration()
 {
-    const double requested_period = odometry_publish_rate_hz > 0.0
-                                        ? 1.0 / odometry_publish_rate_hz
-                                        : lidar_timeout;
+    const double requested_period = 1.0 / odometry_publish_rate_hz;
     // Target the requested cadence and finish on the nearest real IMU sample.
     return std::max(expected_imu_period(),
                     std::min(lidar_timeout, requested_period));
@@ -341,10 +337,22 @@ std::size_t map_incremental()
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 std::mutex mapping_output_mutex;
 
-void save_to_pcd(const PointCloudXYZI &map)
+std::string save_to_pcd(const PointCloudXYZI &map)
 {
-    pcl::PCDWriter pcd_writer;
-    pcd_writer.writeBinary(map_file_path, map);
+    const auto path = uwfl2::reserve_map_path(map_file_path);
+    try
+    {
+        pcl::PCDWriter pcd_writer;
+        if (pcd_writer.writeBinary(path.string(), map) != 0)
+            throw std::runtime_error("PCD writer failed: " + path.string());
+    }
+    catch (...)
+    {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        throw;
+    }
+    return path.string();
 }
 
 void update_state_outputs()
@@ -358,7 +366,8 @@ void update_state_outputs()
     geoQuat.w = state_point.rot.coeffs()[3];
 }
 
-bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg)
+bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg,
+                                  MainEkf &filter)
 {
     if (!imu_msg || imu_msg->orientation_covariance[0] < 0.0)
     {
@@ -383,12 +392,12 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
 
     Eigen::Quaterniond q_relative = imu_orientation_ref.conjugate() * q_meas;
     q_relative.normalize();
-    state_ikfom state = kf.get_x();
+    state_ikfom state = filter.get_x();
     const M3D R_err =
         state.rot.toRotationMatrix().transpose() * q_relative.toRotationMatrix();
     const V3D residual = Log(R_err);
 
-    MainEkf::cov P = kf.get_P();
+    MainEkf::cov P = filter.get_P();
     Eigen::Matrix<double, 3, state_ikfom::DOF> H =
         Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
     H.block<3, 3>(0, 3).setIdentity();
@@ -413,61 +422,27 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
     MainEkf::cov P_new =
         ((I - KH) * P * (I - KH).transpose() + K * R * K.transpose()).eval();
     P_new = ((P_new + P_new.transpose()) * 0.5).eval();
-    kf.change_x(state);
-    kf.change_P(P_new);
+    filter.change_x(state);
+    filter.change_P(P_new);
     return true;
 }
 
+
 bool apply_accel_attitude_update(
-    const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs)
+    const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &imu_msgs,
+    MainEkf &filter)
 {
-    constexpr double averaging_window_s = 0.2;
-    for (const auto &imu_msg : imu_msgs)
-    {
-        if (!imu_msg)
-        {
-            continue;
-        }
-        const double timestamp = get_time_sec(imu_msg->header.stamp);
-        if (timestamp <= accel_attitude_last_stamp + 1e-9)
-        {
-            continue;
-        }
-        accel_attitude_window.emplace_back(
-            timestamp,
-            V3D(imu_msg->linear_acceleration.x,
-                imu_msg->linear_acceleration.y,
-                imu_msg->linear_acceleration.z));
-        accel_attitude_last_stamp = timestamp;
-    }
-    if (accel_attitude_window.empty())
-    {
-        return false;
-    }
-    const double newest_stamp = accel_attitude_window.back().first;
-    if (accel_attitude_last_update_stamp > 0.0 &&
-        newest_stamp - accel_attitude_last_update_stamp <
-            averaging_window_s - 1e-6)
-    {
-        return false;
-    }
-    const double oldest_allowed =
-        accel_attitude_window.back().first - averaging_window_s;
-    while (accel_attitude_window.size() > 1 &&
-           accel_attitude_window.front().first < oldest_allowed)
-    {
-        accel_attitude_window.pop_front();
-    }
-
+    if (imu_msgs.empty()) return false;
     V3D acc_meas = V3D::Zero();
-    for (const auto &sample : accel_attitude_window)
+    for (const auto &sample : imu_msgs)
     {
-        acc_meas += sample.second;
+        acc_meas += V3D(sample->linear_acceleration.x,
+                        sample->linear_acceleration.y,
+                        sample->linear_acceleration.z);
     }
-    acc_meas /= static_cast<double>(accel_attitude_window.size());
-    accel_attitude_last_update_stamp = newest_stamp;
+    acc_meas /= static_cast<double>(imu_msgs.size());
 
-    state_ikfom state = kf.get_x();
+    state_ikfom state = filter.get_x();
     acc_meas -= V3D(state.ba[0], state.ba[1], state.ba[2]);
     const double acc_norm = acc_meas.norm();
     if (!std::isfinite(acc_norm) || acc_norm < 1e-6 ||
@@ -506,7 +481,7 @@ bool apply_accel_attitude_update(
         return false;
     }
 
-    MainEkf::cov P = kf.get_P();
+    MainEkf::cov P = filter.get_P();
     Eigen::Matrix<double, 3, state_ikfom::DOF> H =
         Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
     // A normalized accelerometer constrains only tilt.  Using an identity
@@ -537,8 +512,8 @@ bool apply_accel_attitude_update(
     MainEkf::cov P_new =
         ((I - KH) * P * (I - KH).transpose() + K * R * K.transpose()).eval();
     P_new = ((P_new + P_new.transpose()) * 0.5).eval();
-    kf.change_x(state);
-    kf.change_P(P_new);
+    filter.change_x(state);
+    filter.change_P(P_new);
     return true;
 }
 
@@ -674,9 +649,9 @@ public:
     LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) : Node("laser_mapping", options)
     {
         DeclareParameters();
-        std::vector<double> world_to_camera_init_T;
-        std::vector<double> world_to_camera_init_R;
-        LoadParameters(world_to_camera_init_T, world_to_camera_init_R);
+        std::vector<double> world_initial_frame_translation;
+        std::vector<double> world_initial_frame_rotation;
+        LoadParameters(world_initial_frame_translation, world_initial_frame_rotation);
         InitializeEstimator();
         InitializeLoopClosure();
 
@@ -728,27 +703,19 @@ public:
                     rclcpp::QoS(1).transient_local().reliable());
         }
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
+        navigation_health_pub_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+            "/uwfl2/navigation_health", 1);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
-        if (world_to_camera_init_T.size() != 3)
+        if (world_initial_frame_translation.size() != 3)
         {
             RCLCPP_WARN(this->get_logger(),
-                        "mapping.world_to_camera_init_T must have 3 values. Using zero translation.");
-            world_to_camera_init_T = {0.0, 0.0, 0.0};
+                        "mapping.world_initial_frame_translation must have 3 values. Using zero translation.");
+            world_initial_frame_translation = {0.0, 0.0, 0.0};
         }
-        Eigen::Matrix3d world_to_camera_init_rot = Eigen::Matrix3d::Identity();
-        if (world_to_camera_init_R.size() == 9)
-        {
-            world_to_camera_init_rot << world_to_camera_init_R[0], world_to_camera_init_R[1], world_to_camera_init_R[2],
-                                        world_to_camera_init_R[3], world_to_camera_init_R[4], world_to_camera_init_R[5],
-                                        world_to_camera_init_R[6], world_to_camera_init_R[7], world_to_camera_init_R[8];
-        }
-        else
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "mapping.world_to_camera_init_R must have 9 values. Using identity rotation.");
-        }
+        const Eigen::Matrix3d world_to_camera_init_rot =
+            uwfl2::rotation_from_rpy_degrees(world_initial_frame_rotation);
         Eigen::Quaterniond world_to_camera_init_quat(world_to_camera_init_rot);
         world_to_camera_init_quat.normalize();
 
@@ -756,9 +723,9 @@ public:
         world_to_camera_init.header.stamp = this->get_clock()->now();
         world_to_camera_init.header.frame_id = world_frame;
         world_to_camera_init.child_frame_id = "camera_init";
-        world_to_camera_init.transform.translation.x = world_to_camera_init_T[0];
-        world_to_camera_init.transform.translation.y = world_to_camera_init_T[1];
-        world_to_camera_init.transform.translation.z = world_to_camera_init_T[2];
+        world_to_camera_init.transform.translation.x = world_initial_frame_translation[0];
+        world_to_camera_init.transform.translation.y = world_initial_frame_translation[1];
+        world_to_camera_init.transform.translation.z = world_initial_frame_translation[2];
         world_to_camera_init.transform.rotation.x = world_to_camera_init_quat.x();
         world_to_camera_init.transform.rotation.y = world_to_camera_init_quat.y();
         world_to_camera_init.transform.rotation.z = world_to_camera_init_quat.z();
@@ -768,7 +735,7 @@ public:
         // Inform the pressure model how camera_init sits in World, so pressure
         // constrains true World-vertical depth rather than tilted local z.
         aux_fusion_.set_camera_init_pose_in_world(
-            V3D(world_to_camera_init_T[0], world_to_camera_init_T[1], world_to_camera_init_T[2]),
+            V3D(world_initial_frame_translation[0], world_initial_frame_translation[1], world_initial_frame_translation[2]),
             world_to_camera_init_rot);
 
         //------------------------------------------------------------------------------------------------------
@@ -779,6 +746,9 @@ public:
         timer_ = this->create_wall_timer(std::chrono::milliseconds(1),
                                          std::bind(&LaserMappingNode::timer_callback, this),
                                          processing_callback_group_);
+        navigation_health_timer_ = this->create_wall_timer(std::chrono::seconds(1),
+            std::bind(&LaserMappingNode::publish_navigation_health, this),
+            processing_callback_group_);
         if (pubCorrectedMap_)
         {
             corrected_map_timer_ = this->create_wall_timer(
@@ -876,7 +846,10 @@ private:
         while (!input_buffers_.lidar_pushed && !input_buffers_.lidar_buffer.empty() && input_buffers_.last_processed_time > 0.0 &&
                input_buffers_.time_buffer.front() < input_buffers_.last_processed_time - 1e-4)
         {
-
+            ++input_buffers_.sonar_late_dropped;
+            input_buffers_.max_sonar_late_age = std::max(
+                input_buffers_.max_sonar_late_age,
+                input_buffers_.last_processed_time - input_buffers_.time_buffer.front());
             input_buffers_.lidar_buffer.pop_front();
             input_buffers_.time_buffer.pop_front();
         }
@@ -885,23 +858,9 @@ private:
             return false;
         }
 
-        // Complete a gap on fixed IMU packet epochs before admitting the
-        // returning scan. Otherwise callback order changes the number of IMU
-        // attitude/auxiliary corrections performed during that same gap.
-        if (!input_buffers_.lidar_pushed)
-        {
-            const auto gap_result = sync_imu_only_packages(meas, true);
-            if (gap_result == ImuPacketResult::Ready)
-            {
-                imu_only_measure = true;
-                return true;
-            }
-            if (gap_result == ImuPacketResult::Waiting)
-            {
-                return false;
-            }
-        }
-
+        // A queued scan owns its acquisition interval. Process() already splits
+        // propagation at each auxiliary epoch; outer packet splitting changes
+        // initialization and discards motion history needed for scan deskew.
         /*** push a lidar scan ***/
         if(!input_buffers_.lidar_pushed)
         {
@@ -954,83 +913,27 @@ private:
         return true;
     }
 
-    ImuPacketResult sync_imu_only_packages(MeasureGroup &meas, bool completing_sonar_gap = false)
+    ImuPacketResult sync_imu_only_packages(MeasureGroup &meas)
     {
-        // An empty topic explicitly selects INS mode. A misspelled/unavailable
-        // topic also enters INS mode, and an established LiDAR stream enters the
-        // same propagation path only after its configured timeout. Normal scan
-        // intervals remain scan-bounded. The auxiliary reorder window below keeps
-        // fallback propagation behind the newest sensor time, allowing an on-time
-        // scan callback to take priority before its timestamp is crossed.
-        const bool explicit_ins_mode = lid_topic.empty();
-        const bool no_lidar_received = input_buffers_.is_first_lidar;
         const bool pending_scan = !input_buffers_.lidar_buffer.empty();
-        // One slightly late frame is still a normal scan interval. Require a
-        // whole missed scan cycle before applying outage-specific corrections.
-        const double sonar_outage_timeout = 2.0 * lidar_timeout;
-        if (pending_scan != completing_sonar_gap || input_buffers_.lidar_pushed ||
-            (!completing_sonar_gap && input_buffers_.sonar_processing) ||
+        if (pending_scan || input_buffers_.lidar_pushed || input_buffers_.sonar_processing ||
             input_buffers_.imu_buffer.empty()) {
-            return ImuPacketResult::Unavailable;
-        }
-
-        if (completing_sonar_gap &&
-            (input_buffers_.last_processed_time <= 0.0 ||
-             input_buffers_.last_scan_end_time <= 0.0 ||
-             input_buffers_.time_buffer.front() - input_buffers_.last_scan_end_time < sonar_outage_timeout))
-        {
             return ImuPacketResult::Unavailable;
         }
 
         const double latest_imu_time = get_time_sec(input_buffers_.imu_buffer.back()->header.stamp);
         const double first_imu_time = get_time_sec(input_buffers_.imu_buffer.front()->header.stamp);
-        const bool lidar_timed_out =
-            input_buffers_.last_timestamp_lidar > 0.0 &&
-            latest_imu_time - input_buffers_.last_timestamp_lidar >= sonar_outage_timeout;
-        const bool initial_lidar_timed_out =
-            no_lidar_received && latest_imu_time - first_imu_time >= lidar_timeout;
-        if (!completing_sonar_gap && !explicit_ins_mode &&
-            !lidar_timed_out && !initial_lidar_timed_out)
-        {
-            return ImuPacketResult::Unavailable;
-        }
-        // Accelerated replay can advance IMU sensor time while an on-time
-        // sonar callback is still queued/converting. Only an established
-        // stream with actual reception silence may enter outage fallback.
-        if (!completing_sonar_gap && !explicit_ins_mode && !no_lidar_received &&
-            !input_buffers_.SonarReceptionTimedOut(
-                sonar_outage_timeout, AUX_SENSOR_REORDER_WALL_GRACE))
-        {
-            return ImuPacketResult::Unavailable;
-        }
         double packet_begin_time = input_buffers_.last_processed_time > 0.0 ? input_buffers_.last_processed_time : first_imu_time;
         if (input_buffers_.last_processed_time > 0.0 && first_imu_time > packet_begin_time + expected_imu_timeout())
         {
             packet_begin_time = first_imu_time;
         }
         const double target_packet_end_time = packet_begin_time + imu_only_packet_duration();
-        // Keep an IMU sample for the returning scan, including instantaneous
-        // sonar clouds whose begin and end timestamps are identical.
-        const double scan_horizon = completing_sonar_gap
-            ? input_buffers_.time_buffer.front() - expected_imu_period()
-            : std::numeric_limits<double>::infinity();
-        if (target_packet_end_time > scan_horizon + 1e-6)
-        {
-            return ImuPacketResult::Unavailable;
-        }
-        // Once a LiDAR stream has been established, retain one timeout of IMU
-        // history during an outage. A returning scan can then still be fused at
-        // its sensor timestamp instead of being discarded as out of sequence.
         const double propagation_horizon =
-            completing_sonar_gap
-                ? std::min(latest_imu_time, scan_horizon)
-                : (!explicit_ins_mode && input_buffers_.last_timestamp_lidar > 0.0)
-                ? latest_imu_time - lidar_timeout - expected_imu_period()
-                : latest_imu_time;
+            input_buffers_.PropagationWatermark(latest_imu_time);
         if (propagation_horizon < target_packet_end_time - 1e-6)
         {
-            return completing_sonar_gap ? ImuPacketResult::Waiting
-                                        : ImuPacketResult::Unavailable;
+            return ImuPacketResult::Unavailable;
         }
         // Select a complete packet before popping anything. A partial packet
         // would change the next correction epoch with callback timing.
@@ -1042,18 +945,12 @@ private:
             });
         if (packet_tail == input_buffers_.imu_buffer.end())
         {
-            return completing_sonar_gap ? ImuPacketResult::Waiting
-                                        : ImuPacketResult::Unavailable;
-        }
-        const double packet_tail_time = get_time_sec((*packet_tail)->header.stamp);
-        if (packet_tail_time > scan_horizon + 1e-6)
-        {
             return ImuPacketResult::Unavailable;
         }
+        const double packet_tail_time = get_time_sec((*packet_tail)->header.stamp);
         if (packet_tail_time > propagation_horizon + 1e-6)
         {
-            return completing_sonar_gap ? ImuPacketResult::Waiting
-                                        : ImuPacketResult::Unavailable;
+            return ImuPacketResult::Unavailable;
         }
         if (!auxiliary_callbacks_ready(target_packet_end_time, latest_imu_time))
         {
@@ -1100,8 +997,8 @@ private:
 
         this->declare_parameter<string>("sonar.topic", "/points_raw");
         this->declare_parameter<double>("sonar.frequency", 4.0);
-        this->declare_parameter<vector<double>>("sonar.extrinsic_T", vector<double>());
-        this->declare_parameter<vector<double>>("sonar.extrinsic_R", vector<double>());
+        this->declare_parameter<vector<double>>("sonar.translation", {0.0, 0.0, 0.0});
+        this->declare_parameter<vector<double>>("sonar.rotation", {0.0, 0.0, 0.0});
         this->declare_parameter<float>("sonar.max_range", 300.0F);
         this->declare_parameter<double>("sonar.min_range", 0.01);
         this->declare_parameter<double>("sonar.xy_covariance", LASER_POINT_COV_DEFAULT);
@@ -1109,44 +1006,36 @@ private:
 
         this->declare_parameter<string>("imu.topic", "/imu/data");
         this->declare_parameter<double>("imu.frequency", 100.0);
-        this->declare_parameter<double>("imu.odometry_publish_frequency", 100.0);
         this->declare_parameter<double>("imu.initial_gravity_estimate", G_m_s2);
-        this->declare_parameter<double>("imu.gyr_cov", 0.1);
-        this->declare_parameter<double>("imu.acc_cov", 0.1);
-        this->declare_parameter<double>("imu.b_gyr_cov", 0.0001);
-        this->declare_parameter<double>("imu.b_acc_cov", 0.0001);
-        this->declare_parameter<double>("imu.init_b_gyr_cov", 0.0001);
-        this->declare_parameter<double>("imu.init_b_acc_cov", 0.001);
+        this->declare_parameter<double>("imu.gyroscope_covariance", 0.1);
+        this->declare_parameter<double>("imu.accelerometer_covariance", 0.1);
+        this->declare_parameter<double>("imu.gyroscope_bias_covariance", 0.0001);
+        this->declare_parameter<double>("imu.accelerometer_bias_covariance", 0.0001);
+        this->declare_parameter<double>("imu.init_gyroscope_bias_covariance", 0.0001);
+        this->declare_parameter<double>("imu.init_accelerometer_bias_covariance", 0.001);
         this->declare_parameter<double>("imu.init_gravity_covariance", 0.00001);
         this->declare_parameter<double>("imu.orientation_covariance", 3.0461742e-6);
         this->declare_parameter<double>("imu.accel_attitude_covariance", 1.2184697e-3);
         this->declare_parameter<double>("imu.accel_attitude_norm_gate", 2.0);
-        this->declare_parameter<bool>("imu.noiseless", false);
-        ObservabilityManager::declare_parameters(*this);
 
         this->declare_parameter<int>("mapping.max_iteration", 4);
         this->declare_parameter<double>("mapping.filter_size_surf", 0.5);
         this->declare_parameter<double>("mapping.filter_size_map", 0.5);
         this->declare_parameter<double>("mapping.cube_side_length", 200.0);
-        this->declare_parameter<int>("mapping.minimum_scan_points", 5);
-        this->declare_parameter<int>("mapping.minimum_effective_features", 1);
         this->declare_parameter<string>("mapping.map_file_path", "");
-        this->declare_parameter<bool>("mapping.map_save_enable", false);
         this->declare_parameter<string>("mapping.world_frame", "world");
-        this->declare_parameter<vector<double>>("mapping.world_to_camera_init_T",
+        this->declare_parameter<vector<double>>("mapping.world_initial_frame_translation",
                                                 {0.0, 0.0, 0.0});
-        this->declare_parameter<vector<double>>("mapping.world_to_camera_init_R",
-                             {1.0, 0.0, 0.0,
-                              0.0, 1.0, 0.0,
-                              0.0, 0.0, 1.0});
+        this->declare_parameter<vector<double>>("mapping.world_initial_frame_rotation",
+                                                {0.0, 0.0, 0.0});
         this->declare_parameter<bool>("loop_closure.enable", false);
         this->declare_parameter<string>("loop_closure.profile", "balanced");
         aux_fusion_.declare_parameters(*this);
 
     }
 
-    void LoadParameters(std::vector<double> &world_to_camera_init_T,
-                        std::vector<double> &world_to_camera_init_R)
+    void LoadParameters(std::vector<double> &world_initial_frame_translation,
+                        std::vector<double> &world_initial_frame_rotation)
     {
         this->get_parameter_or<bool>("publish.corrected_map_enable",
                                      corrected_map_publish_enabled_, false);
@@ -1154,10 +1043,10 @@ private:
                                        corrected_map_topic_, "/uwfl2/corrected_map");
         this->get_parameter_or<string>("sonar.topic", lid_topic, "/points_raw");
         this->get_parameter_or<double>("sonar.frequency", sonar_frequency_hz, 4.0);
-        this->get_parameter_or<vector<double>>("sonar.extrinsic_T", extrinT,
-                                               vector<double>());
-        this->get_parameter_or<vector<double>>("sonar.extrinsic_R", extrinR,
-                                               vector<double>());
+        this->get_parameter_or<vector<double>>("sonar.translation", extrinT,
+                                               {0.0, 0.0, 0.0});
+        this->get_parameter_or<vector<double>>("sonar.rotation", extrinR,
+                                               {0.0, 0.0, 0.0});
         this->get_parameter_or<float>("sonar.max_range", DET_RANGE, 300.0F);
         this->get_parameter_or<double>("sonar.min_range", p_pre->blind, 0.01);
         this->get_parameter_or<double>("sonar.xy_covariance", LASER_POINT_COV_XY,
@@ -1167,16 +1056,14 @@ private:
 
         this->get_parameter_or<string>("imu.topic", imu_topic, "/imu/data");
         this->get_parameter_or<double>("imu.frequency", imu_rate_hz, 100.0);
-        this->get_parameter_or<double>("imu.odometry_publish_frequency",
-                                       odometry_publish_rate_hz, 100.0);
         this->get_parameter_or<double>("imu.initial_gravity_estimate",
                                        initial_gravity_estimate, G_m_s2);
-        this->get_parameter_or<double>("imu.gyr_cov", gyr_cov, 0.1);
-        this->get_parameter_or<double>("imu.acc_cov", acc_cov, 0.1);
-        this->get_parameter_or<double>("imu.b_gyr_cov", b_gyr_cov, 0.0001);
-        this->get_parameter_or<double>("imu.b_acc_cov", b_acc_cov, 0.0001);
-        this->get_parameter_or<double>("imu.init_b_gyr_cov", init_b_gyr_cov, 0.0001);
-        this->get_parameter_or<double>("imu.init_b_acc_cov", init_b_acc_cov, 0.001);
+        this->get_parameter_or<double>("imu.gyroscope_covariance", gyroscope_covariance, 0.1);
+        this->get_parameter_or<double>("imu.accelerometer_covariance", accelerometer_covariance, 0.1);
+        this->get_parameter_or<double>("imu.gyroscope_bias_covariance", gyroscope_bias_covariance, 0.0001);
+        this->get_parameter_or<double>("imu.accelerometer_bias_covariance", accelerometer_bias_covariance, 0.0001);
+        this->get_parameter_or<double>("imu.init_gyroscope_bias_covariance", init_gyroscope_bias_covariance, 0.0001);
+        this->get_parameter_or<double>("imu.init_accelerometer_bias_covariance", init_accelerometer_bias_covariance, 0.001);
         this->get_parameter_or<double>("imu.init_gravity_covariance", init_grav_cov,
                                        0.00001);
         this->get_parameter_or<double>("imu.orientation_covariance",
@@ -1185,7 +1072,6 @@ private:
                                        accel_attitude_cov, 1.2184697e-3);
         this->get_parameter_or<double>("imu.accel_attitude_norm_gate",
                                        accel_attitude_norm_gate, 2.0);
-        this->get_parameter_or<bool>("imu.noiseless", noiseless_imu, false);
 
         this->get_parameter_or<int>("mapping.max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<double>("mapping.filter_size_surf",
@@ -1194,27 +1080,15 @@ private:
                                        filter_size_map_min, 0.5);
         this->get_parameter_or<double>("mapping.cube_side_length", cube_len, 200.0);
         this->get_parameter_or<string>("mapping.map_file_path", map_file_path, "");
-        this->get_parameter_or<bool>("mapping.map_save_enable", pcd_save_en, false);
         this->get_parameter_or<string>("mapping.world_frame", world_frame, "world");
-        this->get_parameter_or<vector<double>>("mapping.world_to_camera_init_T",
-                            world_to_camera_init_T,
+        this->get_parameter_or<vector<double>>("mapping.world_initial_frame_translation",
+                            world_initial_frame_translation,
                             {0.0, 0.0, 0.0});
-        this->get_parameter_or<vector<double>>("mapping.world_to_camera_init_R",
-                            world_to_camera_init_R,
-                            {1.0, 0.0, 0.0,
-                             0.0, 1.0, 0.0,
-                             0.0, 0.0, 1.0});
+        this->get_parameter_or<vector<double>>("mapping.world_initial_frame_rotation",
+                            world_initial_frame_rotation,
+                            {0.0, 0.0, 0.0});
         LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
         LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
-        this->get_parameter_or<int>("mapping.minimum_scan_points",
-                                    minimum_scan_points, 5);
-        this->get_parameter_or<int>("mapping.minimum_effective_features",
-                                    minimum_effective_features, 1);
-        minimum_scan_points = std::max(1, minimum_scan_points);
-        minimum_effective_features = std::max(1, minimum_effective_features);
-        lidar_scan_quality = uwfl2::LidarScanQualityPolicy(
-            static_cast<std::size_t>(minimum_scan_points),
-            static_cast<std::size_t>(minimum_effective_features));
         imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
         accel_attitude_cov = std::max(1e-8, accel_attitude_cov);
         accel_attitude_norm_gate = std::max(0.0, accel_attitude_norm_gate);
@@ -1231,12 +1105,6 @@ private:
                         "imu.frequency must be positive. Falling back to 100 Hz.");
             imu_rate_hz = 100.0;
         }
-        if (odometry_publish_rate_hz <= 0.0)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "imu.odometry_publish_frequency must be positive. Falling back to 100 Hz.");
-            odometry_publish_rate_hz = 100.0;
-        }
         if (!std::isfinite(initial_gravity_estimate) ||
             initial_gravity_estimate <= 0.0)
         {
@@ -1249,17 +1117,6 @@ private:
         auxiliary_fusion_enabled = aux_fusion_.dvl_enabled() ||
                                    aux_fusion_.pressure_enabled() ||
                                    aux_fusion_.mag_enabled();
-        if (noiseless_imu)
-        {
-            // Simulation-only mode: IMU has zero bias/noise. Freeze ba/bg/grav so
-            // LiDAR residuals cannot rewrite them. Only valid for simulated IMUs.
-            b_acc_cov = std::min(b_acc_cov, 1e-10);
-            b_gyr_cov = std::min(b_gyr_cov, 1e-10);
-            init_b_acc_cov = 1e-10;
-            init_b_gyr_cov = 1e-10;
-            init_grav_cov = 1e-10;
-        }
-        // else: init_b_acc_cov / init_b_gyr_cov / init_grav_cov already loaded from YAML above.
         const double disabled_aux_cov = 1e-12;
         init_b_dvl_cov = aux_fusion_.dvl_enabled() ? aux_fusion_.dvl_b_init_cov() : disabled_aux_cov;
         init_b_pressure_cov = aux_fusion_.pressure_enabled()
@@ -1284,31 +1141,22 @@ private:
         if (extrinT.size() != 3)
         {
             RCLCPP_WARN(this->get_logger(),
-                        "sonar.extrinsic_T must have 3 values. Using zero translation.");
+                        "sonar.translation must have 3 values. Using zero translation.");
             extrinT = {0.0, 0.0, 0.0};
         }
-        if (extrinR.size() != 9)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "sonar.extrinsic_R must have 9 values. Using identity rotation.");
-            extrinR = {1.0, 0.0, 0.0,
-                       0.0, 1.0, 0.0,
-                       0.0, 0.0, 1.0};
-        }
         Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
-        Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
+        Lidar_R_wrt_IMU = uwfl2::rotation_from_rpy_degrees(extrinR);
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
         p_imu->set_gravity(initial_gravity_estimate);
-        p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
-        p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
-        p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
-        p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
-        p_imu->set_initial_cov(V3D(init_b_gyr_cov, init_b_gyr_cov, init_b_gyr_cov),
-                               V3D(init_b_acc_cov, init_b_acc_cov, init_b_acc_cov),
+        p_imu->set_gyr_cov(V3D(gyroscope_covariance, gyroscope_covariance, gyroscope_covariance));
+        p_imu->set_acc_cov(V3D(accelerometer_covariance, accelerometer_covariance, accelerometer_covariance));
+        p_imu->set_gyr_bias_cov(V3D(gyroscope_bias_covariance, gyroscope_bias_covariance, gyroscope_bias_covariance));
+        p_imu->set_acc_bias_cov(V3D(accelerometer_bias_covariance, accelerometer_bias_covariance, accelerometer_bias_covariance));
+        p_imu->set_initial_cov(V3D(init_gyroscope_bias_covariance, init_gyroscope_bias_covariance, init_gyroscope_bias_covariance),
+                               V3D(init_accelerometer_bias_covariance, init_accelerometer_bias_covariance, init_accelerometer_bias_covariance),
                                init_grav_cov);
         p_imu->set_initial_aux_cov(V3D(init_b_dvl_cov, init_b_dvl_cov, init_b_dvl_cov),
                                    init_b_pressure_cov);
-        obs_manager.load_parameters(*this, b_gyr_cov, b_acc_cov);
 
         fill(epsi, epsi + state_ikfom::DOF, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
@@ -1389,7 +1237,7 @@ private:
         static_tf_broadcaster_->sendTransform(body_to_sonar);
         sonar_frame_id_ = frame_id;
         RCLCPP_INFO(this->get_logger(),
-                    "Attached sonar frame '%s' to UWFL2 body using sonar.extrinsic_R/T.",
+                    "Attached sonar frame '%s' to UWFL2 body using sonar.rotation/translation.",
                     sonar_frame_id_.c_str());
     }
 
@@ -1642,6 +1490,100 @@ private:
         }
     }
 
+    void publish_navigation_health()
+    {
+        diagnostic_msgs::msg::DiagnosticArray message;
+        message.header.stamp = this->now();
+        diagnostic_msgs::msg::DiagnosticStatus status;
+        status.name = "uwfl2/navigation";
+        status.hardware_id = "uwfl2";
+        double imu_stamp, sonar_stamp, scan_stamp, frontier, sonar_lag, sonar_late_age;
+        std::size_t sonar_received, sonar_late_dropped;
+        uwfl2::MappingInputBuffers::Clock::time_point imu_receipt;
+        {
+            std::lock_guard<std::mutex> lock(input_buffers_.mtx_buffer);
+            imu_stamp = input_buffers_.last_timestamp_imu;
+            sonar_stamp = input_buffers_.last_timestamp_lidar;
+            scan_stamp = input_buffers_.last_scan_end_time;
+            frontier = input_buffers_.last_processed_time;
+            imu_receipt = input_buffers_.last_imu_receipt;
+            sonar_received = input_buffers_.sonar_received;
+            sonar_late_dropped = input_buffers_.sonar_late_dropped;
+            sonar_lag = input_buffers_.max_sonar_acquisition_lag;
+            sonar_late_age = input_buffers_.max_sonar_late_age;
+        }
+        const auto aux = aux_fusion_.availability();
+        // Acquisition ages must not mix synthetic/bag epochs with host wall time.
+        // With simulation time enabled, /clock also reveals a stalled IMU stream.
+        const double now = this->get_parameter("use_sim_time").as_bool()
+            ? std::max(this->now().seconds(), imu_stamp) : imu_stamp;
+        const auto available = [now](double stamp, double timeout) {
+            return stamp >= 0.0 && now - stamp <= timeout;
+        };
+        const double imu_receipt_age = std::chrono::duration<double>(
+            uwfl2::MappingInputBuffers::Clock::now() - imu_receipt).count();
+        const bool imu_ok = available(imu_stamp, expected_imu_timeout()) &&
+            (this->get_parameter("use_sim_time").as_bool() ||
+             imu_receipt_age <= std::max(0.25, expected_imu_timeout()));
+        const bool sonar_ok = !lid_topic.empty() && available(sonar_stamp, 2.0 * lidar_timeout);
+        const bool dvl_ok = aux_fusion_.dvl_enabled() &&
+            available(last_dvl_applied_time_, 2.0 * aux.dvl_timeout);
+        const bool usable_sonar = sonar_ok &&
+            available(scan_stamp, 2.0 * lidar_timeout) &&
+            sonar_condition_ == "accepted_geometry_rank_unassessed";
+        const bool initialized = p_imu->IsInitialized();
+        status.level = !initialized || !imu_ok ? diagnostic_msgs::msg::DiagnosticStatus::ERROR :
+            (!usable_sonar && !dvl_ok ? diagnostic_msgs::msg::DiagnosticStatus::WARN :
+                                      diagnostic_msgs::msg::DiagnosticStatus::OK);
+        status.message = !initialized ? "initializing" : !imu_ok ? "IMU unavailable" :
+            !usable_sonar && !dvl_ok ? "degraded: no usable sonar or fused DVL" : "aided navigation";
+        auto add = [&](const std::string &key, const std::string &value) {
+            diagnostic_msgs::msg::KeyValue item;
+            item.key = key; item.value = value; status.values.push_back(item);
+        };
+        add("sonar_condition", !sonar_ok ? (lid_topic.empty() ? "disabled" : "missing") : sonar_condition_);
+        add("geometry_rank", "unassessed; partial/full information classification deferred to CP-3");
+        add("imu_available", imu_ok ? "true" : "false");
+        add("imu_receipt_age_wall_seconds", std::to_string(imu_receipt_age));
+        add("dvl_received", aux_fusion_.dvl_enabled() && available(aux.dvl_stamp, 2.0 * aux.dvl_timeout) ? "true" : "false");
+        add("dvl_recently_fused", dvl_ok ? "true" : "false");
+        add("pressure_received", aux_fusion_.pressure_enabled() && available(aux.pressure_stamp, 2.0 * aux.pressure_timeout) ? "true" : "false");
+        add("magnetometer_received", aux_fusion_.mag_enabled() && available(aux.magnetometer_stamp, 2.0 * aux.magnetometer_timeout) ? "true" : "false");
+        add("state_timestamp", std::to_string(frontier));
+        add("availability_time_reference", this->get_parameter("use_sim_time").as_bool()
+            ? "sensor_time_and_ros_clock" : "latest_imu_acquisition_time");
+        add("processing_lag_seconds", std::to_string(imu_stamp - frontier));
+        add("imu_observations", std::to_string(imu_observation_count_));
+        add("aux_considered", std::to_string(aux_considered_count_));
+        add("aux_applied", std::to_string(aux_applied_count_));
+        add("aux_late_dropped", std::to_string(late_aux_count_));
+        add("sonar_received", std::to_string(sonar_received));
+        add("sonar_late_dropped", std::to_string(sonar_late_dropped));
+        add("maximum_sonar_acquisition_lag_seconds", std::to_string(sonar_lag));
+        add("maximum_sonar_late_age_seconds", std::to_string(sonar_late_age));
+        if (initialized)
+        {
+            const MainEkf::cov covariance = kf.get_P();
+            const bool finite = covariance.allFinite();
+            const double asymmetry = finite ? (covariance - covariance.transpose()).norm() : INFINITY;
+            Eigen::SelfAdjointEigenSolver<MainEkf::cov> eigen;
+            if (finite) eigen.compute((covariance + covariance.transpose()) * 0.5);
+            const double minimum = finite && eigen.info() == Eigen::Success ? eigen.eigenvalues().minCoeff() : -INFINITY;
+            add("covariance_trace", std::to_string(covariance.trace()));
+            add("position_covariance_trace", std::to_string(covariance.block<3, 3>(0, 0).trace()));
+            add("attitude_covariance_trace", std::to_string(covariance.block<3, 3>(3, 3).trace()));
+            add("covariance_asymmetry", std::to_string(asymmetry));
+            add("covariance_min_eigenvalue", std::to_string(minimum));
+            if (!finite || asymmetry > 1e-8 || minimum < -1e-10)
+            {
+                status.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+                status.message = "invalid estimator covariance";
+            }
+        }
+        message.status.push_back(status);
+        navigation_health_pub_->publish(message);
+    }
+
     void timer_callback()
     {
         try_commit_loop_correction();
@@ -1679,14 +1621,6 @@ private:
             TRACE_STATE(imu_only_measure ? "packet_ins" : "packet_scan",
                         process_begin_time, Measures.imu.size(),
                         uwfl2::ReplayTrace::ImuFingerprint(Measures.imu));
-            if (!noiseless_imu && auxiliary_fusion_enabled)
-            {
-                const double now = Measures.lidar_end_time;
-                const double dyn_bg = obs_manager.bg_cov(now);
-                const double dyn_ba = obs_manager.ba_cov(now);
-                p_imu->set_gyr_bias_cov(V3D(dyn_bg, dyn_bg, dyn_bg));
-                p_imu->set_acc_bias_cov(V3D(dyn_ba, dyn_ba, dyn_ba));
-            }
             if (!p_imu->IsInitialized())
             {
                 p_imu->Process(Measures, kf, feats_undistort);
@@ -1696,77 +1630,73 @@ private:
                 }
                 input_buffers_.last_processed_time = Measures.lidar_end_time;
                 TRACE_STATE("initialized", Measures.lidar_end_time, p_imu->IsInitialized(), 0);
+                imu_observation_calendar_.Reset(Measures.lidar_end_time);
                 update_state_outputs();
                 return;
             }
 
-            if (!auxiliary_fusion_enabled)
-            {
-                // This is the original FAST-LIO2 path: one scan-bounded IMU
-                // propagation/deskew and no extra attitude or auxiliary update.
-                p_imu->Process(Measures, kf, feats_undistort);
-            }
-            else
+            std::vector<AuxiliarySensorFusion::TimedMeasurement> timed_measurements;
+            if (auxiliary_fusion_enabled)
             {
                 aux_fusion_.initialize_pressure_reference_pose(kf.get_x());
-                const auto timed_measurements = aux_fusion_.take_timed_measurements(
+                timed_measurements = aux_fusion_.take_timed_measurements(
                     process_begin_time, Measures.lidar_end_time);
-                const auto late_measurements = aux_fusion_.take_late_measurement_counts();
-
-                if (aux_timeline_started_ && late_measurements.total() > 0)
-                {
+                const auto late = aux_fusion_.take_late_measurement_counts();
+                late_aux_count_ += late.total();
+                if (aux_timeline_started_ && late.total() > 0)
                     RCLCPP_WARN_THROTTLE(
                         this->get_logger(), *this->get_clock(), 5000,
-                        "Dropped out-of-sequence auxiliary measurements: DVL=%zu pressure=%zu magnetometer=%zu. "
-                        "Check sensor acquisition timestamps and transport latency.",
-                        late_measurements.dvl, late_measurements.pressure,
-                        late_measurements.magnetometer);
-                }
+                        "Dropped out-of-sequence auxiliary measurements: DVL=%zu pressure=%zu magnetometer=%zu.",
+                        late.dvl, late.pressure, late.magnetometer);
                 aux_timeline_started_ = true;
-                std::vector<double> timed_measurement_stamps;
-                timed_measurement_stamps.reserve(timed_measurements.size());
-                for (const auto &measurement : timed_measurements)
-                {
-                    timed_measurement_stamps.push_back(measurement.timestamp);
-                }
-
-                auto apply_timed_measurement =
-                    [&](std::size_t measurement_index, ImuProcess::Ekf &event_kf) -> bool
-                {
-                    const auto &measurement = timed_measurements[measurement_index];
-                    TRACE_STATE("aux_prior", measurement.timestamp,
-                                static_cast<std::size_t>(measurement.kind),
-                                uwfl2::ReplayTrace::MeasurementFingerprint(measurement));
-                    const bool applied = aux_fusion_.apply_timed_measurement(
-                        measurement, Measures.imu, event_kf);
-                    TRACE_STATE("aux_after", measurement.timestamp, applied,
+            }
+            const auto observations =
+                imu_observation_calendar_.Take(Measures.imu, Measures.lidar_end_time);
+            struct Event { double timestamp; bool attitude; std::size_t index; };
+            std::vector<Event> events;
+            for (std::size_t i = 0; i < timed_measurements.size(); ++i)
+                events.push_back({timed_measurements[i].timestamp, false, i});
+            for (std::size_t i = 0; i < observations.size(); ++i)
+                events.push_back({observations[i].timestamp, true, i});
+            // Equal-time auxiliary events retain their order, followed by IMU observations.
+            std::stable_sort(events.begin(), events.end(),
+                [](const Event &a, const Event &b) { return a.timestamp < b.timestamp; });
+            std::vector<double> timestamps;
+            for (const auto &event : events) timestamps.push_back(event.timestamp);
+            p_imu->Process(Measures, kf, feats_undistort, timestamps,
+                [&](std::size_t index, ImuProcess::Ekf &filter) {
+                    const auto &event = events[index];
+                    if (event.attitude)
+                    {
+                        const auto &window = observations[event.index].samples;
+                        const bool orientation = apply_imu_orientation_update(window.back(), filter);
+                        const bool tilt = apply_accel_attitude_update(window, filter);
+                        ++imu_observation_count_;
+                        TRACE_STATE("imu_observation", event.timestamp, imu_observation_count_, 0);
+                        return orientation || tilt;
+                    }
+                    const auto &measurement = timed_measurements[event.index];
+                    const bool applied = aux_fusion_.apply_timed_measurement(measurement, Measures.imu, filter);
+                    ++aux_considered_count_;
+                    if (applied) ++aux_applied_count_;
+                    if (applied && measurement.kind == AuxiliarySensorFusion::MeasurementKind::Dvl)
+                        last_dvl_applied_time_ = measurement.timestamp;
+                    TRACE_STATE("aux_after", event.timestamp, applied,
                                 uwfl2::ReplayTrace::MeasurementFingerprint(measurement));
                     return applied;
-                };
-
-                p_imu->Process(Measures, kf, feats_undistort,
-                               timed_measurement_stamps, apply_timed_measurement);
+                });
+            if (auxiliary_fusion_enabled)
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
-            }
-            // These are IMU observations, not auxiliary-sensor observations.
             TRACE_STATE("propagated", Measures.lidar_end_time, 0, 0);
-            // Apply them once after either propagation path so disabling DVL,
-            // pressure, and magnetometer cannot silently change IMU behavior.
-            // Once sonar is established, these observations stay scan-rate.
-            // Temporary outage packets must not introduce extra attitude
-            // corrections. Pure INS retains its existing observation cadence.
-            if (!Measures.imu.empty() &&
-                (!imu_only_measure || input_buffers_.last_scan_end_time < 0.0))
-            {
-                apply_imu_orientation_update(Measures.imu.back());
-                apply_accel_attitude_update(Measures.imu);
-            }
             input_buffers_.last_processed_time = Measures.lidar_end_time;
             TRACE_STATE("imu_attitude", Measures.lidar_end_time, 0, 0);
             update_state_outputs();
 
             if (imu_only_measure)
             {
+                // Packet scheduling is not a sonar availability observation.
+                // The health publisher derives missing input from acquisition age.
+                if (lid_topic.empty()) sonar_condition_ = "disabled";
                 if (lid_topic.empty())
                 {
                     // Intentional no-lidar mode. Startup already reported this once.
@@ -1793,6 +1723,7 @@ private:
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
+                sonar_condition_ = "empty";
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
                 lidar_update_result = lidar_scan_quality.reject_sparse_input(0);
                 publish_estimator_outputs();
@@ -1814,6 +1745,7 @@ private:
             {
                 lidar_update_result = lidar_scan_quality.reject_sparse_input(
                     static_cast<std::size_t>(feats_down_size));
+                sonar_condition_ = "unusable_sparse_input";
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(), *this->get_clock(), 2000,
                     "Rejected sparse sonar scan: %d downsampled points (minimum %d).",
@@ -1835,12 +1767,12 @@ private:
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
                     ikdtree->Build(feats_down_world->points);
+                    sonar_condition_ = "map_initialization";
                     lidar_update_result =
                         lidar_scan_quality.accept_map_initialization(
                             static_cast<std::size_t>(feats_down_size));
                     lidar_update_result.map_points_inserted =
                         static_cast<std::size_t>(ikdtree->validnum());
-                    obs_manager.notify_sonar_scan(Measures.lidar_end_time);
                     if (loop_closure_)
                     {
                         ++active_tree_generation_;
@@ -1853,6 +1785,7 @@ private:
                 }
                 else
                 {
+                    sonar_condition_ = "unusable_sparse_input";
                     lidar_update_result = lidar_scan_quality.reject_sparse_input(
                         static_cast<std::size_t>(feats_down_size));
                 }
@@ -1886,6 +1819,7 @@ private:
             lidar_transaction.finish(lidar_update_result);
             if (!lidar_update_result.accepted)
             {
+                sonar_condition_ = "unusable_correspondences";
                 update_state_outputs();
 
                 RCLCPP_WARN_THROTTLE(
@@ -1896,11 +1830,12 @@ private:
                 publish_estimator_outputs();
                 return;
             }
-            obs_manager.notify_sonar_scan(Measures.lidar_end_time);
 
             update_state_outputs();
 
             /******* Publish odometry *******/
+            // Count-based acceptance does not establish full six-DOF observability.
+            sonar_condition_ = "accepted_geometry_rank_unassessed";
             publish_estimator_outputs();
 
             /*** add the feature points to map kdtree ***/
@@ -1920,8 +1855,7 @@ private:
 
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
     {
-        RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
-        if (pcd_save_en)
+        try
         {
             const PointCloudXYZI snapshot = corrected_mapping_snapshot();
             if (snapshot.empty())
@@ -1931,24 +1865,17 @@ private:
             }
             else
             {
-                try
-                {
-                    save_to_pcd(snapshot);
-                    res->success = true;
-                    res->message = "Corrected map saved with " +
-                                   std::to_string(snapshot.size()) + " points.";
-                }
-                catch (const std::exception &error)
-                {
-                    res->success = false;
-                    res->message = std::string("Map save failed: ") + error.what();
-                }
+                const auto saved_path = save_to_pcd(snapshot);
+                res->success = true;
+                res->message = "Corrected map saved to " + saved_path + " with " +
+                               std::to_string(snapshot.size()) + " points.";
+                RCLCPP_INFO(this->get_logger(), "%s", res->message.c_str());
             }
         }
-        else
+        catch (const std::exception &error)
         {
             res->success = false;
-            res->message = "Map save disabled.";
+            res->message = std::string("Map save failed: ") + error.what();
         }
     }
 
@@ -2117,12 +2044,8 @@ private:
 
     void accumulate_mapping_output(double timestamp)
     {
-        // Loop closure always needs keyframe-owned map history. With loop
-        // closure disabled, retain FAST-LIO2's original behavior and only
-        // accumulate history when PCD saving is enabled.
-        if ((!loop_closure_ && !pcd_save_en &&
-             !corrected_map_publish_enabled_) ||
-            !feats_undistort || feats_undistort->empty())
+        // Retain history for on-demand map saving even when display and LC are off.
+        if (!feats_undistort || feats_undistort->empty())
         {
             return;
         }
@@ -2874,6 +2797,15 @@ private:
     double aux_reorder_target_time = -1.0;
     std::chrono::steady_clock::time_point aux_reorder_wait_start;
     AuxiliarySensorFusion aux_fusion_;
+    std::string sonar_condition_ = "initializing";
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr navigation_health_pub_;
+    rclcpp::TimerBase::SharedPtr navigation_health_timer_;
+    uwfl2::ImuObservationCalendar imu_observation_calendar_;
+    std::size_t imu_observation_count_ = 0;
+    std::size_t aux_considered_count_ = 0;
+    std::size_t aux_applied_count_ = 0;
+    std::size_t late_aux_count_ = 0;
+    double last_dvl_applied_time_ = -1.0;
     std::unique_ptr<uwfl2::loop_closure::LoopClosureManager> loop_closure_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
         pubCorrectedMap_;

@@ -62,6 +62,7 @@ find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -75,6 +76,7 @@ set(dependencies
   rclcpp
   geometry_msgs
   nav_msgs
+  diagnostic_msgs
   sensor_msgs
   std_msgs
   std_srvs
@@ -200,6 +202,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sensor_parameter_utils
     test/test_sensor_parameter_utils.cpp)
   target_include_directories(test_sensor_parameter_utils PRIVATE include)
+  target_link_libraries(test_sensor_parameter_utils Eigen3::Eigen)
 
   ament_add_gtest(test_odometry_covariance
     test/test_odometry_covariance.cpp)

@@ -29,7 +29,9 @@ public:
             for (int i = 0; i < 9; ++i) output_ << ",r" << i;
             for (const char *name : {"vel", "bg", "ba", "grav", "bdvl"})
                 for (int i = 0; i < 3; ++i) output_ << ',' << name << i;
-            output_ << ",bp,cov_hash\n";
+            output_ << ",bp,cov_hash";
+            for (int i = 0; i < state_ikfom::DOF; ++i) output_ << ",cov" << i;
+            output_ << ",attitude_ba_cross,attitude_grav_cross,ba_grav_cross\n";
         }
     }
 
@@ -140,7 +142,11 @@ public:
             for (int i = 0; i < 3; ++i) output_ << ',' << vector[i];
         output_ << ',' << state.b_pressure << ','
                 << Hash(reinterpret_cast<const unsigned char *>(covariance.data()),
-                        sizeof(double) * covariance.size()) << '\n';
+                        sizeof(double) * covariance.size());
+        for (int i = 0; i < state_ikfom::DOF; ++i) output_ << ',' << covariance(i, i);
+        output_ << ',' << covariance.template block<3, 3>(3, 18).norm()
+                << ',' << covariance.template block<3, 2>(3, 21).norm()
+                << ',' << covariance.template block<3, 2>(18, 21).norm() << '\n';
     }
 
 private:

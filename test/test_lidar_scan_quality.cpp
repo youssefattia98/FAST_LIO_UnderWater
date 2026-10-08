@@ -27,6 +27,15 @@ TEST(LidarScanQuality, LegacyDefaultsAcceptBoundary)
     EXPECT_TRUE(policy.features_are_sufficient(1));
 }
 
+TEST(LidarScanQuality, NonemptyScanCanContributeOneTrustworthyConstraint)
+{
+    const uwfl2::LidarScanQualityPolicy policy(1, 1);
+    EXPECT_TRUE(policy.evaluate_update(1, 1, true).accepted);
+    EXPECT_FALSE(policy.evaluate_update(0, 0, false).accepted);
+    EXPECT_FALSE(policy.evaluate_update(1, 0, false).accepted);
+    EXPECT_FALSE(policy.map_initialization_is_sufficient(1));
+}
+
 TEST(LidarScanQuality, RejectsSparseInput)
 {
     const uwfl2::LidarScanQualityPolicy policy(50, 20);

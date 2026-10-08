@@ -4,6 +4,7 @@
 #include "IMU_Processing.hpp"
 #include "auxiliary_sensor_fusion.hpp"
 #include "mapping_input_buffers.hpp"
+#include "imu_observation_calendar.hpp"
 #include "replay_trace.hpp"
 #include <thread>
 
@@ -95,25 +96,26 @@ TEST(InputBuffers, PredictionHistoryDoesNotFabricateSamplesBeyondHardLimit)
 
 using Ekf = ImuProcess::Ekf;
 
-TEST(InputBuffers, SonarFallbackRequiresReceptionSilenceAndCompletedConversion)
+TEST(InputBuffers, TransportWatermarkIsIndependentOfSonarAvailability)
 {
     using Clock = uwfl2::MappingInputBuffers::Clock;
     const auto epoch = Clock::time_point(std::chrono::seconds(10));
-    const auto grace = std::chrono::milliseconds(20);
     uwfl2::MappingInputBuffers buffers;
+    buffers.last_imu_receipt = epoch;
+    EXPECT_DOUBLE_EQ(buffers.PropagationWatermark(28.0, epoch), 27.98);
     buffers.NoteSonarReceipt(epoch);
-    // A conversion remains in flight even when the IMU watermark is far ahead.
-    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(1)));
+    EXPECT_DOUBLE_EQ(buffers.PropagationWatermark(28.0, epoch), 27.98);
     auto cloud = std::make_shared<PointCloudXYZI>();
+    buffers.last_timestamp_imu = 28.0;
     buffers.PushSonar(cloud, 27.53);
     EXPECT_FALSE(buffers.sonar_processing);
-    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::milliseconds(267)));
-    EXPECT_TRUE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::milliseconds(270)));
-    EXPECT_TRUE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(1)));
-    buffers.NoteSonarReceipt(epoch + std::chrono::seconds(1));
-    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(2)));
-    buffers.PushSonar(cloud, 28.0);
-    EXPECT_FALSE(buffers.SonarReceptionTimedOut(0.25, grace, epoch + std::chrono::seconds(1)));
+    EXPECT_EQ(buffers.sonar_received, 1U);
+    EXPECT_NEAR(buffers.max_sonar_acquisition_lag, 0.47, 1e-12);
+    EXPECT_DOUBLE_EQ(buffers.PropagationWatermark(28.0, epoch), 27.98);
+    EXPECT_DOUBLE_EQ(buffers.PropagationWatermark(
+        28.0, epoch + std::chrono::milliseconds(249)), 27.98);
+    EXPECT_DOUBLE_EQ(buffers.PropagationWatermark(
+        28.0, epoch + std::chrono::milliseconds(250)), 28.0);
 }
 
 struct RosContext
@@ -121,6 +123,26 @@ struct RosContext
     RosContext() { rclcpp::init(0, nullptr); }
     ~RosContext() { rclcpp::shutdown(); }
 };
+
+TEST(SensorParameters, MagnetometerDeclaresRenamedCovariance)
+{
+    RosContext context;
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({rclcpp::Parameter("magnetometer.covariance", 0.03)});
+    rclcpp::Node node("magnetometer_parameters", options);
+    AuxiliarySensorFusion fusion;
+    fusion.declare_parameters(node);
+    fusion.load_parameters(node);
+    EXPECT_DOUBLE_EQ(node.get_parameter("magnetometer.covariance").as_double(), 0.03);
+    EXPECT_FALSE(node.has_parameter("magnetometer.mag_cov"));
+    EXPECT_FALSE(node.has_parameter("magnetometer.heading_cov_floor"));
+    EXPECT_FALSE(node.has_parameter("magnetometer.extrinsic_R"));
+    EXPECT_FALSE(node.has_parameter("dvl.extrinsic_T"));
+    EXPECT_FALSE(node.has_parameter("pressure.timeout"));
+    EXPECT_DOUBLE_EQ(node.get_parameter("pressure.frequency").as_double(), 4.0);
+    EXPECT_EQ(node.get_parameter("dvl.rotation").as_double_array(),
+              (std::vector<double>{0.0, 0.0, 0.0}));
+}
 
 void NoMeasurement(state_ikfom &, esekfom::dyn_share_datastruct<double> &data)
 {
@@ -187,6 +209,157 @@ MeasureGroup StationaryInterval(double begin, double end)
     return measurements;
 }
 
+TEST(ImuCharacterization, ConfiguredBiasNoiseSurvivesEmptyScansAndLongAbsence)
+{
+    Ekf filter;
+    InitializeFilter(filter);
+    ImuProcess imu;
+    const V3D gyro_noise(0.04, 0.05, 0.06);
+    const V3D accel_noise(0.08, 0.09, 0.10);
+    imu.set_gyr_bias_cov(gyro_noise);
+    imu.set_acc_bias_cov(accel_noise);
+    PointCloudXYZI::Ptr output(new PointCloudXYZI());
+    imu.Process(StationaryInterval(1.0, 1.2), filter, output);
+    ASSERT_TRUE(imu.IsInitialized());
+    for (int i = 0; i < 30; ++i)
+    {
+        const double begin = 1.2 + i * 0.2;
+        imu.Process(StationaryInterval(begin, begin + 0.2), filter, output);
+        EXPECT_TRUE((imu.Q.block<3, 3>(6, 6).diagonal().isApprox(gyro_noise, 0.0)));
+        EXPECT_TRUE((imu.Q.block<3, 3>(9, 9).diagonal().isApprox(accel_noise, 0.0)));
+        EXPECT_TRUE(filter.get_P().allFinite());
+    }
+}
+
+TEST(ImuCharacterization, TimedUpdatesRetainEachConfiguredBiasNoise)
+{
+    Ekf filter;
+    InitializeFilter(filter);
+    ImuProcess imu;
+    const V3D gyro_noise(0.04, 0.05, 0.06);
+    const V3D accel_noise(0.08, 0.09, 0.10);
+    imu.set_gyr_bias_cov(gyro_noise);
+    imu.set_acc_bias_cov(accel_noise);
+    PointCloudXYZI::Ptr output(new PointCloudXYZI());
+    imu.Process(StationaryInterval(1.0, 1.2), filter, output);
+    ASSERT_TRUE(imu.IsInitialized());
+    int events = 0;
+    imu.Process(StationaryInterval(1.2, 1.4), filter, output, {1.3},
+                [&](std::size_t, Ekf &) { ++events; return false; });
+    EXPECT_EQ(events, 1);
+    EXPECT_TRUE((imu.Q.block<3, 3>(6, 6).diagonal().isApprox(gyro_noise, 0.0)));
+    EXPECT_TRUE((imu.Q.block<3, 3>(9, 9).diagonal().isApprox(accel_noise, 0.0)));
+}
+
+TEST(ImuCalendar, PacketBoundariesDoNotChangeEpochsOrAveragingSamples)
+{
+    auto source = StationaryInterval(1.2, 1.4).imu;
+    for (const auto &sample : StationaryInterval(1.41, 2.0).imu)
+        source.push_back(sample);
+    uwfl2::ImuObservationCalendar whole, packets;
+    whole.Reset(1.2);
+    packets.Reset(1.2);
+    const auto expected = whole.Take(source, 2.0);
+    std::vector<uwfl2::ImuObservationCalendar::Observation> actual;
+    for (const auto &sample : source)
+    {
+        // Deliberately repeat the boundary sample to exercise once-only consumption.
+        const auto events = packets.Take({sample, sample}, get_time_sec(sample->header.stamp));
+        actual.insert(actual.end(), events.begin(), events.end());
+    }
+    ASSERT_EQ(actual.size(), expected.size());
+    ASSERT_EQ(actual.size(), 4U);
+    for (std::size_t i = 0; i < expected.size(); ++i)
+    {
+        EXPECT_DOUBLE_EQ(actual[i].timestamp, expected[i].timestamp);
+        EXPECT_EQ(actual[i].samples, expected[i].samples);
+    }
+    EXPECT_TRUE(whole.Take(source, 2.0).empty());
+}
+
+TEST(ImuCalendar, FutureSamplesAndAcquisitionGapsDoNotFabricateObservations)
+{
+    uwfl2::ImuObservationCalendar calendar;
+    calendar.Reset(1.2);
+    const auto source = StationaryInterval(1.2, 1.4).imu;
+    EXPECT_TRUE(calendar.Take(source, 1.3).empty());
+    ASSERT_EQ(calendar.Take(source, 1.4).size(), 1U);
+    auto resumed = std::make_shared<sensor_msgs::msg::Imu>();
+    resumed->header.stamp = get_ros_time(3.0);
+    const auto events = calendar.Take({resumed}, 3.0);
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_DOUBLE_EQ(events.front().timestamp, 3.0);
+    EXPECT_EQ(events.front().samples.size(), 1U);
+}
+
+TEST(ImuCharacterization, EmptyMissingAndDisabledSonarShareStateAndCovariance)
+{
+    Ekf whole_filter, packet_filter;
+    InitializeFilter(whole_filter);
+    InitializeFilter(packet_filter);
+    ImuProcess whole_imu, packet_imu;
+    PointCloudXYZI::Ptr whole_cloud(new PointCloudXYZI()), packet_cloud(new PointCloudXYZI());
+    const auto startup = StationaryInterval(1.0, 1.2);
+    whole_imu.Process(startup, whole_filter, whole_cloud);
+    packet_imu.Process(startup, packet_filter, packet_cloud);
+    ASSERT_TRUE(whole_imu.IsInitialized());
+    auto saved_state = whole_filter.get_x();
+    auto saved_covariance = whole_filter.get_P();
+    packet_filter.change_x(saved_state);
+    packet_filter.change_P(saved_covariance);
+    uwfl2::ImuObservationCalendar whole_calendar, packet_calendar;
+    whole_calendar.Reset(1.2);
+    packet_calendar.Reset(1.2);
+    auto source = StationaryInterval(1.2, 2.2);
+    // Use a canonical 100 Hz acquisition stream for both packetizations.
+    source.imu.clear();
+    for (int i = 1; i <= 100; ++i)
+    {
+        auto sample = std::make_shared<sensor_msgs::msg::Imu>();
+        sample->header.stamp = get_ros_time(1.2 + i * 0.01);
+        sample->linear_acceleration.z = 9.81;
+        sample->angular_velocity.z = 0.05 + 0.02 * std::sin(i * 0.1);
+        sample->linear_acceleration.x = 0.2 * std::sin(i * 0.1);
+        source.imu.push_back(sample);
+    }
+    auto process = [](ImuProcess &imu, Ekf &filter, uwfl2::ImuObservationCalendar &calendar,
+                      const MeasureGroup &packet, PointCloudXYZI::Ptr cloud) {
+        const auto events = calendar.Take(packet.imu, packet.lidar_end_time);
+        std::vector<double> stamps;
+        for (const auto &event : events) stamps.push_back(event.timestamp);
+        imu.Process(packet, filter, cloud, stamps, [](std::size_t, Ekf &event_filter) {
+            // A real timestamped scalar correction, applied identically in all modes.
+            auto state = event_filter.get_x();
+            auto covariance = event_filter.get_P();
+            Eigen::Matrix<double, 1, state_ikfom::DOF> H = Eigen::Matrix<double, 1, state_ikfom::DOF>::Zero();
+            H(0, 14) = 1.0;
+            const double R = 0.01;
+            const auto gain = (covariance * H.transpose() / ((H * covariance * H.transpose())(0, 0) + R)).eval();
+            state.boxplus((gain * (-state.vel[2])).eval());
+            const auto A = (Ekf::cov::Identity() - gain * H).eval();
+            event_filter.change_x(state);
+            Ekf::cov corrected = (A * covariance * A.transpose() + gain * R * gain.transpose()).eval();
+            event_filter.change_P(corrected);
+            return true;
+        });
+    };
+    process(whole_imu, whole_filter, whole_calendar, source, whole_cloud);
+    for (const auto &sample : source.imu)
+    {
+        MeasureGroup packet;
+        packet.lidar_beg_time = get_time_sec(sample->header.stamp) - 0.01;
+        packet.lidar_end_time = get_time_sec(sample->header.stamp);
+        packet.imu.push_back(sample);
+        process(packet_imu, packet_filter, packet_calendar, packet, packet_cloud);
+    }
+    auto actual = packet_filter.get_x();
+    auto expected = whole_filter.get_x();
+    Eigen::Matrix<double, state_ikfom::DOF, 1> error;
+    actual.boxminus(error, expected);
+    EXPECT_LT(error.cwiseAbs().maxCoeff(), 1e-8);
+    EXPECT_LT((packet_filter.get_P() - whole_filter.get_P()).cwiseAbs().maxCoeff(), 1e-8);
+}
+
 TEST(ImuCharacterization, StartupPreservesRotationAndInitializesBiasCovariances)
 {
     Ekf filter;
@@ -209,6 +382,57 @@ TEST(ImuCharacterization, StartupPreservesRotationAndInitializesBiasCovariances)
     EXPECT_DOUBLE_EQ(filter.get_P()(21, 21), 0.04);
     EXPECT_DOUBLE_EQ(filter.get_P()(23, 23), 0.05);
     EXPECT_DOUBLE_EQ(filter.get_P()(26, 26), 0.06);
+}
+
+TEST(ImuCharacterization, TimedCorrectionCanChangeDeskewWithoutChangingFinalFilter)
+{
+    Ekf rebuilt_filter, recorded_filter;
+    InitializeFilter(rebuilt_filter);
+    InitializeFilter(recorded_filter);
+    ImuProcess rebuilt_imu, recorded_imu;
+    PointCloudXYZI::Ptr rebuilt_cloud(new PointCloudXYZI()), recorded_cloud(new PointCloudXYZI());
+    const auto startup = StationaryInterval(1.0, 1.2);
+    rebuilt_imu.Process(startup, rebuilt_filter, rebuilt_cloud);
+    recorded_imu.Process(startup, recorded_filter, recorded_cloud);
+    auto scan = StationaryInterval(1.2, 1.4);
+    for (int i = 0; i <= 20; ++i)
+    {
+        PointType point;
+        point.x = 10.0F; point.y = 0.0F; point.z = 0.0F;
+        point.curvature = static_cast<float>(i * 10);
+        scan.lidar->push_back(point);
+    }
+    auto correction = [](bool rebuild, Ekf &filter) {
+        auto state = filter.get_x();
+        Eigen::Matrix<double, state_ikfom::DOF, 1> dx =
+            Eigen::Matrix<double, state_ikfom::DOF, 1>::Zero();
+        dx[5] = 0.02;
+        state.boxplus(dx);
+        filter.change_x(state);
+        return rebuild;
+    };
+    rebuilt_imu.Process(scan, rebuilt_filter, rebuilt_cloud, {1.3},
+        [&](std::size_t, Ekf &filter) { return correction(true, filter); });
+    recorded_imu.Process(scan, recorded_filter, recorded_cloud, {1.3},
+        [&](std::size_t, Ekf &filter) { return correction(false, filter); });
+    auto actual = rebuilt_filter.get_x();
+    auto expected = recorded_filter.get_x();
+    Eigen::Matrix<double, state_ikfom::DOF, 1> difference;
+    actual.boxminus(difference, expected);
+    EXPECT_LT(difference.norm(), 1e-12);
+    EXPECT_LT((rebuilt_filter.get_P() - recorded_filter.get_P()).norm(), 1e-12);
+    ASSERT_EQ(rebuilt_cloud->size(), recorded_cloud->size());
+    double maximum = 0.0;
+    for (std::size_t i = 0; i < rebuilt_cloud->size(); ++i)
+    {
+        const auto a = rebuilt_cloud->points[i].getVector3fMap();
+        const auto b = recorded_cloud->points[i].getVector3fMap();
+        ASSERT_TRUE(a.allFinite());
+        ASSERT_TRUE(b.allFinite());
+        maximum = std::max(maximum, static_cast<double>((a - b).norm()));
+    }
+    RecordProperty("deskew_max_difference_m", maximum);
+    EXPECT_GT(maximum, 0.01);
 }
 
 TEST(ImuCharacterization, NoScanPropagatesAndTimedCallbacksRemainOrdered)
@@ -351,6 +575,28 @@ TEST(MagneticCharacterization, HeadingOnlyGainAndJosephCovariance)
     const Eigen::MatrixXd posterior = mag::joseph_covariance(P, H, gain, 0.01);
     EXPECT_TRUE(posterior.isApprox(posterior.transpose(), 1e-12));
     EXPECT_GE(Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(posterior).eigenvalues().minCoeff(), -1e-12);
+}
+
+TEST(MagneticCharacterization, EquivalentFieldVarianceMatchesOnlyAtTheReferenceField)
+{
+    namespace mag = underwater_fastlio::magnetometer;
+    const M3D rotation = (Eigen::AngleAxisd(0.2, V3D::UnitZ()) *
+                          Eigen::AngleAxisd(0.3, V3D::UnitY()) *
+                          Eigen::AngleAxisd(-0.4, V3D::UnitX())).toRotationMatrix();
+    const V3D field = rotation.transpose() * V3D(1.0, 0.2, 0.4);
+    const M3D calibration = V3D(1.2, 0.8, 1.1).asDiagonal();
+    const auto observation = mag::evaluate(rotation, field, V3D::UnitX());
+    ASSERT_TRUE(observation.valid);
+    const double sensitivity = (observation.magnetic_jacobian * calibration).squaredNorm();
+    const double field_variance = 0.001;
+    const double heading_floor = 0.02;
+    const double equivalent = field_variance + heading_floor / sensitivity;
+    EXPECT_NEAR(equivalent * sensitivity, field_variance * sensitivity + heading_floor, 1e-14);
+    const auto changed = mag::evaluate(rotation, field * 1.2, V3D::UnitX());
+    ASSERT_TRUE(changed.valid);
+    const double changed_sensitivity = (changed.magnetic_jacobian * calibration).squaredNorm();
+    EXPECT_NEAR((equivalent - field_variance) * changed_sensitivity,
+                heading_floor / (1.2 * 1.2), 1e-14);
 }
 
 TEST(AuxiliaryCharacterization, MissingMessagesLeaveStateAndCovarianceUnchanged)

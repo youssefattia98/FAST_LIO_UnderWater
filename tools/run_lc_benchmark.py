@@ -290,7 +290,6 @@ def write_runtime_config(args: argparse.Namespace, output: Path) -> Path:
         if argument is not None:
             mapping_parameters[parameter] = argument
     if args.map_save == "true":
-        mapping_parameters["map_save_enable"] = True
         mapping_parameters["map_file_path"] = str(output / "test.pcd")
     if args.map_publication is not None:
         publish_parameters = parameters.setdefault("publish", {})
