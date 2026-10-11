@@ -19,6 +19,9 @@ struct MappingInputBuffers
     void NoteSonarReceipt(Clock::time_point now = Clock::now());
     double PropagationWatermark(double latest_imu_time,
                                 Clock::time_point now = Clock::now()) const;
+    bool NavigationPacketPrecedesSonar(double packet_duration,
+                                      double imu_period, double imu_timeout,
+                                      double sonar_timeout) const;
     void PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp);
     void PushImu(const sensor_msgs::msg::Imu::ConstSharedPtr &message);
     std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> PredictionSamples(

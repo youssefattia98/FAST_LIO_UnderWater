@@ -3,6 +3,25 @@
 namespace uwfl2
 {
 
+bool MappingInputBuffers::NavigationPacketPrecedesSonar(
+    double packet_duration, double imu_period, double imu_timeout,
+    double sonar_timeout) const
+{
+    if (lidar_pushed || lidar_buffer.empty() || time_buffer.empty() ||
+        imu_buffer.empty() || last_processed_time <= 0.0)
+        return false;
+    if (last_scan_end_time > 0.0 &&
+        time_buffer.front() - last_scan_end_time <= sonar_timeout)
+        return false;
+    const double first_imu = get_time_sec(imu_buffer.front()->header.stamp);
+    const double begin = first_imu > last_processed_time + imu_timeout
+        ? first_imu : last_processed_time;
+    // Keep the entire acquisition interval with the scan, including the
+    // nearest-sample rounding used by navigation packet selection.
+    return begin + packet_duration + 0.5 * imu_period <
+           time_buffer.front() - kAcquisitionTimeTolerance;
+}
+
 std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> MappingInputBuffers::PredictionSamples(
     double prediction_time, double correction_time)
 {

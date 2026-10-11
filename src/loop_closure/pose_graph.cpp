@@ -209,8 +209,7 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
     {
         return reject("keyframes_not_chronological");
     }
-    if (!constraint.test_override &&
-        to_index - from_index < config_.loop_minimum_keyframe_separation)
+    if (to_index - from_index < config_.loop_minimum_keyframe_separation)
     {
         return reject("insufficient_keyframe_separation");
     }
@@ -223,10 +222,9 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
         estimate_.at<gtsam::Pose3>(to_key), measurement);
     result.loop_translation_error_before = initial_residual.translation;
     result.loop_rotation_error_before_rad = initial_residual.rotation;
-    if (!constraint.test_override &&
-        (initial_residual.translation >
-             config_.loop_maximum_initial_translation_error_m ||
-         initial_residual.rotation > config_.loop_maximum_initial_rotation_error_rad))
+    if (initial_residual.translation >
+            config_.loop_maximum_initial_translation_error_m ||
+        initial_residual.rotation > config_.loop_maximum_initial_rotation_error_rad)
     {
         return reject("initial_loop_residual_too_large");
     }
@@ -278,17 +276,15 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
         return reject(std::string("loop_innovation_covariance_exception: ") +
                       exception.what());
     }
-    if (!constraint.test_override && !std::isfinite(result.initial_nis))
+    if (!std::isfinite(result.initial_nis))
     {
         return reject("initial_loop_nis_non_finite");
     }
-    if (!constraint.test_override &&
-        result.initial_nis < config_.loop_minimum_initial_nis)
+    if (result.initial_nis < config_.loop_minimum_initial_nis)
     {
         return reject("initial_loop_nis_too_small");
     }
-    if (!constraint.test_override &&
-        result.initial_nis > config_.loop_maximum_initial_nis)
+    if (result.initial_nis > config_.loop_maximum_initial_nis)
     {
         return reject("initial_loop_nis_too_large");
     }

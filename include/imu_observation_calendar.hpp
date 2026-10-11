@@ -25,6 +25,8 @@ public:
         next_epoch_ = frontier + kPeriod;
     }
 
+    double NextEpoch() const { return next_epoch_; }
+
     std::vector<Observation> Take(const std::deque<Sample> &input, double end)
     {
         std::vector<Observation> result;
@@ -32,16 +34,17 @@ public:
         {
             if (!sample) continue;
             const double stamp = get_time_sec(sample->header.stamp);
-            if (stamp > end + 1e-9 || stamp <= last_sample_ + 1e-9) continue;
+            if (stamp > end + kAcquisitionTimeTolerance ||
+                stamp <= last_sample_ + kAcquisitionTimeTolerance) continue;
             last_sample_ = stamp;
             samples_.push_back(sample);
             while (samples_.size() > 1 &&
-                   get_time_sec(samples_.front()->header.stamp) < stamp - kPeriod - 1e-9)
+                   get_time_sec(samples_.front()->header.stamp) < stamp - kPeriod - kAcquisitionTimeTolerance)
                 samples_.pop_front();
-            if (stamp + 1e-9 < next_epoch_) continue;
+            if (stamp + kAcquisitionTimeTolerance < next_epoch_) continue;
             result.push_back({stamp, samples_});
             // Missed acquisition epochs are not fabricated or fused repeatedly.
-            do { next_epoch_ += kPeriod; } while (next_epoch_ <= stamp + 1e-9);
+            do { next_epoch_ += kPeriod; } while (next_epoch_ <= stamp + kAcquisitionTimeTolerance);
         }
         return result;
     }

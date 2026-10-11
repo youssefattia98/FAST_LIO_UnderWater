@@ -1,0 +1,37 @@
+diff --git a/ikd-Tree/ikd_Tree.h b/ikd-Tree/ikd_Tree.h
+--- a/ikd-Tree/ikd_Tree.h
++++ b/ikd-Tree/ikd_Tree.h
+@@ -335,2 +335,3 @@
+     void flatten(KD_TREE_NODE *root, PointVector &Storage, delete_point_storage_set storage_type);
++    bool Snapshot_Points(PointVector &Storage, std::size_t maximum_points);
+     void acquire_removed_points(PointVector &removed_points);
+diff --git a/ikd-Tree/ikd_Tree.cpp b/ikd-Tree/ikd_Tree.cpp
+--- a/ikd-Tree/ikd_Tree.cpp
++++ b/ikd-Tree/ikd_Tree.cpp
+@@ -464,1 +464,26 @@
++bool KD_TREE<PointType>::Snapshot_Points(PointVector &Storage, std::size_t maximum_points)
++{
++    // Frontend is the sole writer. Hold the rebuild pointer lock so the
++    // background worker cannot replace/free nodes during this bounded copy.
++    pthread_mutex_lock(&rebuild_ptr_mutex_lock);
++    try
++    {
++        Storage.clear();
++        if (Root_Node && static_cast<std::size_t>(Root_Node->TreeSize - Root_Node->invalid_point_num) > maximum_points)
++        {
++            pthread_mutex_unlock(&rebuild_ptr_mutex_lock);
++            return false;
++        }
++        flatten(Root_Node, Storage, NOT_RECORD);
++    }
++    catch (...)
++    {
++        pthread_mutex_unlock(&rebuild_ptr_mutex_lock);
++        throw;
++    }
++    pthread_mutex_unlock(&rebuild_ptr_mutex_lock);
++    return true;
++}
++
++template <typename PointType>
+ void KD_TREE<PointType>::Box_Search(const BoxPointType &Box_of_Point, PointVector &Storage)

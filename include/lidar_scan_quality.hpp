@@ -14,6 +14,8 @@ enum class LidarScanRejectionReason
     kSparseInput,
     kInsufficientCorrespondences,
     kUpdateNotApplied,
+    kRecoveryValidation,
+    kInconsistentRecovery,
 };
 
 inline const char *lidar_scan_status(LidarScanRejectionReason reason)
@@ -28,6 +30,10 @@ inline const char *lidar_scan_status(LidarScanRejectionReason reason)
             return "insufficient_effective_features";
         case LidarScanRejectionReason::kUpdateNotApplied:
             return "lidar_update_not_applied";
+        case LidarScanRejectionReason::kRecoveryValidation:
+            return "recovery_validation";
+        case LidarScanRejectionReason::kInconsistentRecovery:
+            return "inconsistent_recovery";
     }
     return "unknown_lidar_update";
 }

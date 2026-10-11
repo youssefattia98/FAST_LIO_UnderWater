@@ -157,6 +157,8 @@ void AuxiliarySensorFusion::create_subscriptions(rclcpp::Node &node,
 std::vector<AuxiliarySensorFusion::TimedMeasurement> AuxiliarySensorFusion::take_timed_measurements(double begin_time,
                                                       double end_time)
 {
+    // Queue windows use the same 1 ns tolerance as ImuProcess's event timeline.
+    // Taking a future event early would consume it without invoking its update.
     std::vector<TimedMeasurement> measurements;
     if (dvl_enable_)
     {
@@ -619,7 +621,7 @@ typename AuxiliarySensorFusion::Ekf::cov AuxiliarySensorFusion::transport_covari
     const typename Ekf::cov &P,
     state_ikfom prior_state,
     state_ikfom updated_state,
-    const typename Ekf::vectorized_state &dx) const
+    const typename Ekf::vectorized_state &dx)
 {
     if (prior_state.SO3_state.empty() || prior_state.S2_state.empty())
     {
@@ -710,13 +712,13 @@ std::vector<AuxiliarySensorFusion::DvlMsg::ConstSharedPtr> AuxiliarySensorFusion
     while (!dvl_buffer_.empty())
     {
         const double stamp = get_time_sec(dvl_buffer_.front()->header.stamp);
-        if (stamp <= begin_time + 1e-6)
+        if (stamp <= begin_time + uwfl2::kAcquisitionTimeTolerance)
         {
             ++late_measurement_counts_.dvl;
             dvl_buffer_.pop_front();
             continue;
         }
-        if (stamp > end_time + 1e-6)
+        if (stamp > end_time + uwfl2::kAcquisitionTimeTolerance)
         {
             break;
         }
@@ -733,13 +735,13 @@ std::vector<AuxiliarySensorFusion::PressureMsg::ConstSharedPtr> AuxiliarySensorF
     while (!pressure_buffer_.empty())
     {
         const double stamp = get_time_sec(pressure_buffer_.front()->header.stamp);
-        if (stamp <= begin_time + 1e-6)
+        if (stamp <= begin_time + uwfl2::kAcquisitionTimeTolerance)
         {
             ++late_measurement_counts_.pressure;
             pressure_buffer_.pop_front();
             continue;
         }
-        if (stamp > end_time + 1e-6)
+        if (stamp > end_time + uwfl2::kAcquisitionTimeTolerance)
         {
             break;
         }
@@ -996,13 +998,13 @@ std::vector<AuxiliarySensorFusion::MagMsg::ConstSharedPtr> AuxiliarySensorFusion
     while (!mag_buffer_.empty())
     {
         const double stamp = get_time_sec(mag_buffer_.front()->header.stamp);
-        if (stamp <= begin_time + 1e-6)
+        if (stamp <= begin_time + uwfl2::kAcquisitionTimeTolerance)
         {
             ++late_measurement_counts_.magnetometer;
             mag_buffer_.pop_front();
             continue;
         }
-        if (stamp > end_time + 1e-6)
+        if (stamp > end_time + uwfl2::kAcquisitionTimeTolerance)
             break;
         messages.push_back(mag_buffer_.front());
         mag_buffer_.pop_front();

@@ -5,8 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <filesystem>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -32,7 +30,6 @@ struct LoopClosureConfig
     RegistrationConfig registration;
     StdConfig std_detection;
     std::size_t queue_capacity = 8;
-    std::filesystem::path diagnostics_directory;
 };
 
 struct LoopClosureStats
@@ -105,102 +102,6 @@ public:
     LoopClosureManager(const LoopClosureManager &) = delete;
     LoopClosureManager &operator=(const LoopClosureManager &) = delete;
 
-    template <typename PointRange, typename MapPointRange>
-    bool try_submit(
-        double timestamp,
-        const Pose3d &T_local_vehicle,
-        const Matrix6d &pose_covariance,
-        const Pose3d &T_vehicle_sonar,
-        const PointRange &points,
-        const MapPointRange &map_points_world,
-        std::uint64_t tree_generation)
-    {
-        if (!should_select_keyframe(timestamp, T_local_vehicle, points.size()))
-        {
-            return false;
-        }
-        if (!covariance_is_valid(pose_covariance) || !T_vehicle_sonar.finite())
-        {
-            ++failed_;
-            return false;
-        }
-
-        auto local_points = std::make_shared<std::vector<PointXYZI>>();
-        local_points->reserve(points.size());
-        for (const auto &point : points)
-        {
-            if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z))
-            {
-                local_points->push_back(
-                    {point.x, point.y, point.z, point.intensity});
-            }
-        }
-        if (local_points->size() < config_.keyframes.minimum_points)
-        {
-            ++failed_;
-            return false;
-        }
-
-        return try_submit_snapshot(
-            timestamp, T_local_vehicle, pose_covariance, T_vehicle_sonar,
-            std::shared_ptr<const std::vector<PointXYZI>>(std::move(local_points)),
-            map_points_world, tree_generation);
-    }
-
-    template <typename MapPointRange>
-    bool try_submit_snapshot(
-        double timestamp,
-        const Pose3d &T_local_vehicle,
-        const Matrix6d &pose_covariance,
-        const Pose3d &T_vehicle_sonar,
-        PointSnapshot local_points,
-        const MapPointRange &map_points_world,
-        std::uint64_t tree_generation)
-    {
-        if (!local_points ||
-            !should_select_keyframe(timestamp, T_local_vehicle,
-                                    local_points->size()))
-        {
-            return false;
-        }
-        if (!covariance_is_valid(pose_covariance) || !T_vehicle_sonar.finite() ||
-            local_points->size() < config_.keyframes.minimum_points)
-        {
-            ++failed_;
-            return false;
-        }
-
-        Keyframe keyframe;
-        keyframe.id = next_keyframe_id_++;
-        keyframe.timestamp = timestamp;
-        keyframe.T_local_vehicle = T_local_vehicle.normalized();
-        keyframe.pose_covariance = pose_covariance;
-        keyframe.T_vehicle_sonar = T_vehicle_sonar.normalized();
-        keyframe.sonar_points = std::move(local_points);
-        auto map_points = std::make_shared<std::vector<PointXYZI>>();
-        map_points->reserve(map_points_world.size());
-        for (const auto &point : map_points_world)
-        {
-            if (std::isfinite(point.x) && std::isfinite(point.y) &&
-                std::isfinite(point.z))
-            {
-                map_points->push_back(
-                    {point.x, point.y, point.z, point.intensity});
-            }
-        }
-        keyframe.map_points_world = std::move(map_points);
-        keyframe.tree_generation = tree_generation;
-
-        selector_.accept(timestamp, T_local_vehicle);
-        ++submitted_;
-        if (!queue_.push_latest(std::move(keyframe)))
-        {
-            ++failed_;
-            return false;
-        }
-        return true;
-    }
-
     bool try_submit_scan_history(
         double timestamp,
         const Pose3d &T_local_vehicle,
@@ -260,34 +161,16 @@ public:
                selector_.should_select(timestamp, T_local_vehicle, point_count);
     }
 
-    template <typename PointRange>
-    bool try_submit(
-        double timestamp,
-        const Pose3d &T_local_vehicle,
-        const Matrix6d &pose_covariance,
-        const Pose3d &T_vehicle_sonar,
-        const PointRange &points,
-        std::uint64_t tree_generation)
-    {
-        const std::vector<PointXYZI> no_map_points;
-        return try_submit(timestamp, T_local_vehicle, pose_covariance,
-                          T_vehicle_sonar, points, no_map_points,
-                          tree_generation);
-    }
-
     LoopClosureStats stats() const;
     PoseGraphSnapshot graph_snapshot() const;
-    LoopEvaluation inject_loop(const LoopConstraint &constraint);
     void notify_active_tree_generation(std::uint64_t generation);
-    std::shared_ptr<const ShadowMapResult> shadow_map_snapshot() const;
     std::shared_ptr<const RegistrationResult> registration_snapshot() const;
     std::shared_ptr<const PendingCorrection> take_pending_correction();
     bool request_registration_refresh(
         const std::shared_ptr<const ShadowMapResult> &shadow_map,
         std::size_t attempt);
     std::vector<LoopVisualizationEvent> visualization_events() const;
-    void notify_correction_result(bool committed, double elapsed_ms,
-                                  const std::string &reason);
+    void notify_correction_result(bool committed, double elapsed_ms);
 
     template <typename PointRange>
     PointSnapshot notify_latest_scan(double timestamp,
@@ -331,19 +214,9 @@ public:
 
 private:
     void run();
-    void write_diagnostic(const Keyframe &keyframe, std::uint64_t version,
-                          double graph_time_ms);
-    void write_summary() const;
-    void flush_diagnostics();
-    void write_loop_diagnostic(const LoopConstraint &constraint,
-                               const LoopEvaluation &evaluation);
+    LoopEvaluation process_loop(const LoopConstraint &constraint);
     void run_shadow_builder();
     void run_registration_refresher();
-    void write_shadow_diagnostic(const ShadowMapResult &result,
-                                 const std::string &status);
-    void write_registration_diagnostic(const RegistrationResult &result);
-    void write_std_diagnostic(const StdDetectionResult &result,
-                              const LoopEvaluation *evaluation);
     void record_visualization_event(const LoopVisualizationEvent &event);
 
     LoopClosureConfig config_;
@@ -358,14 +231,6 @@ private:
     std::thread worker_;
     std::thread shadow_worker_;
     std::thread registration_worker_;
-    std::ofstream diagnostics_;
-    std::ofstream loop_diagnostics_;
-    std::ofstream shadow_diagnostics_;
-    std::ofstream registration_diagnostics_;
-    std::ofstream std_diagnostics_;
-    std::ofstream commit_diagnostics_;
-    mutable std::mutex diagnostics_mutex_;
-    mutable std::size_t diagnostic_rows_since_flush_ = 0;
     mutable std::mutex shadow_result_mutex_;
     mutable std::mutex visualization_mutex_;
     std::deque<LoopVisualizationEvent> visualization_events_;

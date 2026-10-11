@@ -1,4 +1,5 @@
 #include "IMU_Processing.hpp"
+#include "sonar_registration_math.hpp"
 
 ImuProcess::ImuProcess()
     : b_first_frame_(true), imu_need_init_(true), gravity_m_s2_(G_m_s2), start_timestamp_(-1), last_lidar_end_time_(-1.0)
@@ -7,6 +8,8 @@ ImuProcess::ImuProcess()
   Q = process_noise_cov();
   cov_acc       = V3D(0.1, 0.1, 0.1);
   cov_gyr       = V3D(0.1, 0.1, 0.1);
+  cov_acc_scale = cov_acc;
+  cov_gyr_scale = cov_gyr;
   cov_bias_gyr  = V3D(0.0001, 0.0001, 0.0001);
   cov_bias_acc  = V3D(0.0001, 0.0001, 0.0001);
   init_cov_bias_gyr = V3D(0.0001, 0.0001, 0.0001);
@@ -35,11 +38,17 @@ void ImuProcess::Reset()
   mean_gyr      = V3D(0, 0, 0);
   angvel_last       = Zero3d;
   imu_need_init_    = true;
+  b_first_frame_   = true;
   start_timestamp_  = -1;
   last_lidar_end_time_ = -1.0;
+  prediction_interval_.reset();
+  initialization_begin_time_ = -1.0;
+  initialization_end_time_ = -1.0;
+  last_initialization_sample_time_ = -1.0;
   init_iter_num     = 1;
   v_imu_.clear();
   IMUpose.clear();
+  scan_measurement_covariances_.clear();
   last_imu_.reset(new sensor_msgs::msg::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
@@ -48,6 +57,28 @@ void ImuProcess::set_extrinsic(const MD(4,4) &T)
 {
   Lidar_T_wrt_IMU = T.block<3,1>(0,3);
   Lidar_R_wrt_IMU = T.block<3,3>(0,0);
+}
+
+void ImuProcess::SetSonarNoiseVariance(const V3D &variance)
+{
+  if (!variance.allFinite() || variance.minCoeff() < 0)
+    throw std::invalid_argument("Sonar spherical noise variances must be finite and nonnegative");
+  sonar_noise_variance_ = variance;
+  scan_measurement_covariances_.clear();
+}
+
+const std::vector<M3D> &ImuProcess::ScanMeasurementCovariances() const
+{
+  return scan_measurement_covariances_;
+}
+
+void ImuProcess::InitializeScanMeasurementCovariances(const PointCloudXYZI &scan)
+{
+  if (sonar_noise_variance_.maxCoeff() == 0) return;
+  scan_measurement_covariances_.reserve(scan.size());
+  for (const auto &point : scan.points)
+    scan_measurement_covariances_.push_back(uwfl2::SonarCartesianCovariance(
+        V3D(point.x, point.y, point.z), sonar_noise_variance_));
 }
 
 void ImuProcess::set_extrinsic(const V3D &transl)
@@ -105,6 +136,28 @@ bool ImuProcess::IsInitialized() const
   return !imu_need_init_;
 }
 
+double ImuProcess::InitializationTime() const
+{
+  return initialization_end_time_;
+}
+
+sensor_msgs::msg::Imu::ConstSharedPtr ImuProcess::InitializationSample() const
+{
+  return last_imu_;
+}
+
+std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> ImuProcess::ImuSamplesForMeasurements(
+    const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &samples) const
+{
+  auto history = samples;
+  // Propagation retains the preceding sample for the first IMU segment.
+  // DVL lever-arm compensation must see it too, independent of packet size.
+  if (last_imu_ && (history.empty() ||
+      get_time_sec(last_imu_->header.stamp) < get_time_sec(history.front()->header.stamp)))
+    history.push_front(last_imu_);
+  return history;
+}
+
 double ImuProcess::AccelerationScale() const
 {
   const double mean_norm = mean_acc.norm();
@@ -133,10 +186,14 @@ void ImuProcess::IMU_init(
     mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;
     mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
     first_lidar_time = meas.lidar_beg_time;
+    initialization_begin_time_ = get_time_sec(meas.imu.front()->header.stamp);
   }
 
   for (const auto &imu : meas.imu)
   {
+    const double timestamp = get_time_sec(imu->header.stamp);
+    if (timestamp > meas.lidar_end_time + 1e-9) break;
+    if (timestamp <= last_initialization_sample_time_ + 1e-9) continue;
     const auto &imu_acc = imu->linear_acceleration;
     const auto &gyr_acc = imu->angular_velocity;
     cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;
@@ -149,6 +206,17 @@ void ImuProcess::IMU_init(
     cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (N - 1.0) / (N * N);
 
     N ++;
+    last_imu_ = imu;
+    last_initialization_sample_time_ = timestamp;
+    // Stop on the same acquisition sample in every packetization. Keep the
+    // original minimum sample count for unusually low-rate IMU streams.
+    constexpr double initialization_duration = 0.2;
+    if (N > MAX_INI_COUNT &&
+        timestamp - initialization_begin_time_ >= initialization_duration - 1e-9)
+    {
+      initialization_end_time_ = timestamp;
+      break;
+    }
   }
   state_ikfom init_state = kf_state.get_x();
   init_state.grav = S2(- mean_acc / mean_acc.norm() * gravity_m_s2_);
@@ -175,8 +243,6 @@ void ImuProcess::IMU_init(
   init_P(25,25) = init_cov_b_dvl[2];
   init_P(26,26) = init_cov_b_pressure;
   kf_state.change_P(init_P);
-  last_imu_ = meas.imu.back();
-
 }
 
 bool ImuProcess::ReconstructContinuousDeskewPoses(
@@ -349,6 +415,7 @@ void ImuProcess::UndistortPcl(
   /*** sort point clouds by offset time ***/
   pcl_out = *(meas.lidar);
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
+  InitializeScanMeasurementCovariances(pcl_out);
 
   /*** Initialize IMU pose ***/
   state_ikfom imu_state = kf_state.get_x();
@@ -379,17 +446,52 @@ void ImuProcess::UndistortPcl(
   // asynchronous measurement belongs. With no events this performs the same
   // single predict call as the original FAST-LIO2 propagation.
   auto propagate_segment = [&](double segment_start, double segment_end,
+                               double head_time, double tail_time,
                                bool record_segment_end)
   {
     double current_time = segment_start;
-    constexpr double time_epsilon = 1e-9;
+    constexpr double time_epsilon = uwfl2::kAcquisitionTimeTolerance;
+    Ekf::vectorized_state external_change;
+    if (prediction_interval_)
+      kf_state.get_x().boxminus(external_change, prediction_interval_->output_state);
+    if (!prediction_interval_ || prediction_interval_->head_time != head_time ||
+        prediction_interval_->tail_time != tail_time || external_change.norm() > 1e-12 ||
+        !kf_state.get_P().isApprox(prediction_interval_->output_covariance, 0.0))
+    {
+      prediction_interval_ = PredictionInterval{head_time, tail_time, segment_start,
+          kf_state.get_x(), kf_state.get_x(), kf_state.get_P(), kf_state.get_P()};
+    }
+    auto predict_to = [&](double target) {
+      auto &interval = *prediction_interval_;
+      kf_state.change_x(interval.anchor_state);
+      kf_state.change_P(interval.anchor_covariance);
+      double dt = target - interval.anchor_time;
+      if (dt > 0.0) kf_state.predict(dt, Q, in);
+      interval.output_state = kf_state.get_x();
+      interval.output_covariance = kf_state.get_P();
+    };
+    auto retain_correction = [&](double timestamp) {
+      auto &interval = *prediction_interval_;
+      Ekf::vectorized_state change;
+      kf_state.get_x().boxminus(change, interval.output_state);
+      if (change.norm() > 1e-12 || !kf_state.get_P().isApprox(interval.output_covariance, 0.0))
+      {
+        interval.anchor_time = timestamp;
+        interval.anchor_state = kf_state.get_x();
+        interval.anchor_covariance = kf_state.get_P();
+      }
+      interval.output_state = kf_state.get_x();
+      interval.output_covariance = kf_state.get_P();
+    };
+    // Packet endpoints are observations of a partial prediction, not new
+    // independent IMU inputs. Recompute from this pair's unchanged prior until
+    // a correction changes it; real IMU pairs and correction epochs commit it.
     while (update_index < update_times.size() &&
            update_times[update_index] <= segment_end + time_epsilon)
     {
       const double event_time =
           std::clamp(update_times[update_index], current_time, segment_end);
-      double dt = event_time - current_time;
-      if (dt > 0.0) kf_state.predict(dt, Q, in);
+      predict_to(event_time);
       current_time = event_time;
 
       const double grouped_timestamp = update_times[update_index];
@@ -399,6 +501,7 @@ void ImuProcess::UndistortPcl(
         {
           auxiliary_state_updated =
               timed_update(update_index, kf_state) || auxiliary_state_updated;
+          retain_correction(event_time);
         }
         ++update_index;
       }
@@ -413,11 +516,7 @@ void ImuProcess::UndistortPcl(
       }
     }
 
-    double remaining_dt = segment_end - current_time;
-    if (std::abs(remaining_dt) > time_epsilon)
-    {
-      kf_state.predict(remaining_dt, Q, in);
-    }
+    predict_to(segment_end);
     if (record_segment_end) record_pose(segment_end);
   };
 
@@ -429,7 +528,8 @@ void ImuProcess::UndistortPcl(
     double tail_stamp = rclcpp::Time(tail->header.stamp).seconds();
     double head_stamp = rclcpp::Time(head->header.stamp).seconds();
 
-    if (tail_stamp < last_lidar_end_time_)    continue;
+    if (tail_stamp <= last_lidar_end_time_ + uwfl2::kAcquisitionTimeTolerance || tail_stamp <= head_stamp) continue;
+    if (head_stamp >= pcl_end_time - uwfl2::kAcquisitionTimeTolerance) break;
 
     angvel_avr<<0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
                 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
@@ -451,35 +551,33 @@ void ImuProcess::UndistortPcl(
 
     const double segment_start =
         head_stamp < last_lidar_end_time_ ? last_lidar_end_time_ : head_stamp;
-    propagate_segment(segment_start, tail_stamp, true);
+    propagate_segment(segment_start, std::min(tail_stamp, pcl_end_time), head_stamp, tail_stamp, true);
+    if (tail_stamp >= pcl_end_time - uwfl2::kAcquisitionTimeTolerance) break;
   }
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
   if (have_input)
   {
-    if (pcl_end_time >= imu_end_time)
+    if (pcl_end_time > imu_end_time + uwfl2::kAcquisitionTimeTolerance)
     {
-      propagate_segment(imu_end_time, pcl_end_time, false);
-    }
-    else
-    {
-      // Preserve FAST-LIO2's original positive frame-end extrapolation.
-      double final_dt = imu_end_time - pcl_end_time;
-      kf_state.predict(final_dt, Q, in);
+      propagate_segment(imu_end_time, pcl_end_time, imu_end_time, pcl_end_time, false);
     }
   }
 
   imu_state = kf_state.get_x();
-  if (auxiliary_state_updated)
+  if (auxiliary_state_updated && pcl_end_time > pcl_beg_time + 1e-9)
   {
     ReconstructContinuousDeskewPoses(
         v_imu, pcl_beg_time, pcl_end_time, imu_state);
   }
-  last_imu_ = meas.imu.back();
+  for (const auto &sample : meas.imu)
+    if (get_time_sec(sample->header.stamp) <= pcl_end_time + uwfl2::kAcquisitionTimeTolerance) last_imu_ = sample;
   last_lidar_end_time_ = pcl_end_time;
 
   /*** undistort each lidar point (backward propagation) ***/
-  if (pcl_out.points.begin() == pcl_out.points.end()) return;
+  // All returns in an instantaneous cloud already belong to the final body
+  // frame. Earlier navigation corrections are not scan acquisition motion.
+  if (pcl_out.points.empty() || pcl_end_time <= pcl_beg_time + 1e-9) return;
   auto it_pcl = pcl_out.points.end() - 1;
   for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
   {
@@ -504,6 +602,14 @@ void ImuProcess::UndistortPcl(
       V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
       V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
       V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
+      if (!scan_measurement_covariances_.empty())
+      {
+        const M3D rotation = imu_state.offset_R_L_I.toRotationMatrix().transpose() *
+            imu_state.rot.toRotationMatrix().transpose() * R_i * imu_state.offset_R_L_I.toRotationMatrix();
+        const std::size_t index = it_pcl - pcl_out.points.begin();
+        scan_measurement_covariances_[index] =
+            rotation * scan_measurement_covariances_[index] * rotation.transpose();
+      }
       
       // save Undistorted points and their rotation
       it_pcl->x = P_compensate(0);
@@ -530,6 +636,7 @@ void ImuProcess::UndistortPclFastLio(
 
   pcl_out = *(meas.lidar);
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
+  InitializeScanMeasurementCovariances(pcl_out);
 
   state_ikfom imu_state = kf_state.get_x();
   IMUpose.clear();
@@ -619,6 +726,14 @@ void ImuProcess::UndistortPclFastLio(
                        imu_state.offset_T_L_I) +
                 T_ei) -
            imu_state.offset_T_L_I);
+      if (!scan_measurement_covariances_.empty())
+      {
+        const M3D rotation = imu_state.offset_R_L_I.toRotationMatrix().transpose() *
+            imu_state.rot.toRotationMatrix().transpose() * R_i * imu_state.offset_R_L_I.toRotationMatrix();
+        const std::size_t index = it_pcl - pcl_out.points.begin();
+        scan_measurement_covariances_[index] =
+            rotation * scan_measurement_covariances_[index] * rotation.transpose();
+      }
       it_pcl->x = P_compensate.x();
       it_pcl->y = P_compensate.y();
       it_pcl->z = P_compensate.z();
@@ -634,6 +749,7 @@ void ImuProcess::Process(
     const std::vector<double> &update_times,
     const TimedUpdateCallback &timed_update)
 {
+  scan_measurement_covariances_.clear();
   if(meas.imu.empty()) {return;};
   assert(meas.lidar != nullptr);
 
@@ -644,22 +760,22 @@ void ImuProcess::Process(
 
     imu_need_init_ = true;
 
-    last_imu_   = meas.imu.back();
-
-    if (init_iter_num > MAX_INI_COUNT)
+    if (initialization_end_time_ >= 0.0)
     {
       cov_acc *= pow(gravity_m_s2_ / mean_acc.norm(), 2);
       imu_need_init_ = false;
 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
+      last_lidar_end_time_ = initialization_end_time_;
     }
 
     return;
   }
 
-  if (update_times.empty())
+  if (update_times.empty() && !timed_update)
   {
+    prediction_interval_.reset();
     UndistortPclFastLio(meas, kf_state, *cur_pcl_un_);
   }
   else

@@ -60,5 +60,5 @@
       corrected_map_enable: true
       corrected_map_topic: /uwfl2/corrected_map
     loop_closure:
-      enable: true
+      enable:  false
       profile: simulation

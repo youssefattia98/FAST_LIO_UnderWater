@@ -52,6 +52,9 @@ struct ShadowMapResult
     std::string reason;
     std::shared_ptr<ShadowTree> tree;
     std::shared_ptr<const ShadowPointVector> corrected_history_points;
+    // Matches the exact representative coordinates supplied to Build().
+    std::shared_ptr<const std::vector<Eigen::Matrix3d>> measurement_covariances;
+    std::shared_ptr<const ShadowPointVector> covariance_points;
 };
 
 class ShadowMapBuilder

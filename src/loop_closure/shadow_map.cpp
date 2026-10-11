@@ -1,4 +1,5 @@
 #include "loop_closure/shadow_map.hpp"
+#include "sonar_registration.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -51,6 +52,7 @@ struct VoxelCandidate
 {
     ShadowPoint point;
     double center_distance_squared = std::numeric_limits<double>::infinity();
+    std::optional<Eigen::Matrix3d> covariance;
 };
 
 using VoxelMap =
@@ -164,10 +166,6 @@ std::size_t map_point_count(const Keyframe &keyframe, MapDensity density)
         }
         return count;
     }
-    if (keyframe.map_points_world && !keyframe.map_points_world->empty())
-    {
-        return keyframe.map_points_world->size();
-    }
     if (!keyframe.sonar_points)
     {
         throw std::runtime_error("Keyframe has no immutable map cloud");
@@ -252,27 +250,28 @@ void visit_corrected_points(const ShadowMapRequest &request,
             }
             const Pose3d correction =
                 interpolated_graph_correction(request, scan.timestamp);
-            for (const PointXYZI &source : *points)
+            const auto covariances = density == MapDensity::CompactTree ?
+                scan.compact_measurement_covariances_world : scan.measurement_covariances_world;
+            if (covariances && covariances->size() != points->size())
+                throw std::runtime_error("Scan covariance metadata size mismatch");
+            for (std::size_t point_index = 0; point_index < points->size(); ++point_index)
             {
+                const PointXYZI &source = (*points)[point_index];
                 const Eigen::Vector3d world =
                     correction.rotation *
                         Eigen::Vector3d(source.x, source.y, source.z) +
                     correction.translation;
-                visitor(make_shadow_point(world, source));
+                std::optional<Eigen::Matrix3d> covariance;
+                if (covariances)
+                {
+                    const Eigen::Matrix3d &original = (*covariances)[point_index];
+                    if (!uwfl2::ValidSonarCovariance(original))
+                        throw std::runtime_error("Invalid historical sonar covariance");
+                    const Eigen::Matrix3d rotation = correction.rotation.toRotationMatrix();
+                    covariance = rotation * original * rotation.transpose();
+                }
+                visitor(make_shadow_point(world, source), covariance);
             }
-        }
-        return;
-    }
-    if (keyframe.map_points_world && !keyframe.map_points_world->empty())
-    {
-        const Pose3d correction = graph_correction(request, index);
-        for (const PointXYZI &source : *keyframe.map_points_world)
-        {
-            const Eigen::Vector3d world =
-                correction.rotation *
-                    Eigen::Vector3d(source.x, source.y, source.z) +
-                correction.translation;
-            visitor(make_shadow_point(world, source));
         }
         return;
     }
@@ -288,7 +287,7 @@ void visit_corrected_points(const ShadowMapRequest &request,
             T_local_sonar.rotation *
                 Eigen::Vector3d(source.x, source.y, source.z) +
             T_local_sonar.translation;
-        visitor(make_shadow_point(world, source));
+        visitor(make_shadow_point(world, source), std::optional<Eigen::Matrix3d>{});
     }
 }
 
@@ -313,7 +312,7 @@ std::size_t count_input_points(const ShadowMapRequest &request,
 }
 
 void accumulate_voxel(VoxelMap &voxels, const ShadowPoint &point,
-                      double voxel_size_m)
+                      double voxel_size_m, const std::optional<Eigen::Matrix3d> &covariance = {})
 {
     const double inverse_leaf = 1.0 / voxel_size_m;
     const Eigen::Vector3d world(point.x, point.y, point.z);
@@ -327,7 +326,7 @@ void accumulate_voxel(VoxelMap &voxels, const ShadowPoint &point,
         (static_cast<double>(key.z) + 0.5) * voxel_size_m);
     const double center_distance_squared = (world - center).squaredNorm();
     auto [iterator, inserted] = voxels.try_emplace(
-        key, VoxelCandidate{point, center_distance_squared});
+        key, VoxelCandidate{point, center_distance_squared, covariance});
     if (!inserted &&
         (center_distance_squared <
              iterator->second.center_distance_squared - 1e-15 ||
@@ -335,7 +334,7 @@ void accumulate_voxel(VoxelMap &voxels, const ShadowPoint &point,
                    iterator->second.center_distance_squared) <= 1e-15 &&
           lexicographically_less(point, iterator->second.point))))
     {
-        iterator->second = {point, center_distance_squared};
+        iterator->second = {point, center_distance_squared, covariance};
     }
 }
 
@@ -399,11 +398,11 @@ ShadowPointVector ShadowMapBuilder::reconstruct_and_downsample(
     for (const std::size_t index : selected)
     {
         visit_corrected_points(request, index, MapDensity::CompactTree,
-                               [&](const ShadowPoint &point) {
+                               [&](const ShadowPoint &point, const auto &covariance) {
             if (std::isfinite(point.x) && std::isfinite(point.y) &&
                 std::isfinite(point.z))
             {
-                accumulate_voxel(voxels, point, config.voxel_size_m);
+                accumulate_voxel(voxels, point, config.voxel_size_m, covariance);
             }
         });
     }
@@ -470,7 +469,7 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
         for (const std::size_t index : full_indices)
         {
             visit_corrected_points(request, index, MapDensity::DenseHistory,
-                                   [&](const ShadowPoint &point) {
+                                   [&](const ShadowPoint &point, const auto &) {
                 if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
                     !std::isfinite(point.z))
                 {
@@ -482,18 +481,34 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
             {
                 visit_corrected_points(
                     request, index, MapDensity::CompactTree,
-                    [&](const ShadowPoint &point) {
+                    [&](const ShadowPoint &point, const auto &covariance) {
                         if (std::isfinite(point.x) && std::isfinite(point.y) &&
                             std::isfinite(point.z))
                         {
                             accumulate_voxel(active_voxels, point,
-                                             config_.voxel_size_m);
+                                             config_.voxel_size_m, covariance);
                         }
                     });
             }
         }
         const auto reconstruction_finished = Clock::now();
         ShadowPointVector filtered = ordered_voxel_points(active_voxels);
+        auto covariances = std::make_shared<std::vector<Eigen::Matrix3d>>();
+        std::map<std::tuple<float, float, float>, Eigen::Matrix3d> covariance_by_point;
+        bool covariance_complete = true;
+        for (const auto &entry : active_voxels)
+        {
+            if (!entry.second.covariance) { covariance_complete = false; break; }
+            const auto &point = entry.second.point;
+            covariance_by_point.emplace(std::make_tuple(point.x, point.y, point.z), *entry.second.covariance);
+        }
+        if (covariance_complete)
+        {
+            for (const auto &point : filtered)
+                covariances->push_back(covariance_by_point.at(std::make_tuple(point.x, point.y, point.z)));
+            result.measurement_covariances = covariances;
+            result.covariance_points = std::make_shared<const ShadowPointVector>(filtered);
+        }
         const auto downsample_finished = Clock::now();
         result.reconstruction_time_ms = milliseconds(
             reconstruction_started, reconstruction_finished);

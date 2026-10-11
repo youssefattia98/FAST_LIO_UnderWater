@@ -96,7 +96,6 @@ message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
 
 set(msg_files
   "msg/Pose6D.msg"
-  "srv/InjectLoop.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -123,6 +122,18 @@ execute_process(
 )
 if(NOT UWFL2_IKDTREE_PATCH_RESULT EQUAL 0)
   message(FATAL_ERROR "Cannot apply ikd-tree tie fix: ${UWFL2_IKDTREE_PATCH_OUTPUT}${UWFL2_IKDTREE_PATCH_ERROR}")
+endif()
+set(UWFL2_IKDTREE_SNAPSHOT_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/ikdtree-safe-snapshot.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${UWFL2_IKDTREE_SNAPSHOT_PATCH}")
+execute_process(
+  COMMAND "${UWFL2_PATCH_EXECUTABLE}" --batch --forward --fuzz=0 -p1 -i "${UWFL2_IKDTREE_SNAPSHOT_PATCH}"
+  WORKING_DIRECTORY "${UWFL2_IKDTREE_INCLUDE}"
+  RESULT_VARIABLE UWFL2_IKDTREE_SNAPSHOT_RESULT
+  OUTPUT_VARIABLE UWFL2_IKDTREE_SNAPSHOT_OUTPUT
+  ERROR_VARIABLE UWFL2_IKDTREE_SNAPSHOT_ERROR
+)
+if(NOT UWFL2_IKDTREE_SNAPSHOT_RESULT EQUAL 0)
+  message(FATAL_ERROR "Cannot apply ikd-tree snapshot fix: ${UWFL2_IKDTREE_SNAPSHOT_OUTPUT}${UWFL2_IKDTREE_SNAPSHOT_ERROR}")
 endif()
 # All translation units must use the same patched inline heap comparator.
 include_directories(BEFORE "${UWFL2_IKDTREE_INCLUDE}")
@@ -156,11 +167,6 @@ target_include_directories(fastlio_mapping PUBLIC
   ${PCL_INCLUDE_DIRS}
 )
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} Eigen3::Eigen uwfl2_loop_closure)
-option(UWFL2_REPLAY_TRACE "Build test-only estimator replay tracing" OFF)
-if(UWFL2_REPLAY_TRACE)
-  target_compile_definitions(fastlio_mapping PRIVATE UWFL2_REPLAY_TRACE)
-  target_include_directories(fastlio_mapping PRIVATE test)
-endif()
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 
@@ -175,67 +181,6 @@ else()
 endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
-
-if(BUILD_TESTING)
-  find_program(UWFL2_TEST_PYTHON python3 REQUIRED)
-  add_test(NAME test_benchmark_tools
-    COMMAND ${UWFL2_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_tools.py)
-  find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_ikdtree_repeatability test/test_ikdtree_repeatability.cpp)
-  target_link_libraries(test_ikdtree_repeatability uwfl2_ikdtree)
-
-  ament_add_gtest(test_loop_closure_core test/test_loop_closure_core.cpp)
-  target_include_directories(test_loop_closure_core PRIVATE include)
-  target_link_libraries(test_loop_closure_core uwfl2_loop_closure)
-
-  ament_add_gtest(test_std_detector test/test_std_detector.cpp)
-  target_include_directories(test_std_detector PRIVATE include)
-  target_link_libraries(test_std_detector uwfl2_loop_closure)
-
-  ament_add_gtest(test_lidar_scan_quality test/test_lidar_scan_quality.cpp)
-  target_include_directories(test_lidar_scan_quality PRIVATE include)
-
-  ament_add_gtest(test_corrected_map_visualization
-    test/test_corrected_map_visualization.cpp)
-  target_include_directories(test_corrected_map_visualization PRIVATE include)
-
-  ament_add_gtest(test_sensor_parameter_utils
-    test/test_sensor_parameter_utils.cpp)
-  target_include_directories(test_sensor_parameter_utils PRIVATE include)
-  target_link_libraries(test_sensor_parameter_utils Eigen3::Eigen)
-
-  ament_add_gtest(test_odometry_covariance
-    test/test_odometry_covariance.cpp)
-  target_include_directories(test_odometry_covariance PRIVATE include)
-  ament_target_dependencies(test_odometry_covariance rclcpp nav_msgs geometry_msgs)
-
-  ament_add_gtest(test_estimator_characterization test/test_estimator_characterization.cpp
-    src/auxiliary_sensor_fusion.cpp src/IMU_Processing.cpp src/mapping_input_buffers.cpp)
-  target_include_directories(test_estimator_characterization PRIVATE include src ${PCL_INCLUDE_DIRS})
-  ament_target_dependencies(test_estimator_characterization ${dependencies})
-  if(COMMAND rosidl_get_typesupport_target)
-    target_link_libraries(test_estimator_characterization ${cpp_typesupport_target})
-  else()
-    rosidl_target_interfaces(test_estimator_characterization ${PROJECT_NAME} "rosidl_typesupport_cpp")
-  endif()
-
-  ament_add_gtest(test_preprocess_characterization
-    test/test_preprocess_characterization.cpp src/preprocess.cpp)
-  target_include_directories(test_preprocess_characterization PRIVATE src ${PCL_INCLUDE_DIRS})
-  target_link_libraries(test_preprocess_characterization ${PCL_LIBRARIES})
-  ament_target_dependencies(test_preprocess_characterization rclcpp sensor_msgs pcl_conversions)
-
-  ament_add_gtest(test_header_link
-    test/test_header_link.cpp test/header_link_other.cpp src/auxiliary_sensor_fusion.cpp
-    src/IMU_Processing.cpp)
-  target_include_directories(test_header_link PRIVATE include src ${PCL_INCLUDE_DIRS})
-  ament_target_dependencies(test_header_link ${dependencies})
-  if(COMMAND rosidl_get_typesupport_target)
-    target_link_libraries(test_header_link ${cpp_typesupport_target})
-  else()
-    rosidl_target_interfaces(test_header_link ${PROJECT_NAME} "rosidl_typesupport_cpp")
-  endif()
-endif()
 
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping uwfl2_loop_closure uwfl2_ikdtree

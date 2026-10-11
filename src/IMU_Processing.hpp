@@ -18,6 +18,7 @@
 #include <pcl/point_types.h>
 #include <condition_variable>
 #include <functional>
+#include <optional>
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <pcl/common/transforms.h>
@@ -60,7 +61,13 @@ class ImuProcess
   void set_initial_aux_cov(const V3D &b_dvl, double b_pressure);
   void set_gravity(const double gravity_m_s2);
   bool IsInitialized() const;
+  double InitializationTime() const;
+  sensor_msgs::msg::Imu::ConstSharedPtr InitializationSample() const;
+  std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> ImuSamplesForMeasurements(
+      const std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> &samples) const;
   double AccelerationScale() const;
+  void SetSonarNoiseVariance(const V3D &spherical_variance);
+  const std::vector<M3D> &ScanMeasurementCovariances() const;
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
   void Process(const MeasureGroup &meas,
                Ekf &kf_state,
@@ -98,6 +105,7 @@ class ImuProcess
       double scan_begin_time,
       double scan_end_time,
       const state_ikfom &scan_end_state);
+  void InitializeScanMeasurementCovariances(const PointCloudXYZI &sorted_scan);
 
   PointCloudXYZI::Ptr cur_pcl_un_;
   // sensor_msgs::ImuConstPtr last_imu_;
@@ -105,6 +113,8 @@ class ImuProcess
   deque<sensor_msgs::msg::Imu::ConstSharedPtr> v_imu_;
   vector<Pose6D> IMUpose;
   vector<M3D>    v_rot_pcl_;
+  V3D sonar_noise_variance_ = V3D::Zero();
+  std::vector<M3D> scan_measurement_covariances_;
   M3D Lidar_R_wrt_IMU;
   V3D Lidar_T_wrt_IMU;
   V3D mean_acc;
@@ -114,6 +124,16 @@ class ImuProcess
   double gravity_m_s2_;
   double start_timestamp_;
   double last_lidar_end_time_;
+  struct PredictionInterval
+  {
+    double head_time, tail_time, anchor_time;
+    state_ikfom anchor_state, output_state;
+    Ekf::cov anchor_covariance, output_covariance;
+  };
+  std::optional<PredictionInterval> prediction_interval_;
+  double initialization_begin_time_ = -1.0;
+  double initialization_end_time_ = -1.0;
+  double last_initialization_sample_time_ = -1.0;
   int    init_iter_num = 1;
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;

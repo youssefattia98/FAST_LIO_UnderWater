@@ -121,6 +121,10 @@ struct MappingScan
     Pose3d T_local_vehicle;
     std::shared_ptr<const std::vector<PointXYZI>> points_world;
     std::shared_ptr<const std::vector<PointXYZI>> compact_points_world;
+    // Acquisition-derived measurement covariance, in the same local frame and
+    // order as each point array. Absent for legacy, uncalibrated histories.
+    std::shared_ptr<const std::vector<Eigen::Matrix3d>> measurement_covariances_world;
+    std::shared_ptr<const std::vector<Eigen::Matrix3d>> compact_measurement_covariances_world;
 };
 
 struct Keyframe
@@ -133,9 +137,6 @@ struct Keyframe
     Matrix6d pose_covariance = Matrix6d::Identity();
     Pose3d T_vehicle_sonar;
     std::shared_ptr<const std::vector<PointXYZI>> sonar_points;
-    // Compact scan history already expressed in the raw camera_init frame.
-    // Keeping it attached to its pose makes global map correction reversible.
-    std::shared_ptr<const std::vector<PointXYZI>> map_points_world;
     // Full-density scans retain their own acquisition pose. This prevents a
     // turning submap from receiving one rigid correction at its end pose.
     std::vector<MappingScan, Eigen::aligned_allocator<MappingScan>> map_scans_world;
@@ -151,7 +152,6 @@ struct LoopConstraint
     std::uint64_t to_id = 0;
     Pose3d T_from_to;
     Matrix6d covariance = Matrix6d::Identity();
-    bool test_override = false;
 };
 
 struct LoopEvaluation

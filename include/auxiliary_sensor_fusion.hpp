@@ -100,6 +100,13 @@ public:
 
     void initialize_pressure_reference_pose(const state_ikfom &state);
 
+    // Shared by auxiliary and IMU measurement corrections.
+    static typename Ekf::cov transport_covariance_after_boxplus(
+        const typename Ekf::cov &P,
+        state_ikfom prior_state,
+        state_ikfom updated_state,
+        const typename Ekf::vectorized_state &dx);
+
 private:
     struct ImuAngularSample
     {
@@ -177,12 +184,6 @@ private:
                                      const Eigen::MatrixXd &H,
                                      const Eigen::MatrixXd &R,
                                      Ekf &kf);
-
-    typename Ekf::cov transport_covariance_after_boxplus(
-        const typename Ekf::cov &P,
-        state_ikfom prior_state,
-        state_ikfom updated_state,
-        const typename Ekf::vectorized_state &dx) const;
 
     bool apply_linear_update(const Eigen::VectorXd &residual,
                              const Eigen::MatrixXd &H,

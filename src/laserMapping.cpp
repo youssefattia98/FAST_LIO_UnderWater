@@ -66,7 +66,6 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 #include <std_srvs/srv/trigger.hpp>
-#include "fast_lio/srv/inject_loop.hpp"
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -81,14 +80,12 @@
 #include "odometry_output.hpp"
 #include "mapping_input_buffers.hpp"
 #include "imu_observation_calendar.hpp"
+#include "sonar_availability.hpp"
+#include "sonar_recovery.hpp"
+#include "sonar_registration.hpp"
+#include <set>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
-#ifdef UWFL2_REPLAY_TRACE
-#include "replay_trace.hpp"
-#define TRACE_STATE(stage, timestamp, count, key) \
-    replay_trace_.Record(stage, timestamp, lidar_end_time, count, key, kf)
-#else
-#define TRACE_STATE(stage, timestamp, count, key)
-#endif
+#include "sonar_correlated_rows.hpp"
 #include "preprocess.h"
 #include "sensor_parameter_utils.hpp"
 #include "map_file_utils.hpp"
@@ -129,11 +126,27 @@ double initial_gravity_estimate = G_m_s2;
 int    effct_feat_num = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0;
 int    lidar_update_max_effective_features = 0;
+int sonar_geometry_rank = 0;
+double sonar_typical_range = 1.0;
 constexpr int minimum_scan_points = 1, minimum_effective_features = 1;
 uwfl2::LidarScanQualityPolicy lidar_scan_quality{1, 1};
 bool   point_selected_surf[100000] = {0};
 bool   flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool auxiliary_fusion_enabled = false;
+bool sonar_adaptive_registration = false;
+constexpr std::size_t sonar_map_point_budget = 200000;
+uwfl2::SonarMapUncertainty sonar_map_uncertainty(sonar_map_point_budget);
+std::unique_ptr<uwfl2::SonarRegistrationView> sonar_registration_view;
+std::vector<uwfl2::SonarReferencePoint> sonar_scan_points;
+std::vector<uwfl2::SonarCell> sonar_update_cells;
+std::set<uwfl2::SonarCell> sonar_accepted_cells;
+PointVector sonar_integration_world;
+double sonar_registration_leaf = 0;
+Eigen::Matrix<double, state_ikfom::DOF, state_ikfom::DOF> sonar_registration_prior;
+std::uint64_t sonar_registration_generation = 0;
+std::size_t sonar_plane_rows = 0, sonar_point_rows = 0, sonar_unresolved_plane_normals = 0;
+double sonar_mean_squared_whitened_residual = 0.0;
+double sonar_view_build_seconds = 0;
 
 constexpr double AUX_SENSOR_REORDER_WINDOW_SEC = 0.02;
 constexpr auto AUX_SENSOR_REORDER_WALL_GRACE = std::chrono::milliseconds(20);
@@ -288,12 +301,15 @@ double imu_only_packet_duration()
 int process_increments = 0;
 std::size_t map_incremental()
 {
+    if (sonar_adaptive_registration)
+        return static_cast<std::size_t>(ikdtree->Add_Points(sonar_integration_world, true));
     PointVector PointToAdd;
     PointVector PointNoNeedDownsample;
     PointToAdd.reserve(feats_down_size);
     PointNoNeedDownsample.reserve(feats_down_size);
     for (int i = 0; i < feats_down_size; i++)
     {
+        if (sonar_adaptive_registration && !point_selected_surf[i]) continue;
         /* transform to world frame */
         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
         /* decide if need add to map */
@@ -332,6 +348,45 @@ std::size_t map_incremental()
     ikdtree->Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     return static_cast<std::size_t>(add_point_size);
+}
+
+bool rebuild_sonar_registration_view()
+{
+    const auto started = std::chrono::steady_clock::now();
+    PointVector active_points;
+    if (!ikdtree->Snapshot_Points(active_points, sonar_map_point_budget)) return false;
+    std::vector<Eigen::Vector3d> positions;
+    positions.reserve(active_points.size());
+    for (const auto &point : active_points) positions.emplace_back(point.x, point.y, point.z);
+    const auto references = sonar_map_uncertainty.Select(positions);
+    if (!references) return false;
+    const bool valid = sonar_registration_view->Replace(++sonar_registration_generation, *references);
+    sonar_view_build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    return valid;
+}
+
+bool record_sonar_scan_uncertainty()
+{
+    if (sonar_update_cells.size() != sonar_scan_points.size()) return false;
+    sonar_accepted_cells.clear();
+    sonar_integration_world.clear();
+    for (std::size_t i = 0; i < sonar_update_cells.size(); ++i)
+        if (point_selected_surf[i]) sonar_accepted_cells.insert(sonar_update_cells[i]);
+    std::vector<uwfl2::SonarReferencePoint> sources;
+    sources.reserve(sonar_scan_points.size());
+    const M3D rotation = state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix();
+    for (std::size_t i = 0; i < sonar_scan_points.size(); ++i)
+    {
+        if (!point_selected_surf[i]) continue;
+        const auto &source = sonar_scan_points[i];
+        const V3D body = state_point.offset_R_L_I * source.position + state_point.offset_T_L_I;
+        const V3D world = state_point.rot * body + state_point.pos;
+        PointType point{};
+        point.x = world.x(); point.y = world.y(); point.z = world.z();
+        sonar_integration_world.push_back(point);
+        sources.push_back({V3D(point.x, point.y, point.z), rotation * source.covariance * rotation.transpose()});
+    }
+    return !sources.empty() && sonar_map_uncertainty.Record(sources);
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
@@ -415,6 +470,7 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
     {
         return false;
     }
+    const auto prior_state = state;
     state.boxplus(dx);
 
     const MainEkf::cov I = MainEkf::cov::Identity();
@@ -422,6 +478,8 @@ bool apply_imu_orientation_update(const sensor_msgs::msg::Imu::ConstSharedPtr &i
     MainEkf::cov P_new =
         ((I - KH) * P * (I - KH).transpose() + K * R * K.transpose()).eval();
     P_new = ((P_new + P_new.transpose()) * 0.5).eval();
+    P_new = AuxiliarySensorFusion::transport_covariance_after_boxplus(
+        P_new, prior_state, state, dx);
     filter.change_x(state);
     filter.change_P(P_new);
     return true;
@@ -505,6 +563,7 @@ bool apply_accel_attitude_update(
     {
         return false;
     }
+    const auto prior_state = state;
     state.boxplus(dx);
 
     const MainEkf::cov I = MainEkf::cov::Identity();
@@ -512,6 +571,8 @@ bool apply_accel_attitude_update(
     MainEkf::cov P_new =
         ((I - KH) * P * (I - KH).transpose() + K * R * K.transpose()).eval();
     P_new = ((P_new + P_new.transpose()) * 0.5).eval();
+    P_new = AuxiliarySensorFusion::transport_covariance_after_boxplus(
+        P_new, prior_state, state, dx);
     filter.change_x(state);
     filter.change_P(P_new);
     return true;
@@ -529,6 +590,77 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 {
     laserCloudOri->clear(); 
     corr_normvect->clear(); 
+    if (sonar_adaptive_registration)
+    {
+        corr_normvect->resize(feats_down_size);
+        std::vector<uwfl2::SonarCorrelatedRow> rows;
+        sonar_plane_rows = sonar_point_rows = sonar_unresolved_plane_normals = 0;
+        const M3D rotation = s.rot.toRotationMatrix();
+        const M3D sonar_rotation = rotation * s.offset_R_L_I.toRotationMatrix();
+        uwfl2::SonarCorrespondenceConfig config{2.0, 0.1, 3.0, 12, 1.0};
+        config.registration_covariance = V3D(LASER_POINT_COV_XY, LASER_POINT_COV_XY, LASER_POINT_COV_Z).asDiagonal();
+        std::vector<std::optional<uwfl2::SonarCorrelatedRow>> matches(feats_down_size);
+        std::vector<unsigned char> plane_match(feats_down_size, 0);
+        std::vector<unsigned char> unresolved_normal(feats_down_size, 0);
+        #ifdef MP_EN
+            omp_set_num_threads(MP_PROC_NUM);
+            #pragma omp parallel for
+        #endif
+        for (int i = 0; i < feats_down_size; ++i)
+        {
+            point_selected_surf[i] = false;
+            const auto &source = sonar_scan_points[i];
+            const V3D body = s.offset_R_L_I * source.position + s.offset_T_L_I;
+            Eigen::Matrix<double, 3, state_ikfom::DOF> derivative = Eigen::Matrix<double, 3, state_ikfom::DOF>::Zero();
+            derivative.leftCols<3>() = M3D::Identity();
+            M3D skew; skew << SKEW_SYM_MATRX(body);
+            derivative.middleCols<3>(3) = -rotation * skew;
+            const M3D predicted_point_covariance = derivative * sonar_registration_prior * derivative.transpose();
+            auto match = uwfl2::MatchSonarPoint(*sonar_registration_view, sonar_registration_generation,
+                config, body, rotation, s.pos, sonar_rotation * source.covariance * sonar_rotation.transpose(), predicted_point_covariance);
+            unresolved_normal[i] = match.unresolved_plane_normal;
+            Nearest_Points[i].clear();
+            for (const auto &neighbor : match.search.neighbors)
+            {
+                PointType point;
+                point.x = neighbor.position.x(); point.y = neighbor.position.y(); point.z = neighbor.position.z();
+                Nearest_Points[i].push_back(point);
+            }
+            if (!match.row) continue;
+            auto row = *match.row;
+            point_selected_surf[i] = true;
+            uwfl2::SonarCorrelatedRow correlated;
+            correlated.measurement = row;
+            correlated.cached_plane = match.cached_plane;
+            if (match.cached_plane)
+            {
+                const auto &plane = *match.cached_plane;
+                correlated.plane_noise_jacobian << (rotation * body + s.pos - plane.center).transpose(),
+                    -plane.normal.transpose();
+            }
+            matches[i] = correlated;
+            plane_match[i] = match.is_plane;
+        }
+        for (int i = 0; i < feats_down_size; ++i)
+        {
+            if (unresolved_normal[i]) ++sonar_unresolved_plane_normals;
+            if (!matches[i]) continue;
+            rows.push_back(*matches[i]);
+            corr_normvect->points[rows.size() - 1].intensity = matches[i]->measurement.residual;
+            if (plane_match[i]) ++sonar_plane_rows; else ++sonar_point_rows;
+        }
+        effct_feat_num = rows.size();
+        corr_normvect->resize(rows.size());
+        lidar_update_max_effective_features = std::max(lidar_update_max_effective_features, effct_feat_num);
+        if (rows.empty()) { sonar_geometry_rank = 0; ekfom_data.valid = false; return; }
+        const auto system = uwfl2::WhitenSonarRows(rows);
+        if (!system.valid) { sonar_geometry_rank = 0; ekfom_data.valid = false; return; }
+        ekfom_data.h_x = system.jacobian;
+        ekfom_data.h = system.innovation;
+        sonar_geometry_rank = uwfl2::SonarGeometryRank(ekfom_data.h_x, sonar_typical_range);
+        sonar_mean_squared_whitened_residual = ekfom_data.h.squaredNorm() / rows.size();
+        return;
+    }
 
     /** closest surface search and residual computation **/
     #ifdef MP_EN
@@ -597,6 +729,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     if (!lidar_scan_quality.features_are_sufficient(
             static_cast<std::size_t>(effct_feat_num)))
     {
+        sonar_geometry_rank = 0;
         ekfom_data.valid = false;
         return;
     }
@@ -641,6 +774,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         }
     }
 
+    sonar_geometry_rank = uwfl2::SonarGeometryRank(ekfom_data.h_x, sonar_typical_range);
+
 }
 
 class LaserMappingNode : public rclcpp::Node
@@ -652,6 +787,7 @@ public:
         std::vector<double> world_initial_frame_translation;
         std::vector<double> world_initial_frame_rotation;
         LoadParameters(world_initial_frame_translation, world_initial_frame_rotation);
+        sonar_availability_.SetFrequency(sonar_frequency_hz);
         InitializeEstimator();
         InitializeLoopClosure();
 
@@ -680,9 +816,6 @@ public:
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 lid_topic, lidar_qos,
                 [this](sensor_msgs::msg::PointCloud2::UniquePtr message) {
-#ifdef UWFL2_REPLAY_TRACE
-                    replay_trace_.SonarReceived(*message);
-#endif
                     input_buffers_.NoteSonarReceipt();
                     ensure_sonar_frame_attached_to_body(message->header.frame_id);
                     standard_pcl_cbk(std::move(message));
@@ -705,6 +838,11 @@ public:
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         navigation_health_pub_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
             "/uwfl2/navigation_health", 1);
+        sonar_diagnostics_pub_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+            "/uwfl2/sonar_diagnostics", rclcpp::QoS(200));
+        if (sonar_adaptive_registration)
+            provisional_map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "/uwfl2/provisional_map", rclcpp::QoS(1).transient_local());
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
@@ -780,11 +918,6 @@ public:
                     this->create_publisher<visualization_msgs::msg::MarkerArray>(
                         "/uwfl2_lc/markers", visualization_qos);
             }
-            loop_inject_srv_ = this->create_service<fast_lio::srv::InjectLoop>(
-                "/uwfl2_lc/inject_loop",
-                std::bind(&LaserMappingNode::inject_loop_callback, this,
-                          std::placeholders::_1, std::placeholders::_2),
-                rmw_qos_profile_services_default, backend_callback_group_);
         }
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
@@ -858,6 +991,12 @@ private:
             return false;
         }
 
+        // A future scan must not batch an outage into one long propagation
+        // packet. Navigate up to its start, retaining its full deskew interval.
+        if (input_buffers_.NavigationPacketPrecedesSonar(
+                imu_only_packet_duration(), expected_imu_period(), expected_imu_timeout(), lidar_timeout))
+            return false;
+
         // A queued scan owns its acquisition interval. Process() already splits
         // propagation at each auxiliary epoch; outer packet splitting changes
         // initialization and discards motion history needed for scan deskew.
@@ -906,6 +1045,12 @@ private:
             input_buffers_.imu_buffer.pop_front();
         }
 
+        // Retain the next real sample in its input queue, but expose the pair
+        // bracketing a fractional scan endpoint to propagation and DVL.
+        if (!input_buffers_.imu_buffer.empty() &&
+            get_time_sec(input_buffers_.imu_buffer.front()->header.stamp) > lidar_end_time)
+            meas.imu.push_back(input_buffers_.imu_buffer.front());
+
         input_buffers_.lidar_buffer.pop_front();
         input_buffers_.time_buffer.pop_front();
         input_buffers_.lidar_pushed = false;
@@ -916,7 +1061,9 @@ private:
     ImuPacketResult sync_imu_only_packages(MeasureGroup &meas)
     {
         const bool pending_scan = !input_buffers_.lidar_buffer.empty();
-        if (pending_scan || input_buffers_.lidar_pushed || input_buffers_.sonar_processing ||
+        if ((pending_scan && !input_buffers_.NavigationPacketPrecedesSonar(
+                imu_only_packet_duration(), expected_imu_period(), expected_imu_timeout(), lidar_timeout)) ||
+            input_buffers_.lidar_pushed || input_buffers_.sonar_processing ||
             input_buffers_.imu_buffer.empty()) {
             return ImuPacketResult::Unavailable;
         }
@@ -965,7 +1112,10 @@ private:
         while (!input_buffers_.imu_buffer.empty())
         {
             const double imu_time = get_time_sec(input_buffers_.imu_buffer.front()->header.stamp);
-            if (input_buffers_.last_processed_time > 0.0 && imu_time <= input_buffers_.last_processed_time + 1e-6)
+            // A near-future sample is still a real acquisition. A microsecond
+            // duplicate tolerance can erase an IMU observation after sonar.
+            if (input_buffers_.last_processed_time > 0.0 &&
+                imu_time <= input_buffers_.last_processed_time + uwfl2::kAcquisitionTimeTolerance)
             {
                 input_buffers_.imu_buffer.pop_front();
                 continue;
@@ -1003,6 +1153,9 @@ private:
         this->declare_parameter<double>("sonar.min_range", 0.01);
         this->declare_parameter<double>("sonar.xy_covariance", LASER_POINT_COV_DEFAULT);
         this->declare_parameter<double>("sonar.z_covariance", LASER_POINT_COV_DEFAULT);
+        this->declare_parameter<bool>("sonar.adaptive_registration", false);
+        this->declare_parameter<double>("sonar.range_noise_std_m", 0.0);
+        this->declare_parameter<double>("sonar.angular_noise_std_deg", 0.0);
 
         this->declare_parameter<string>("imu.topic", "/imu/data");
         this->declare_parameter<double>("imu.frequency", 100.0);
@@ -1053,6 +1206,16 @@ private:
                                        double(LASER_POINT_COV_DEFAULT));
         this->get_parameter_or<double>("sonar.z_covariance", LASER_POINT_COV_Z,
                                        double(LASER_POINT_COV_DEFAULT));
+        sonar_adaptive_registration = this->get_parameter("sonar.adaptive_registration").as_bool();
+        if (sonar_adaptive_registration)
+        {
+            const double range_std = this->get_parameter("sonar.range_noise_std_m").as_double();
+            const double angle_std = this->get_parameter("sonar.angular_noise_std_deg").as_double() * M_PI / 180.0;
+            if (!std::isfinite(range_std) || range_std <= 0 || !std::isfinite(angle_std) || angle_std <= 0)
+                throw std::invalid_argument("Adaptive registration requires a known, positive sonar noise profile");
+            p_imu->SetSonarNoiseVariance(V3D(range_std * range_std, angle_std * angle_std, angle_std * angle_std));
+            sonar_registration_view = std::make_unique<uwfl2::SonarRegistrationView>(2.0, sonar_map_point_budget, 4096);
+        }
 
         this->get_parameter_or<string>("imu.topic", imu_topic, "/imu/data");
         this->get_parameter_or<double>("imu.frequency", imu_rate_hz, 100.0);
@@ -1243,7 +1406,6 @@ private:
 
     void reset_high_rate_odometry_prediction_locked()
     {
-        TRACE_STATE("reset_prediction", lidar_end_time, 0, 0);
         auto state = kf.get_x();
         auto covariance = kf.get_P();
         odometry_prediction_kf_.change_x(state);
@@ -1253,6 +1415,7 @@ private:
             p_imu->AccelerationScale();
         odometry_prediction_time_ = lidar_end_time;
         odometry_prediction_correction_time_ = lidar_end_time;
+        odometry_prediction_observation_time_ = imu_observation_calendar_.NextEpoch();
         next_odometry_prediction_publish_time_ =
             lidar_end_time + 1.0 / odometry_publish_rate_hz;
         odometry_prediction_ready_ = true;
@@ -1347,7 +1510,8 @@ private:
                     return;
                 }
                 if (head_time >= pending_sonar_time - 1e-9 ||
-                    tail_time > pending_sonar_time + 1e-9)
+                    tail_time > pending_sonar_time + 1e-9 ||
+                    tail_time > odometry_prediction_observation_time_ + 1e-9)
                 {
                     break;
                 }
@@ -1543,6 +1707,11 @@ private:
         };
         add("sonar_condition", !sonar_ok ? (lid_topic.empty() ? "disabled" : "missing") : sonar_condition_);
         add("geometry_rank", "unassessed; partial/full information classification deferred to CP-3");
+        add("sonar_input_condition", uwfl2::SonarConditionName(sonar_availability_.At(now).condition));
+        add("last_sonar_geometry_rank", std::to_string(last_sonar_geometry_rank_));
+        add("sonar_recovering", sonar_recovery_.Recovering() ? "true" : "false");
+        add("recovery_candidates", std::to_string(sonar_recovery_.Consecutive()));
+        add("provisional_scans", std::to_string(provisional_scans_.size()));
         add("imu_available", imu_ok ? "true" : "false");
         add("imu_receipt_age_wall_seconds", std::to_string(imu_receipt_age));
         add("dvl_received", aux_fusion_.dvl_enabled() && available(aux.dvl_stamp, 2.0 * aux.dvl_timeout) ? "true" : "false");
@@ -1584,9 +1753,124 @@ private:
         navigation_health_pub_->publish(message);
     }
 
+    void publish_sonar_diagnostics(const std::string &stage, double timestamp,
+                                   const uwfl2::LidarUpdateResult &result = {},
+                                   const std::optional<uwfl2::SonarDetection> &interval_detection = std::nullopt)
+    {
+        if (stage == "geometry") last_sonar_geometry_rank_ = sonar_geometry_rank;
+        if (sonar_diagnostics_pub_->get_subscription_count() == 0) return;
+        diagnostic_msgs::msg::DiagnosticArray message;
+        message.header.stamp = get_ros_time(timestamp);
+        diagnostic_msgs::msg::DiagnosticStatus status;
+        status.name = "uwfl2/sonar";
+        status.hardware_id = "uwfl2";
+        const auto detection = interval_detection.value_or(sonar_availability_.At(timestamp));
+        status.message = uwfl2::SonarConditionName(detection.condition);
+        auto add = [&](const std::string &key, const std::string &value) {
+            diagnostic_msgs::msg::KeyValue entry;
+            entry.key = key; entry.value = value; status.values.push_back(entry);
+        };
+        add("stage", stage);
+        add("input_condition", status.message);
+        add("finite_points", std::to_string(sonar_input_metrics_.finite_points));
+        add("count_ratio", std::to_string(detection.count_ratio));
+        add("azimuth_ratio", std::to_string(detection.azimuth_ratio));
+        add("elevation_ratio", std::to_string(detection.elevation_ratio));
+        add("missing_deadline_seconds", std::to_string(sonar_availability_.MissingDeadline()));
+        add("acquisition_age_seconds", std::to_string(detection.acquisition_age));
+        add("effective_points", std::to_string(effct_feat_num));
+        add("registration_mode", sonar_adaptive_registration ? "adaptive_hybrid" : "original");
+        add("plane_rows", std::to_string(sonar_plane_rows));
+        add("point_rows", std::to_string(sonar_point_rows));
+        add("unresolved_plane_normals", std::to_string(sonar_unresolved_plane_normals));
+        add("registration_leaf_m", std::to_string(sonar_voxel_controller_ ? sonar_voxel_controller_->Leaf() : filter_size_surf_min));
+        add("view_build_seconds", std::to_string(sonar_view_build_seconds));
+        add("geometry_rank", std::to_string(sonar_geometry_rank));
+        add("geometry_condition", effct_feat_num == 0 ? "unassessed_or_unusable" :
+            sonar_geometry_rank < 6 ? "partially_informative" : "informative");
+        add("accepted", result.accepted ? "true" : "false");
+        add("update_reason", uwfl2::lidar_scan_status(result.reason));
+        add("recovery_candidates", std::to_string(sonar_recovery_.Consecutive()));
+        add("mean_squared_whitened_residual", std::to_string(sonar_mean_squared_whitened_residual));
+        add("dx_position_m", std::to_string(sonar_dx_position_));
+        add("dx_rotation_rad", std::to_string(sonar_dx_rotation_));
+        std::vector<double> residuals;
+        for (int i = 0; i < effct_feat_num; ++i)
+            residuals.push_back(std::abs(corr_normvect->points[i].intensity));
+        double residual_sum = 0.0;
+        for (double residual : residuals) residual_sum += residual;
+        add("residual_mean_m", std::to_string(residuals.empty() ? 0.0 : residual_sum / residuals.size()));
+        add("residual_p95_m", std::to_string(uwfl2::SonarQuantile(residuals, 0.95)));
+        add("map_points_inserted", std::to_string(result.map_points_inserted));
+        add("active_map_points", std::to_string(ikdtree->validnum()));
+        {
+            std::lock_guard<std::mutex> lock(mapping_output_mutex);
+            add("pending_history_scans", std::to_string(pending_mapping_scans_.size()));
+        }
+        add("scan_processing_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - sonar_processing_start_).count()));
+        add("acquisition_lag_seconds", std::to_string(std::max(0.0,
+            input_buffers_.last_processed_time - timestamp)));
+        message.status.push_back(status);
+        sonar_diagnostics_pub_->publish(message);
+    }
+
+    bool prepare_adaptive_sonar_scan(double timestamp)
+    {
+        const auto &covariances = p_imu->ScanMeasurementCovariances();
+        if (covariances.size() != feats_undistort->size() || covariances.empty()) return false;
+        std::vector<uwfl2::SonarReferencePoint> points;
+        points.reserve(covariances.size());
+        for (std::size_t i = 0; i < covariances.size(); ++i)
+        {
+            const auto &point = feats_undistort->points[i];
+            points.push_back({V3D(point.x, point.y, point.z), covariances[i]});
+        }
+        if (!sonar_voxel_controller_)
+        {
+            const auto initial = uwfl2::VoxelizeSonarPoints(points, filter_size_surf_min, 100000);
+            if (!initial.complete || initial.points.empty()) return false;
+            std::vector<double> ranges;
+            for (const auto &point : initial.points) ranges.push_back(point.position.norm());
+            const double median = std::max(1e-3, uwfl2::SonarQuantile(ranges, 0.5));
+            const std::size_t count = initial.points.size();
+            const double gain = filter_size_surf_min / (20.0 * count);
+            // Frozen scale-relative settings, calibrated from the initial scan
+            // at the existing leaf size; no donor LiDAR numerical presets.
+            sonar_voxel_controller_ = std::make_unique<uwfl2::SonarVoxelController>(uwfl2::SonarVoxelControlConfig{
+                filter_size_surf_min, filter_size_surf_min / 3, filter_size_surf_min * 2,
+                20, std::max<std::size_t>(1, count / 2), std::max<std::size_t>(1, count * 3 / 2),
+                median * 2, 1, 0.5, 0.5, gain, gain * 10, 0, gain / sonar_frequency_hz});
+        }
+        const double interval = last_adaptive_sonar_time_ < 0 ? 1 / sonar_frequency_hz : timestamp - last_adaptive_sonar_time_;
+        if (interval <= 0) return false;
+        const auto scan = uwfl2::PrepareAdaptiveSonarScan(*sonar_voxel_controller_, points, interval, 100000);
+        if (!scan.complete) return false;
+        last_adaptive_sonar_time_ = timestamp;
+        sonar_scan_points = scan.update.points;
+        sonar_update_cells = scan.update.cells;
+        sonar_registration_leaf = scan.leaf;
+        feats_down_body->resize(sonar_scan_points.size());
+        for (std::size_t i = 0; i < sonar_scan_points.size(); ++i)
+        {
+            PointType point;
+            point.x = sonar_scan_points[i].position.x(); point.y = sonar_scan_points[i].position.y(); point.z = sonar_scan_points[i].position.z();
+            point.intensity = point.curvature = 0;
+            feats_down_body->points[i] = point;
+            sonar_scan_points[i].position = V3D(point.x, point.y, point.z);
+            point_selected_surf[i] = true;
+        }
+        return true;
+    }
+
     void timer_callback()
     {
         try_commit_loop_correction();
+        if (provisional_map_reset_requested_)
+        {
+            provisional_map_reset_requested_ = false;
+            clear_provisional_map();
+        }
         maybe_publish_loop_visualization();
         bool imu_only_measure = false;
         bool has_measurement = false;
@@ -1603,36 +1887,74 @@ private:
         if(has_measurement)
         {
             uwfl2::LidarUpdateResult lidar_update_result;
+            const auto interval_availability = sonar_availability_;
             effct_feat_num = 0;
             feats_down_size = 0;
+            sonar_plane_rows = sonar_point_rows = sonar_unresolved_plane_normals = 0;
+            sonar_mean_squared_whitened_residual = 0.0;
+            sonar_view_build_seconds = 0;
             add_point_size = 0;
+            sonar_geometry_rank = 0;
+            sonar_dx_position_ = sonar_dx_rotation_ = 0.0;
+            if (sonar_adaptive_registration && ikdtree->Root_Node != nullptr &&
+                (interval_availability.At(Measures.lidar_end_time).condition ==
+                     uwfl2::SonarInputCondition::Missing ||
+                 (!imu_only_measure && (!Measures.lidar || Measures.lidar->empty()))))
+                sonar_recovery_.RequireValidation();
+            if (!imu_only_measure)
+            {
+                sonar_processing_start_ = std::chrono::steady_clock::now();
+                sonar_input_metrics_ = uwfl2::MeasureSonarInput(Measures.lidar->points);
+                sonar_typical_range = sonar_input_metrics_.median_range;
+                sonar_availability_.Observe(Measures.lidar_beg_time, sonar_input_metrics_);
+                publish_sonar_diagnostics("input", Measures.lidar_beg_time);
+            }
+            else if (sonar_availability_.At(Measures.lidar_end_time).condition ==
+                     uwfl2::SonarInputCondition::Missing &&
+                     Measures.lidar_end_time - last_missing_diagnostic_time_ >= 0.05)
+            {
+                last_missing_diagnostic_time_ = Measures.lidar_end_time;
+                publish_sonar_diagnostics("availability", Measures.lidar_end_time);
+            }
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
                 p_imu->first_lidar_time = first_lidar_time;
                 flg_first_scan = false;
-                if (!imu_only_measure)
-                {
-                    return;
-                }
             }
 
-            const double process_begin_time = input_buffers_.last_processed_time > 0.0 ? input_buffers_.last_processed_time : Measures.lidar_beg_time;
-            TRACE_STATE(imu_only_measure ? "packet_ins" : "packet_scan",
-                        process_begin_time, Measures.imu.size(),
-                        uwfl2::ReplayTrace::ImuFingerprint(Measures.imu));
+            double process_begin_time = input_buffers_.last_processed_time > 0.0 ? input_buffers_.last_processed_time : Measures.lidar_beg_time;
             if (!p_imu->IsInitialized())
             {
                 p_imu->Process(Measures, kf, feats_undistort);
-                if (p_imu->IsInitialized() && auxiliary_fusion_enabled)
+                if (!p_imu->IsInitialized())
+                {
+                    input_buffers_.last_processed_time = Measures.lidar_end_time;
+                    update_state_outputs();
+                    return;
+                }
+                process_begin_time = p_imu->InitializationTime();
+                input_buffers_.last_processed_time = process_begin_time;
+                imu_observation_calendar_.Reset(process_begin_time);
+                if (auxiliary_fusion_enabled)
                 {
                     aux_fusion_.initialize_pressure_reference_pose(kf.get_x());
                 }
-                input_buffers_.last_processed_time = Measures.lidar_end_time;
-                TRACE_STATE("initialized", Measures.lidar_end_time, p_imu->IsInitialized(), 0);
-                imu_observation_calendar_.Reset(Measures.lidar_end_time);
-                update_state_outputs();
-                return;
+                // Preserve post-window samples/events in this packet, but do
+                // not map a scan whose early portion predates initialization.
+                while (!Measures.imu.empty() &&
+                       get_time_sec(Measures.imu.front()->header.stamp) <= process_begin_time + 1e-9)
+                    Measures.imu.pop_front();
+                if (Measures.lidar_end_time <= process_begin_time + 1e-9)
+                {
+                    update_state_outputs();
+                    return;
+                }
+                if (Measures.imu.empty())
+                    Measures.imu.push_back(p_imu->InitializationSample());
+                Measures.lidar.reset(new PointCloudXYZI());
+                Measures.lidar_beg_time = process_begin_time;
+                imu_only_measure = true;
             }
 
             std::vector<AuxiliarySensorFusion::TimedMeasurement> timed_measurements;
@@ -1663,33 +1985,40 @@ private:
                 [](const Event &a, const Event &b) { return a.timestamp < b.timestamp; });
             std::vector<double> timestamps;
             for (const auto &event : events) timestamps.push_back(event.timestamp);
+            const auto measurement_imu = p_imu->ImuSamplesForMeasurements(Measures.imu);
             p_imu->Process(Measures, kf, feats_undistort, timestamps,
                 [&](std::size_t index, ImuProcess::Ekf &filter) {
                     const auto &event = events[index];
+                    // A queued returning scan cannot hide the missing interval
+                    // traversed by this propagation packet. Reporting uses the
+                    // causal pre-scan detector; it never modifies the filter.
+                    const auto detection = interval_availability.At(event.timestamp);
+                    if (!imu_only_measure && event.timestamp < Measures.lidar_beg_time &&
+                        detection.condition == uwfl2::SonarInputCondition::Missing &&
+                        event.timestamp - last_missing_diagnostic_time_ >= 0.05)
+                    {
+                        last_missing_diagnostic_time_ = event.timestamp;
+                        publish_sonar_diagnostics("availability", event.timestamp, {}, detection);
+                    }
                     if (event.attitude)
                     {
                         const auto &window = observations[event.index].samples;
                         const bool orientation = apply_imu_orientation_update(window.back(), filter);
                         const bool tilt = apply_accel_attitude_update(window, filter);
                         ++imu_observation_count_;
-                        TRACE_STATE("imu_observation", event.timestamp, imu_observation_count_, 0);
                         return orientation || tilt;
                     }
                     const auto &measurement = timed_measurements[event.index];
-                    const bool applied = aux_fusion_.apply_timed_measurement(measurement, Measures.imu, filter);
+                    const bool applied = aux_fusion_.apply_timed_measurement(measurement, measurement_imu, filter);
                     ++aux_considered_count_;
                     if (applied) ++aux_applied_count_;
                     if (applied && measurement.kind == AuxiliarySensorFusion::MeasurementKind::Dvl)
                         last_dvl_applied_time_ = measurement.timestamp;
-                    TRACE_STATE("aux_after", event.timestamp, applied,
-                                uwfl2::ReplayTrace::MeasurementFingerprint(measurement));
                     return applied;
                 });
             if (auxiliary_fusion_enabled)
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
-            TRACE_STATE("propagated", Measures.lidar_end_time, 0, 0);
             input_buffers_.last_processed_time = Measures.lidar_end_time;
-            TRACE_STATE("imu_attitude", Measures.lidar_end_time, 0, 0);
             update_state_outputs();
 
             if (imu_only_measure)
@@ -1723,9 +2052,11 @@ private:
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
+                if (sonar_adaptive_registration) sonar_recovery_.RequireValidation();
                 sonar_condition_ = "empty";
                 RCLCPP_WARN(this->get_logger(), "No point, publish IMU-only odometry for this scan.\n");
                 lidar_update_result = lidar_scan_quality.reject_sparse_input(0);
+                publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
                 publish_estimator_outputs();
                 return;
             }
@@ -1733,11 +2064,26 @@ private:
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
             /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment();
+            if (!sonar_adaptive_registration) lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
-            downSizeFilterSurf.setInputCloud(feats_undistort);
-            downSizeFilterSurf.filter(*feats_down_body);
+            if (sonar_adaptive_registration)
+            {
+                if (!prepare_adaptive_sonar_scan(Measures.lidar_end_time))
+                {
+                    sonar_recovery_.RequireValidation();
+                    sonar_condition_ = "unusable_noise_metadata";
+                    lidar_update_result = lidar_scan_quality.reject_sparse_input(0);
+                    publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
+                    publish_estimator_outputs();
+                    return;
+                }
+            }
+            else
+            {
+                downSizeFilterSurf.setInputCloud(feats_undistort);
+                downSizeFilterSurf.filter(*feats_down_body);
+            }
 
             feats_down_size = feats_down_body->points.size();
             if (!lidar_scan_quality.input_is_sufficient(
@@ -1745,11 +2091,13 @@ private:
             {
                 lidar_update_result = lidar_scan_quality.reject_sparse_input(
                     static_cast<std::size_t>(feats_down_size));
+                if (sonar_adaptive_registration) sonar_recovery_.RequireValidation();
                 sonar_condition_ = "unusable_sparse_input";
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(), *this->get_clock(), 2000,
                     "Rejected sparse sonar scan: %d downsampled points (minimum %d).",
                     feats_down_size, minimum_scan_points);
+                publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
                 publish_estimator_outputs();
                 return;
             }
@@ -1766,8 +2114,21 @@ private:
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
-                    ikdtree->Build(feats_down_world->points);
+                    if (sonar_adaptive_registration && !record_sonar_scan_uncertainty())
+                    {
+                        sonar_condition_ = "unusable_noise_metadata";
+                        publish_estimator_outputs();
+                        return;
+                    }
+                    if (sonar_adaptive_registration)
+                    {
+                        lasermap_fov_segment();
+                        ikdtree->Build(sonar_integration_world);
+                    }
+                    else ikdtree->Build(feats_down_world->points);
                     sonar_condition_ = "map_initialization";
+                    sonar_recovery_ = uwfl2::SonarRecovery{};
+                    clear_provisional_map();
                     lidar_update_result =
                         lidar_scan_quality.accept_map_initialization(
                             static_cast<std::size_t>(feats_down_size));
@@ -1789,6 +2150,17 @@ private:
                     lidar_update_result = lidar_scan_quality.reject_sparse_input(
                         static_cast<std::size_t>(feats_down_size));
                 }
+                publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
+                publish_estimator_outputs();
+                return;
+            }
+
+            if (sonar_adaptive_registration && !rebuild_sonar_registration_view())
+            {
+                sonar_recovery_.RequireValidation();
+                sonar_condition_ = "unusable_map_uncertainty";
+                lidar_update_result = lidar_scan_quality.reject_sparse_input(feats_down_size);
+                publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
                 publish_estimator_outputs();
                 return;
             }
@@ -1804,34 +2176,88 @@ private:
             double solve_H_time = 0;
 
             const double lidar_update_cov =
-                auxiliary_fusion_enabled ? 1.0 : LASER_POINT_COV_XY;
+                (auxiliary_fusion_enabled || sonar_adaptive_registration) ? 1.0 : LASER_POINT_COV_XY;
             lidar_update_max_effective_features = 0;
             uwfl2::LidarUpdateTransaction<MainEkf> lidar_transaction(kf);
+            const auto sonar_prior = kf.get_x();
+            sonar_registration_prior = kf.get_P();
             const bool update_applied =
                 kf.update_iterated_dyn_share_modified(lidar_update_cov,
                                                       solve_H_time);
-            TRACE_STATE("sonar_updated", Measures.lidar_end_time, effct_feat_num,
-                        uwfl2::ReplayTrace::NeighborFingerprint(Nearest_Points));
             lidar_update_result = lidar_scan_quality.evaluate_update(
                 static_cast<std::size_t>(feats_down_size),
                 static_cast<std::size_t>(lidar_update_max_effective_features),
                 update_applied);
+            if (sonar_adaptive_registration)
+            {
+                if (!lidar_update_result.accepted) sonar_recovery_.RequireValidation();
+                else
+                {
+                    Eigen::Matrix<double, state_ikfom::DOF, 1> delta;
+                    kf.get_x().boxminus(delta, sonar_prior);
+                    // Compare recovery candidates in the fixed local frame, not
+                    // different body tangents as the vehicle rotates.
+                    uwfl2::SonarRecovery::PoseCovariance transport =
+                        uwfl2::SonarRecovery::PoseCovariance::Identity();
+                    transport.bottomRightCorner<3, 3>() = sonar_prior.rot.toRotationMatrix();
+                    const auto decision = sonar_recovery_.Candidate(active_tree_generation_,
+                        transport * delta.head<6>(),
+                        transport * sonar_registration_prior.topLeftCorner<6, 6>() * transport.transpose(),
+                        static_cast<double>(effct_feat_num) / feats_down_size,
+                        sonar_mean_squared_whitened_residual);
+                    if (decision == uwfl2::SonarRecovery::Decision::Validating ||
+                        decision == uwfl2::SonarRecovery::Decision::Inconsistent)
+                    {
+                        lidar_update_result.accepted = false;
+                        lidar_update_result.reason = decision == uwfl2::SonarRecovery::Decision::Validating
+                            ? uwfl2::LidarScanRejectionReason::kRecoveryValidation
+                            : uwfl2::LidarScanRejectionReason::kInconsistentRecovery;
+                    }
+                    else if (decision == uwfl2::SonarRecovery::Decision::Resumed)
+                        clear_provisional_map();
+                }
+            }
             lidar_transaction.finish(lidar_update_result);
+            Eigen::Matrix<double, state_ikfom::DOF, 1> sonar_delta;
+            kf.get_x().boxminus(sonar_delta, sonar_prior);
+            sonar_dx_position_ = sonar_delta.head<3>().norm();
+            sonar_dx_rotation_ = sonar_delta.segment<3>(3).norm();
             if (!lidar_update_result.accepted)
             {
-                sonar_condition_ = "unusable_correspondences";
+                sonar_condition_ = lidar_update_result.reason == uwfl2::LidarScanRejectionReason::kRecoveryValidation
+                    ? "recovery_validation" :
+                    lidar_update_result.reason == uwfl2::LidarScanRejectionReason::kInconsistentRecovery
+                        ? "inconsistent_recovery" : "unusable_correspondences";
                 update_state_outputs();
+                if (sonar_adaptive_registration && effct_feat_num == 0)
+                    publish_provisional_scan(Measures.lidar_end_time);
 
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(), *this->get_clock(), 2000,
-                    "Rejected sonar update: %d effective features (minimum %d).",
+                    "Held sonar update: %s, %d effective features (minimum %d).",
+                    uwfl2::lidar_scan_status(lidar_update_result.reason),
                     lidar_update_max_effective_features,
                     minimum_effective_features);
+                publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
                 publish_estimator_outputs();
                 return;
             }
 
             update_state_outputs();
+
+            if (sonar_adaptive_registration && !record_sonar_scan_uncertainty())
+            {
+                sonar_recovery_.RequireValidation();
+                auto state = sonar_prior;
+                auto covariance = sonar_registration_prior;
+                kf.change_x(state); kf.change_P(covariance);
+                update_state_outputs();
+                sonar_condition_ = "unusable_noise_metadata";
+                lidar_update_result.accepted = false;
+                publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
+                publish_estimator_outputs();
+                return;
+            }
 
             /******* Publish odometry *******/
             // Count-based acceptance does not establish full six-DOF observability.
@@ -1839,6 +2265,7 @@ private:
             publish_estimator_outputs();
 
             /*** add the feature points to map kdtree ***/
+            if (sonar_adaptive_registration) lasermap_fov_segment();
             lidar_update_result.map_points_inserted = map_incremental();
 
             if (loop_closure_)
@@ -1850,7 +2277,47 @@ private:
 
             accumulate_mapping_output(Measures.lidar_end_time);
             submit_loop_keyframe(Measures.lidar_end_time);
+            publish_sonar_diagnostics("geometry", Measures.lidar_end_time, lidar_update_result);
         }
+    }
+
+    struct ProvisionalScan
+    {
+        PointCloudXYZI::Ptr points;
+        state_ikfom anchor;
+        MainEkf::cov anchor_covariance;
+    };
+
+    void clear_provisional_map()
+    {
+        if (provisional_scans_.empty()) return;
+        provisional_scans_.clear();
+        publish_provisional_map(lidar_end_time);
+    }
+
+    void publish_provisional_scan(double timestamp)
+    {
+        // Display only: retain uncertain navigation anchors, never feed these
+        // points to correspondence search, the trusted tree, or loop closure.
+        PointCloudXYZI::Ptr points(new PointCloudXYZI());
+        points->resize(feats_undistort->size());
+        for (std::size_t i = 0; i < points->size(); ++i)
+            pointBodyToWorld(&feats_undistort->points[i], &points->points[i]);
+        provisional_scans_.push_back({points, kf.get_x(), kf.get_P()});
+        if (provisional_scans_.size() > 20) provisional_scans_.pop_front();
+        publish_provisional_map(timestamp);
+    }
+
+    void publish_provisional_map(double timestamp)
+    {
+        if (!provisional_map_pub_ || provisional_map_pub_->get_subscription_count() == 0) return;
+        PointCloudXYZI cloud;
+        for (const auto &scan : provisional_scans_) cloud += *scan.points;
+        sensor_msgs::msg::PointCloud2 message;
+        pcl::toROSMsg(cloud, message);
+        message.header.frame_id = "camera_init";
+        message.header.stamp = get_ros_time(timestamp);
+        provisional_map_pub_->publish(message);
     }
 
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
@@ -2052,14 +2519,25 @@ private:
 
         PointCloudXYZI::Ptr dense_cloud(new PointCloudXYZI());
         dense_cloud->reserve(feats_undistort->size());
-        for (const PointType &point_body : feats_undistort->points)
+        auto dense_covariances = std::make_shared<std::vector<M3D>>();
+        const auto &scan_covariances = p_imu->ScanMeasurementCovariances();
+        const M3D sonar_rotation = state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix();
+        for (std::size_t i = 0; i < feats_undistort->size(); ++i)
         {
+            const PointType &point_body = feats_undistort->points[i];
+            if (sonar_adaptive_registration)
+            {
+                const auto cell = uwfl2::SonarVoxelCell(V3D(point_body.x, point_body.y, point_body.z), sonar_registration_leaf);
+                if (!cell || sonar_accepted_cells.count(*cell) == 0) continue;
+            }
             PointType point_world;
             RGBpointBodyToWorld(&point_body, &point_world);
             if (std::isfinite(point_world.x) && std::isfinite(point_world.y) &&
                 std::isfinite(point_world.z))
             {
                 dense_cloud->push_back(point_world);
+                if (sonar_adaptive_registration)
+                    dense_covariances->push_back(sonar_rotation * scan_covariances.at(i) * sonar_rotation.transpose());
             }
         }
         if (dense_cloud->empty())
@@ -2075,7 +2553,27 @@ private:
         const float compact_leaf = static_cast<float>(filter_size_map_min);
         compact_filter.setLeafSize(compact_leaf, compact_leaf, compact_leaf);
         compact_filter.setInputCloud(dense_cloud);
-        compact_filter.filter(compact_cloud);
+        if (!sonar_adaptive_registration) compact_filter.filter(compact_cloud);
+        auto compact_covariances = std::make_shared<std::vector<M3D>>();
+        if (sonar_adaptive_registration)
+        {
+            std::vector<uwfl2::SonarReferencePoint> references;
+            for (std::size_t i = 0; i < dense_cloud->size(); ++i)
+            {
+                const auto &point = dense_cloud->points[i];
+                references.push_back({V3D(point.x, point.y, point.z), (*dense_covariances)[i]});
+            }
+            const auto compact = uwfl2::VoxelizeSonarPoints(references, filter_size_map_min, 100000);
+            if (!compact.complete) throw std::runtime_error("Cannot preserve compact scan covariance");
+            compact_cloud.clear();
+            for (const auto &reference : compact.points)
+            {
+                PointType point;
+                point.x = reference.position.x(); point.y = reference.position.y(); point.z = reference.position.z();
+                compact_cloud.push_back(point);
+                compact_covariances->push_back(reference.covariance);
+            }
+        }
 
         const auto copy_points = [](const PointCloudXYZI &cloud) {
             auto points =
@@ -2096,6 +2594,11 @@ private:
         scan.T_local_vehicle.translation = state_point.pos;
         scan.points_world = copy_points(*dense_cloud);
         scan.compact_points_world = copy_points(compact_cloud);
+        if (sonar_adaptive_registration)
+        {
+            scan.measurement_covariances_world = dense_covariances;
+            scan.compact_measurement_covariances_world = compact_covariances;
+        }
         {
             std::lock_guard<std::mutex> lock(mapping_output_mutex);
             // Keep scan-owned dense storage until a save or loop correction
@@ -2211,6 +2714,16 @@ private:
             corrected_scan.points_world = transform_points(scan.points_world);
             corrected_scan.compact_points_world =
                 transform_points(scan.compact_points_world);
+            const auto transform_covariances = [&](const auto &source) {
+                if (!source) return std::shared_ptr<const std::vector<M3D>>{};
+                auto covariances = std::make_shared<std::vector<M3D>>();
+                const M3D rotation = latest_correction.rotation.toRotationMatrix();
+                for (const auto &covariance : *source)
+                    covariances->push_back(rotation * covariance * rotation.transpose());
+                return std::shared_ptr<const std::vector<M3D>>(covariances);
+            };
+            corrected_scan.measurement_covariances_world = transform_covariances(scan.measurement_covariances_world);
+            corrected_scan.compact_measurement_covariances_world = transform_covariances(scan.compact_measurement_covariances_world);
             output.pending_scans.push_back(std::move(corrected_scan));
         }
         output.cloud->width =
@@ -2237,8 +2750,8 @@ private:
                        std::chrono::steady_clock::now() - commit_started)
                 .count();
         };
-        const auto reject = [&](const char *reason) {
-            loop_closure_->notify_correction_result(false, elapsed_ms(), reason);
+        const auto reject = [&]() {
+            loop_closure_->notify_correction_result(false, elapsed_ms());
         };
         if (!candidate->shadow_map || !candidate->registration ||
             !candidate->scan || !candidate->shadow_map->valid ||
@@ -2246,7 +2759,7 @@ private:
             candidate->registration->scan_generation !=
                 candidate->scan->scan_generation)
         {
-            reject("stale_or_invalid_candidate");
+            reject();
             return;
         }
 
@@ -2257,7 +2770,7 @@ private:
         {
             loop_closure_->request_registration_refresh(
                 candidate->shadow_map, candidate->refresh_attempt + 1);
-            reject("stale_candidate_refresh_requested");
+            reject();
             return;
         }
 
@@ -2267,7 +2780,7 @@ private:
             uwfl2::loop_closure::inverse(registration.T_local_vehicle_raw));
         if (!correction.finite())
         {
-            reject("non_finite_correction");
+            reject();
             return;
         }
 
@@ -2295,7 +2808,7 @@ private:
             corrected_state.b_pressure.isApprox(original_state.b_pressure, 0.0);
         if (!protected_states_unchanged)
         {
-            reject("protected_state_changed");
+            reject();
             return;
         }
 
@@ -2315,7 +2828,7 @@ private:
             !corrected_state.rot.toRotationMatrix().allFinite() ||
             !uwfl2::loop_closure::covariance27_is_valid(corrected_covariance))
         {
-            reject("invalid_state_or_covariance");
+            reject();
             return;
         }
 
@@ -2342,7 +2855,7 @@ private:
         }
         if (registered_scan.empty())
         {
-            reject("empty_registered_scan");
+            reject();
             return;
         }
 
@@ -2355,10 +2868,62 @@ private:
         const BoxPointType old_bounds = LocalMap_Points;
         const bool old_initialized = Localmap_Initialized;
         const std::uint64_t old_generation = active_tree_generation_;
+        auto replacement_uncertainty = uwfl2::SonarMapUncertainty(sonar_map_point_budget);
+        std::unique_ptr<uwfl2::SonarRegistrationView> replacement_view;
         try
         {
             auto replacement_tree = candidate->shadow_map->tree;
+            if (sonar_adaptive_registration)
+            {
+                const auto &points = candidate->shadow_map->covariance_points;
+                const auto &covariances = candidate->shadow_map->measurement_covariances;
+                if (!points || !covariances || points->size() != covariances->size() ||
+                    latest_loop_sonar_points_.size() != registered_scan.size())
+                {
+                    reject();
+                    return;
+                }
+                std::vector<uwfl2::SonarReferencePoint> sources;
+                sources.reserve(points->size() + registered_scan.size());
+                for (std::size_t i = 0; i < points->size(); ++i)
+                    sources.push_back({V3D((*points)[i].x, (*points)[i].y, (*points)[i].z), (*covariances)[i]});
+                const M3D rotation = T_local_sonar.rotation.toRotationMatrix();
+                for (std::size_t i = 0; i < registered_scan.size(); ++i)
+                {
+                    const auto &raw = candidate->scan->sonar_points->at(i);
+                    if (!latest_loop_sonar_points_[i].position.isApprox(V3D(raw.x, raw.y, raw.z), 0))
+                    {
+                        reject();
+                        return;
+                    }
+                    sources.push_back({V3D(registered_scan[i].x, registered_scan[i].y, registered_scan[i].z),
+                        rotation * latest_loop_sonar_points_[i].covariance * rotation.transpose()});
+                }
+                if (!replacement_uncertainty.Record(sources))
+                {
+                    reject();
+                    return;
+                }
+            }
             replacement_tree->Add_Points(registered_scan, true);
+            if (sonar_adaptive_registration)
+            {
+                PointVector points;
+                if (!replacement_tree->Snapshot_Points(points, sonar_map_point_budget))
+                {
+                    reject();
+                    return;
+                }
+                std::vector<V3D> positions;
+                for (const auto &point : points) positions.emplace_back(point.x, point.y, point.z);
+                const auto references = replacement_uncertainty.Select(positions);
+                replacement_view = std::make_unique<uwfl2::SonarRegistrationView>(2.0, sonar_map_point_budget, 4096);
+                if (!references || !replacement_view->Replace(sonar_registration_generation + 1, *references))
+                {
+                    reject();
+                    return;
+                }
+            }
             const BoxPointType replacement_bounds = replacement_tree->tree_range();
             auto mutable_covariance = corrected_covariance;
             kf.change_x(corrected_state);
@@ -2374,8 +2939,10 @@ private:
             pos_lid = state_point.pos +
                       state_point.rot * state_point.offset_T_L_I;
             position_last = state_point.pos;
-            loop_closure_->notify_correction_result(
-                true, elapsed_ms(), "committed");
+            loop_closure_->notify_correction_result(true, elapsed_ms());
+            // Unregistered display geometry is not graph-corrected history.
+            // Clear it after the atomic transaction, never reinterpret its anchors.
+            provisional_map_reset_requested_ = true;
             RCLCPP_INFO(
                 this->get_logger(),
                 "Loop covariance posterior committed: position trace %.6g -> %.6g m^2, "
@@ -2403,6 +2970,12 @@ private:
             std::lock_guard<std::mutex> prediction_lock(
                 odometry_prediction_state_mutex_);
             reset_high_rate_odometry_prediction_locked();
+            if (sonar_adaptive_registration)
+            {
+                sonar_map_uncertainty = std::move(replacement_uncertainty);
+                sonar_registration_view = std::move(replacement_view);
+                ++sonar_registration_generation;
+            }
         }
         catch (...)
         {
@@ -2420,7 +2993,7 @@ private:
             std::lock_guard<std::mutex> prediction_lock(
                 odometry_prediction_state_mutex_);
             reset_high_rate_odometry_prediction_locked();
-            reject("transaction_exception_rollback");
+            reject();
         }
     }
 
@@ -2706,48 +3279,6 @@ private:
         loop_markers_pub_->publish(output);
     }
 
-    void inject_loop_callback(
-        const std::shared_ptr<fast_lio::srv::InjectLoop::Request> request,
-        std::shared_ptr<fast_lio::srv::InjectLoop::Response> response)
-    {
-        uwfl2::loop_closure::LoopConstraint constraint;
-        constraint.from_id = request->from_id;
-        constraint.to_id = request->to_id;
-        constraint.T_from_to.translation = {
-            request->relative_pose.position.x,
-            request->relative_pose.position.y,
-            request->relative_pose.position.z};
-        constraint.T_from_to.rotation = Eigen::Quaterniond(
-            request->relative_pose.orientation.w,
-            request->relative_pose.orientation.x,
-            request->relative_pose.orientation.y,
-            request->relative_pose.orientation.z);
-        for (int row = 0; row < 6; ++row)
-        {
-            for (int column = 0; column < 6; ++column)
-            {
-                constraint.covariance(row, column) =
-                    request->covariance[static_cast<std::size_t>(row * 6 + column)];
-            }
-        }
-        constraint.test_override = request->test_override;
-        const auto evaluation = loop_closure_->inject_loop(constraint);
-        response->accepted = evaluation.accepted;
-        response->reason = evaluation.reason;
-        response->graph_version = evaluation.graph_version;
-        response->graph_error_before = evaluation.graph_error_before;
-        response->graph_error_after = evaluation.graph_error_after;
-        response->loop_translation_error_before =
-            evaluation.loop_translation_error_before;
-        response->loop_translation_error_after =
-            evaluation.loop_translation_error_after;
-        response->loop_rotation_error_before_deg =
-            evaluation.loop_rotation_error_before_rad * 180.0 / PI_M;
-        response->loop_rotation_error_after_deg =
-            evaluation.loop_rotation_error_after_rad * 180.0 / PI_M;
-        publish_graph_paths();
-    }
-
     void submit_loop_keyframe(double timestamp)
     {
         if (!loop_closure_ || !feats_down_body)
@@ -2768,10 +3299,23 @@ private:
         const auto pose_covariance =
             uwfl2::loop_closure::extract_graph_pose_covariance(
                 kf.get_P(), state.rot.toRotationMatrix());
+        PointVector supported_points;
+        if (sonar_adaptive_registration)
+        {
+            latest_loop_sonar_points_.clear();
+            for (std::size_t i = 0; i < sonar_scan_points.size(); ++i)
+                if (point_selected_surf[i])
+                {
+                    supported_points.push_back(feats_down_body->points[i]);
+                    latest_loop_sonar_points_.push_back(sonar_scan_points[i]);
+                }
+        }
         ++latest_scan_generation_;
         const auto scan_points = loop_closure_->notify_latest_scan(
             timestamp, latest_scan_generation_, active_tree_generation_,
-            T_local_vehicle, T_vehicle_sonar, feats_down_body->points);
+            T_local_vehicle, T_vehicle_sonar,
+            sonar_adaptive_registration ? supported_points : feats_down_body->points);
+        if (sonar_adaptive_registration && !scan_points) latest_loop_sonar_points_.clear();
         if (!scan_points ||
             !loop_closure_->should_select_keyframe(
                 timestamp, T_local_vehicle, scan_points->size()))
@@ -2791,16 +3335,26 @@ private:
 
     uwfl2::MappingInputBuffers input_buffers_;
     bool aux_reorder_waiting = false;
-#ifdef UWFL2_REPLAY_TRACE
-    uwfl2::ReplayTrace replay_trace_;
-#endif
     double aux_reorder_target_time = -1.0;
     std::chrono::steady_clock::time_point aux_reorder_wait_start;
     AuxiliarySensorFusion aux_fusion_;
     std::string sonar_condition_ = "initializing";
+    uwfl2::SonarAvailability sonar_availability_;
+    uwfl2::SonarInputMetrics sonar_input_metrics_;
+    std::unique_ptr<uwfl2::SonarVoxelController> sonar_voxel_controller_;
+    double last_adaptive_sonar_time_ = -1;
+    double last_missing_diagnostic_time_ = -1.0;
+    double sonar_dx_position_ = 0.0, sonar_dx_rotation_ = 0.0;
+    int last_sonar_geometry_rank_ = 0;
+    std::chrono::steady_clock::time_point sonar_processing_start_ = std::chrono::steady_clock::now();
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr sonar_diagnostics_pub_;
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr navigation_health_pub_;
     rclcpp::TimerBase::SharedPtr navigation_health_timer_;
     uwfl2::ImuObservationCalendar imu_observation_calendar_;
+    uwfl2::SonarRecovery sonar_recovery_;
+    std::deque<ProvisionalScan> provisional_scans_;
+    bool provisional_map_reset_requested_ = false;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr provisional_map_pub_;
     std::size_t imu_observation_count_ = 0;
     std::size_t aux_considered_count_ = 0;
     std::size_t aux_applied_count_ = 0;
@@ -2827,7 +3381,6 @@ private:
     rclcpp::TimerBase::SharedPtr corrected_map_timer_;
     rclcpp::TimerBase::SharedPtr prediction_timer_;
     rclcpp::CallbackGroup::SharedPtr backend_callback_group_;
-    rclcpp::Service<fast_lio::srv::InjectLoop>::SharedPtr loop_inject_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool corrected_map_publish_enabled_ = false;
@@ -2848,6 +3401,9 @@ private:
     double odometry_prediction_acceleration_scale_ = 1.0;
     double odometry_prediction_time_ = -1.0;
     double odometry_prediction_correction_time_ = -1.0;
+    // A queued observation must be applied by the live filter before prediction
+    // continues beyond it; callback bursts are not sensor-free time intervals.
+    double odometry_prediction_observation_time_ = -1.0;
     double next_odometry_prediction_publish_time_ = -1.0;
     double last_odometry_prediction_published_time_ = -1.0;
     std::chrono::steady_clock::time_point odometry_rate_window_wall_time_{};
@@ -2859,6 +3415,7 @@ private:
     bool aux_timeline_started_ = false;
     std::uint64_t active_tree_generation_ = 0;
     std::uint64_t latest_scan_generation_ = 0;
+    std::vector<uwfl2::SonarReferencePoint> latest_loop_sonar_points_;
     MappingScanVector pending_mapping_scans_;
     int effect_feat_num = 0;
     double deltaT, deltaR;

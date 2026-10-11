@@ -19,6 +19,13 @@
 using namespace std;
 using namespace Eigen;
 
+namespace uwfl2
+{
+// Distinct representable ROS acquisition stamps one nanosecond apart must not
+// be merged or treated as already processed at a fractional packet endpoint.
+inline constexpr double kAcquisitionTimeTolerance = 0.5e-9;
+}
+
 #define USE_IKFOM
 
 #define PI_M (3.14159265358)
