@@ -28,7 +28,7 @@ void AuxiliarySensorFusion::declare_parameters(rclcpp::Node &node)
     node.declare_parameter<std::vector<double>>("magnetometer.soft_iron_matrix",
         {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
     node.declare_parameter<double>("magnetometer.covariance", 1849.0);
-    node.declare_parameter<double>("magnetometer.timeout", 0.5);
+    node.declare_parameter<double>("magnetometer.frequency", 4.0);
 }
 
 void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
@@ -82,7 +82,12 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     node.get_parameter_or<bool>("magnetometer.enable", mag_enable_, false);
     node.get_parameter_or<std::string>("magnetometer.topic", mag_topic_, "/auv/imu/magnetic_field");
     node.get_parameter_or<double>("magnetometer.covariance", mag_cov_, 1849.0);
-    node.get_parameter_or<double>("magnetometer.timeout", mag_timeout_, 0.5);
+    double mag_frequency;
+    node.get_parameter_or<double>("magnetometer.frequency", mag_frequency, 4.0);
+    if (!std::isfinite(mag_frequency) || mag_frequency <= 0.0)
+        RCLCPP_WARN(node.get_logger(),
+                    "magnetometer.frequency must be positive. Using 4 Hz.");
+    mag_timeout_ = uwfl2::timeout_from_frequency(mag_frequency, 4.0);
 
     std::vector<double> mag_rotation, hard_iron, soft_iron_diagonal,
         soft_iron_matrix;
@@ -140,7 +145,6 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     }
     dvl_timeout_ = uwfl2::timeout_from_frequency(dvl_frequency_, 15.0);
     pressure_timeout_ = std::max(0.0, pressure_timeout_);
-    mag_timeout_ = std::max(0.0, mag_timeout_);
     dvl_velocity_cov_ = std::max(1e-12, dvl_velocity_cov_);
     dvl_b_init_cov_ = std::max(1e-12, dvl_b_init_cov_);
     pressure_cov_ = std::max(1e-6, pressure_cov_);

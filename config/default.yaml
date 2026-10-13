@@ -43,7 +43,7 @@
     magnetometer:
       enable: true
       topic: /auv/imu/magnetic_field
-      timeout: 0.25
+      frequency: 150.0
       rotation: [0.0, 0.0, 0.0] # RPY degrees
       hard_iron_offset: [119.84, -49.82, 6.39]
       soft_iron: [-1.022, -1.022, -1.0]

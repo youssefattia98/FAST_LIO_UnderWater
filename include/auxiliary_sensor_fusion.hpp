@@ -229,7 +229,7 @@ private:
     double dvl_frequency_ = 15.0;
     double dvl_timeout_ = 0.25;
     double pressure_timeout_ = 0.25;
-    double mag_timeout_ = 0.5;
+    double mag_timeout_ = 0.25;
     double dvl_velocity_cov_ = 4e-4;
     double dvl_b_init_cov_ = 1e-8;
     double pressure_cov_ = 1e4;
