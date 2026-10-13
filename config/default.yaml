@@ -48,16 +48,12 @@
       hard_iron_offset: [119.84, -49.82, 6.39]
       soft_iron: [-1.022, -1.022, -1.0]
       covariance: 800.0
-      alternative_covariance: 200.0
-      calibration_selection_duration: 30.0
     mapping:
       max_iteration: 4
       filter_size_surf: 0.3
       filter_size_map: 0.3
       cube_side_length: 100.0
       world_frame: World
-      world_initial_frame_translation: [-9.668248175874515, -0.37430017392994963, -1.75814490575442]
-      world_initial_frame_rotation: [0.172607108496508, -0.8628150476512, 90.9942339197354] # RPY degrees
       map_file_path: ./test.pcd
     publish:
       corrected_map_enable: true

@@ -40,6 +40,7 @@
 #include <csignal>
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <filesystem>
@@ -50,6 +51,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
 #include "laser_mapping_node.hpp"
@@ -68,6 +70,7 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_msgs/msg/tf_message.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "auxiliary_sensor_fusion.hpp"
@@ -785,9 +788,7 @@ public:
     LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) : Node("laser_mapping", options)
     {
         DeclareParameters();
-        std::vector<double> world_initial_frame_translation;
-        std::vector<double> world_initial_frame_rotation;
-        LoadParameters(world_initial_frame_translation, world_initial_frame_rotation);
+        LoadParameters();
         sonar_availability_.SetFrequency(sonar_frequency_hz);
         InitializeEstimator();
         InitializeLoopClosure();
@@ -802,6 +803,15 @@ public:
         sensor_options.callback_group = sensor_callback_group_;
         rclcpp::SubscriptionOptions lidar_options;
         lidar_options.callback_group = lidar_callback_group_;
+
+        auto tf_qos = rclcpp::QoS(rclcpp::KeepLast(1000));
+        tf_qos.best_effort();
+        initial_pose_tf_sub_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
+            "/tf", tf_qos,
+            [this](tf2_msgs::msg::TFMessage::ConstSharedPtr message) {
+                initial_pose_tf_callback(*message);
+            },
+            sensor_options);
 
         if (lid_topic.empty())
         {
@@ -846,36 +856,6 @@ public:
                 "/uwfl2/provisional_map", rclcpp::QoS(1).transient_local());
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
-
-        if (world_initial_frame_translation.size() != 3)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "mapping.world_initial_frame_translation must have 3 values. Using zero translation.");
-            world_initial_frame_translation = {0.0, 0.0, 0.0};
-        }
-        const Eigen::Matrix3d world_to_camera_init_rot =
-            uwfl2::rotation_from_rpy_degrees(world_initial_frame_rotation);
-        Eigen::Quaterniond world_to_camera_init_quat(world_to_camera_init_rot);
-        world_to_camera_init_quat.normalize();
-
-        geometry_msgs::msg::TransformStamped world_to_camera_init;
-        world_to_camera_init.header.stamp = this->get_clock()->now();
-        world_to_camera_init.header.frame_id = world_frame;
-        world_to_camera_init.child_frame_id = "camera_init";
-        world_to_camera_init.transform.translation.x = world_initial_frame_translation[0];
-        world_to_camera_init.transform.translation.y = world_initial_frame_translation[1];
-        world_to_camera_init.transform.translation.z = world_initial_frame_translation[2];
-        world_to_camera_init.transform.rotation.x = world_to_camera_init_quat.x();
-        world_to_camera_init.transform.rotation.y = world_to_camera_init_quat.y();
-        world_to_camera_init.transform.rotation.z = world_to_camera_init_quat.z();
-        world_to_camera_init.transform.rotation.w = world_to_camera_init_quat.w();
-        static_tf_broadcaster_->sendTransform(world_to_camera_init);
-
-        // Inform the pressure model how camera_init sits in World, so pressure
-        // constrains true World-vertical depth rather than tilted local z.
-        aux_fusion_.set_camera_init_pose_in_world(
-            V3D(world_initial_frame_translation[0], world_initial_frame_translation[1], world_initial_frame_translation[2]),
-            world_to_camera_init_rot);
 
         //------------------------------------------------------------------------------------------------------
         // Drive processing from wall time so rosbag replay can drain buffered
@@ -926,9 +906,251 @@ public:
 
 private:
 
+    static std::string normalized_frame_id(std::string frame)
+    {
+        while (!frame.empty() && frame.front() == '/') frame.erase(frame.begin());
+        return frame;
+    }
+
+    void note_initial_pose_input_locked(double acquisition_time)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (!initial_pose_wait_started_)
+        {
+            initial_pose_wait_started_ = true;
+            initial_pose_wait_start_wall_ = now;
+            initial_pose_first_sensor_time_ = acquisition_time;
+            initial_pose_latest_sensor_time_ = acquisition_time;
+        }
+        else if (std::isfinite(acquisition_time))
+        {
+            if (!std::isfinite(initial_pose_first_sensor_time_))
+                initial_pose_first_sensor_time_ = acquisition_time;
+            initial_pose_latest_sensor_time_ = std::max(
+                initial_pose_latest_sensor_time_, acquisition_time);
+        }
+    }
+
+    void note_initial_pose_input(double acquisition_time)
+    {
+        std::lock_guard<std::mutex> lock(initial_pose_mutex_);
+        note_initial_pose_input_locked(acquisition_time);
+    }
+
+    void finalize_initial_world_pose_locked(
+        const V3D &translation, const Eigen::Quaterniond &orientation,
+        bool fallback)
+    {
+        Eigen::Quaterniond normalized = orientation;
+        normalized.normalize();
+
+        geometry_msgs::msg::TransformStamped world_to_camera_init;
+        world_to_camera_init.header.stamp = this->get_clock()->now();
+        world_to_camera_init.header.frame_id = world_frame;
+        world_to_camera_init.child_frame_id = "camera_init";
+        world_to_camera_init.transform.translation.x = translation.x();
+        world_to_camera_init.transform.translation.y = translation.y();
+        world_to_camera_init.transform.translation.z = translation.z();
+        world_to_camera_init.transform.rotation.x = normalized.x();
+        world_to_camera_init.transform.rotation.y = normalized.y();
+        world_to_camera_init.transform.rotation.z = normalized.z();
+        world_to_camera_init.transform.rotation.w = normalized.w();
+        static_tf_broadcaster_->sendTransform(world_to_camera_init);
+
+        // Pressure is evaluated in World vertical, so it needs the same
+        // camera_init pose selected for the static transform.
+        aux_fusion_.set_camera_init_pose_in_world(
+            translation, normalized.toRotationMatrix());
+        initial_world_pose_ready_ = true;
+
+        if (fallback)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "No reliable 20-distinct-sample '%s' -> 'base_link' TF "
+                        "initialization was available. Using an identity "
+                        "World -> camera_init pose.",
+                        world_frame.c_str());
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "Initialized World -> camera_init from %zu '%s' -> "
+                        "'base_link' TF samples: translation [%.6f, %.6f, %.6f], "
+                        "quaternion [%.6f, %.6f, %.6f, %.6f].",
+                        initial_pose_sample_count_, world_frame.c_str(),
+                        translation.x(), translation.y(), translation.z(),
+                        normalized.x(), normalized.y(), normalized.z(), normalized.w());
+        }
+    }
+
+    void initial_pose_tf_callback(const tf2_msgs::msg::TFMessage &message)
+    {
+        std::lock_guard<std::mutex> lock(initial_pose_mutex_);
+        if (initial_world_pose_ready_) return;
+
+        for (const auto &transform : message.transforms)
+        {
+            const double stamp = get_time_sec(transform.header.stamp);
+            note_initial_pose_input_locked(stamp);
+            if (normalized_frame_id(transform.header.frame_id) !=
+                    normalized_frame_id(world_frame) ||
+                normalized_frame_id(transform.child_frame_id) != "base_link")
+                continue;
+
+            const auto &p = transform.transform.translation;
+            const auto &r = transform.transform.rotation;
+            const V3D translation(p.x, p.y, p.z);
+            Eigen::Quaterniond orientation(r.w, r.x, r.y, r.z);
+            if (!translation.allFinite() || !orientation.coeffs().allFinite() ||
+                orientation.norm() <= 1e-12)
+                continue;
+
+            orientation.normalize();
+            ++initial_pose_raw_sample_count_;
+
+            if (!initial_pose_samples_.empty())
+            {
+                const auto &last = initial_pose_samples_.back();
+                const V3D last_translation(last[0], last[1], last[2]);
+                Eigen::Quaterniond last_orientation(
+                    last[6], last[3], last[4], last[5]);
+                last_orientation.normalize();
+                const double angular_distance = 2.0 * std::acos(std::clamp(
+                    std::abs(last_orientation.dot(orientation)), 0.0, 1.0));
+                if ((translation - last_translation).norm() <=
+                        kInitialPoseDuplicateTranslation &&
+                    angular_distance <= kInitialPoseDuplicateAngle)
+                {
+                    ++initial_pose_repeated_sample_count_;
+                    continue;
+                }
+            }
+
+            initial_pose_samples_.push_back({
+                translation.x(), translation.y(), translation.z(),
+                orientation.x(), orientation.y(), orientation.z(), orientation.w()});
+            if (initial_pose_samples_.size() < kInitialPoseSampleCount) continue;
+
+            const std::size_t sample_count = initial_pose_samples_.size();
+            std::vector<std::size_t> best_inliers;
+            double best_cost = std::numeric_limits<double>::infinity();
+            for (std::size_t candidate = 0; candidate < sample_count; ++candidate)
+            {
+                const auto &candidate_sample = initial_pose_samples_[candidate];
+                const V3D candidate_translation(
+                    candidate_sample[0], candidate_sample[1], candidate_sample[2]);
+                const Eigen::Quaterniond candidate_orientation(
+                    candidate_sample[6], candidate_sample[3],
+                    candidate_sample[4], candidate_sample[5]);
+                std::vector<std::size_t> inliers;
+                double cost = 0.0;
+                for (std::size_t index = 0; index < sample_count; ++index)
+                {
+                    const auto &sample = initial_pose_samples_[index];
+                    const V3D sample_translation(sample[0], sample[1], sample[2]);
+                    const Eigen::Quaterniond sample_orientation(
+                        sample[6], sample[3], sample[4], sample[5]);
+                    const double translation_distance =
+                        (sample_translation - candidate_translation).norm();
+                    const double angular_distance = 2.0 * std::acos(std::clamp(
+                        std::abs(candidate_orientation.dot(sample_orientation)),
+                        0.0, 1.0));
+                    if (translation_distance <= kInitialPoseInlierTranslation &&
+                        angular_distance <= kInitialPoseInlierAngle)
+                    {
+                        inliers.push_back(index);
+                        cost += translation_distance / kInitialPoseInlierTranslation +
+                                angular_distance / kInitialPoseInlierAngle;
+                    }
+                }
+                if (inliers.size() > best_inliers.size() ||
+                    (inliers.size() == best_inliers.size() && cost < best_cost))
+                {
+                    best_inliers = std::move(inliers);
+                    best_cost = cost;
+                }
+            }
+
+            const std::size_t minimum_consensus =
+                (7 * sample_count + 9) / 10;  // ceil(70 percent)
+            if (best_inliers.size() < minimum_consensus) continue;
+
+            V3D robust_translation = V3D::Zero();
+            Eigen::Matrix4d quaternion_outer = Eigen::Matrix4d::Zero();
+            for (const std::size_t index : best_inliers)
+            {
+                const auto &sample = initial_pose_samples_[index];
+                robust_translation += V3D(sample[0], sample[1], sample[2]);
+                const Eigen::Vector4d quaternion(
+                    sample[3], sample[4], sample[5], sample[6]);
+                quaternion_outer += quaternion * quaternion.transpose();
+            }
+            robust_translation /= static_cast<double>(best_inliers.size());
+
+            // Weiszfeld iterations form a true 3-D geometric median instead
+            // of independently mixing x/y/z component medians.
+            for (int iteration = 0; iteration < 20; ++iteration)
+            {
+                V3D weighted_sum = V3D::Zero();
+                double weight_sum = 0.0;
+                for (const std::size_t index : best_inliers)
+                {
+                    const auto &sample = initial_pose_samples_[index];
+                    const V3D point(sample[0], sample[1], sample[2]);
+                    const double distance = (point - robust_translation).norm();
+                    const double weight = 1.0 / std::max(distance, 1e-6);
+                    weighted_sum += weight * point;
+                    weight_sum += weight;
+                }
+                const V3D next = weighted_sum / weight_sum;
+                if ((next - robust_translation).norm() < 1e-9) break;
+                robust_translation = next;
+            }
+
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> solver(
+                quaternion_outer);
+            if (solver.info() != Eigen::Success) continue;
+            Eigen::Quaterniond mean_orientation;
+            mean_orientation.coeffs() = solver.eigenvectors().col(3);
+            initial_pose_sample_count_ = best_inliers.size();
+            RCLCPP_INFO(this->get_logger(),
+                        "Initial TF filtering: %zu raw, %zu repeated, %zu "
+                        "distinct, %zu consensus inliers.",
+                        initial_pose_raw_sample_count_,
+                        initial_pose_repeated_sample_count_, sample_count,
+                        best_inliers.size());
+            finalize_initial_world_pose_locked(
+                robust_translation, mean_orientation, false);
+            return;
+        }
+    }
+
+    bool ensure_initial_world_pose()
+    {
+        std::lock_guard<std::mutex> lock(initial_pose_mutex_);
+        if (initial_world_pose_ready_) return true;
+        if (!initial_pose_wait_started_) return false;
+
+        const double sensor_elapsed =
+            std::isfinite(initial_pose_first_sensor_time_) &&
+                    std::isfinite(initial_pose_latest_sensor_time_)
+                ? initial_pose_latest_sensor_time_ - initial_pose_first_sensor_time_
+                : 0.0;
+        const double wall_elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - initial_pose_wait_start_wall_).count();
+        if (sensor_elapsed < kInitialPoseWaitSeconds &&
+            wall_elapsed < kInitialPoseWaitSeconds)
+            return false;
+
+        finalize_initial_world_pose_locked(
+            V3D::Zero(), Eigen::Quaterniond::Identity(), true);
+        return true;
+    }
+
     void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     {
         const double cur_time = get_time_sec(msg->header.stamp);
+        note_initial_pose_input(cur_time);
         PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
         // Conversion remains outside the shared input lock.
         p_pre->process(msg, ptr);
@@ -944,6 +1166,7 @@ private:
 
     void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     {
+        note_initial_pose_input(get_time_sec(msg_in->header.stamp));
         sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
         input_buffers_.PushImu(msg);
     }
@@ -1187,18 +1410,13 @@ private:
         this->declare_parameter<double>("mapping.cube_side_length", 200.0);
         this->declare_parameter<string>("mapping.map_file_path", "");
         this->declare_parameter<string>("mapping.world_frame", "world");
-        this->declare_parameter<vector<double>>("mapping.world_initial_frame_translation",
-                                                {0.0, 0.0, 0.0});
-        this->declare_parameter<vector<double>>("mapping.world_initial_frame_rotation",
-                                                {0.0, 0.0, 0.0});
         this->declare_parameter<bool>("loop_closure.enable", false);
         this->declare_parameter<string>("loop_closure.profile", "balanced");
         aux_fusion_.declare_parameters(*this);
 
     }
 
-    void LoadParameters(std::vector<double> &world_initial_frame_translation,
-                        std::vector<double> &world_initial_frame_rotation)
+    void LoadParameters()
     {
         this->get_parameter_or<bool>("publish.corrected_map_enable",
                                      corrected_map_publish_enabled_, false);
@@ -1265,12 +1483,6 @@ private:
         this->get_parameter_or<double>("mapping.cube_side_length", cube_len, 200.0);
         this->get_parameter_or<string>("mapping.map_file_path", map_file_path, "");
         this->get_parameter_or<string>("mapping.world_frame", world_frame, "world");
-        this->get_parameter_or<vector<double>>("mapping.world_initial_frame_translation",
-                            world_initial_frame_translation,
-                            {0.0, 0.0, 0.0});
-        this->get_parameter_or<vector<double>>("mapping.world_initial_frame_rotation",
-                            world_initial_frame_rotation,
-                            {0.0, 0.0, 0.0});
         LASER_POINT_COV_XY = std::max(1e-12, LASER_POINT_COV_XY);
         LASER_POINT_COV_Z = std::max(1e-12, LASER_POINT_COV_Z);
         imu_orientation_cov = std::max(1e-12, imu_orientation_cov);
@@ -1901,6 +2113,7 @@ private:
 
     void timer_callback()
     {
+        if (!ensure_initial_world_pose()) return;
         try_commit_loop_correction();
         if (provisional_map_reset_requested_)
         {
@@ -3406,6 +3619,7 @@ private:
         loop_markers_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
+    rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr initial_pose_tf_sub_;
     rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
     rclcpp::CallbackGroup::SharedPtr lidar_callback_group_;
     rclcpp::CallbackGroup::SharedPtr processing_callback_group_;
@@ -3413,6 +3627,25 @@ private:
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
+    static constexpr std::size_t kInitialPoseSampleCount = 20;
+    static constexpr double kInitialPoseWaitSeconds = 5.0;
+    static constexpr double kInitialPoseDuplicateTranslation = 1e-7;
+    static constexpr double kInitialPoseDuplicateAngle = 1e-6;
+    static constexpr double kInitialPoseInlierTranslation = 1.0;
+    static constexpr double kInitialPoseInlierAngle =
+        0.2617993877991494;  // 15 degrees
+    std::mutex initial_pose_mutex_;
+    bool initial_world_pose_ready_ = false;
+    bool initial_pose_wait_started_ = false;
+    std::chrono::steady_clock::time_point initial_pose_wait_start_wall_{};
+    double initial_pose_first_sensor_time_ =
+        std::numeric_limits<double>::quiet_NaN();
+    double initial_pose_latest_sensor_time_ =
+        std::numeric_limits<double>::quiet_NaN();
+    std::size_t initial_pose_sample_count_ = 0;
+    std::size_t initial_pose_raw_sample_count_ = 0;
+    std::size_t initial_pose_repeated_sample_count_ = 0;
+    std::vector<std::array<double, 7>> initial_pose_samples_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr corrected_map_timer_;
     rclcpp::TimerBase::SharedPtr prediction_timer_;

@@ -68,6 +68,7 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
@@ -82,6 +83,7 @@ set(dependencies
   std_srvs
   visualization_msgs
   tf2_ros
+  tf2_msgs
   pcl_conversions
 )
 

@@ -3,12 +3,7 @@
   <name>fast_lio</name>
   <version>0.0.0</version>
 
-  <description>
-    This is a modified version of LOAM which is original algorithm
-    is described in the following paper:
-    J. Zhang and S. Singh. LOAM: Lidar Odometry and Mapping in Real-time.
-    Robotics: Science and Systems Conference (RSS). Berkeley, CA, July 2014.
-  </description>
+  <description>Underwater multi-sensor odometry and mapping based on FAST-LIO2.</description>
 
   <maintainer email="maintainer@example.com">claydergc</maintainer>
 
@@ -29,6 +24,7 @@
   <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>tf2_msgs</depend>
   <depend>pcl_conversions</depend>
   <depend>eigen</depend>
   <depend>libpcl-all-dev</depend>
