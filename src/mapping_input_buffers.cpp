@@ -70,7 +70,7 @@ double MappingInputBuffers::PropagationWatermark(
         ? latest_imu_time : latest_imu_time - reorder_seconds;
 }
 
-void MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp)
+bool MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp)
 {
     std::lock_guard<std::mutex> lock(mtx_buffer);
     if (!sonar_processing)
@@ -79,14 +79,15 @@ void MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double tim
     }
     sonar_processing = false;
     ++sonar_received;
+    if (!std::isfinite(timestamp) || timestamp < 0.0 ||
+        (!is_first_lidar &&
+         timestamp <= last_timestamp_lidar + kAcquisitionTimeTolerance))
+    {
+        ++sonar_nonmonotonic_dropped;
+        return false;
+    }
     max_sonar_acquisition_lag = std::max(
         max_sonar_acquisition_lag, last_timestamp_imu - timestamp);
-    if (!is_first_lidar && timestamp < last_timestamp_lidar)
-    {
-        lidar_buffer.clear();
-        time_buffer.clear();
-        lidar_pushed = false;
-    }
     if (is_first_lidar)
     {
         is_first_lidar = false;
@@ -94,6 +95,7 @@ void MappingInputBuffers::PushSonar(const PointCloudXYZI::Ptr &cloud, double tim
     lidar_buffer.push_back(cloud);
     time_buffer.push_back(timestamp);
     last_timestamp_lidar = timestamp;
+    return true;
 }
 
 void MappingInputBuffers::PushImu(const sensor_msgs::msg::Imu::ConstSharedPtr &message)

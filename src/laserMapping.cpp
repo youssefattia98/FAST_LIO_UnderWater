@@ -109,6 +109,7 @@ string map_file_path, lid_topic, imu_topic, world_frame;
 double gyroscope_covariance = 0.1, accelerometer_covariance = 0.1;
 double gyroscope_bias_covariance = 0.0001, accelerometer_bias_covariance = 0.0001;
 double init_gyroscope_bias_covariance = 0.0001, init_accelerometer_bias_covariance = 0.001;
+vector<double> initial_gyroscope_bias;
 double init_grav_cov = 0.00001;
 double init_b_dvl_cov = 1e-8, init_b_pressure_cov = 1e4;
 double imu_orientation_cov = 3.0461742e-6;  // (0.1 deg)^2
@@ -931,7 +932,14 @@ private:
         PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
         // Conversion remains outside the shared input lock.
         p_pre->process(msg, ptr);
-        input_buffers_.PushSonar(ptr, cur_time);
+        if (!input_buffers_.PushSonar(ptr, cur_time))
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Dropped sonar scan with invalid, duplicate, or out-of-order "
+                "acquisition timestamp %.9f.",
+                cur_time);
+        }
     }
 
     void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
@@ -1164,6 +1172,8 @@ private:
         this->declare_parameter<double>("imu.accelerometer_covariance", 0.1);
         this->declare_parameter<double>("imu.gyroscope_bias_covariance", 0.0001);
         this->declare_parameter<double>("imu.accelerometer_bias_covariance", 0.0001);
+        this->declare_parameter<vector<double>>(
+            "imu.initial_gyroscope_bias", vector<double>{});
         this->declare_parameter<double>("imu.init_gyroscope_bias_covariance", 0.0001);
         this->declare_parameter<double>("imu.init_accelerometer_bias_covariance", 0.001);
         this->declare_parameter<double>("imu.init_gravity_covariance", 0.00001);
@@ -1225,6 +1235,17 @@ private:
         this->get_parameter_or<double>("imu.accelerometer_covariance", accelerometer_covariance, 0.1);
         this->get_parameter_or<double>("imu.gyroscope_bias_covariance", gyroscope_bias_covariance, 0.0001);
         this->get_parameter_or<double>("imu.accelerometer_bias_covariance", accelerometer_bias_covariance, 0.0001);
+        this->get_parameter_or<vector<double>>(
+            "imu.initial_gyroscope_bias", initial_gyroscope_bias, {});
+        if (!initial_gyroscope_bias.empty() &&
+            (initial_gyroscope_bias.size() != 3 ||
+             !std::all_of(initial_gyroscope_bias.begin(),
+                          initial_gyroscope_bias.end(),
+                          [](double value) { return std::isfinite(value); })))
+        {
+            throw std::invalid_argument(
+                "imu.initial_gyroscope_bias must be empty or contain 3 finite values");
+        }
         this->get_parameter_or<double>("imu.init_gyroscope_bias_covariance", init_gyroscope_bias_covariance, 0.0001);
         this->get_parameter_or<double>("imu.init_accelerometer_bias_covariance", init_accelerometer_bias_covariance, 0.001);
         this->get_parameter_or<double>("imu.init_gravity_covariance", init_grav_cov,
@@ -1315,6 +1336,16 @@ private:
         p_imu->set_acc_cov(V3D(accelerometer_covariance, accelerometer_covariance, accelerometer_covariance));
         p_imu->set_gyr_bias_cov(V3D(gyroscope_bias_covariance, gyroscope_bias_covariance, gyroscope_bias_covariance));
         p_imu->set_acc_bias_cov(V3D(accelerometer_bias_covariance, accelerometer_bias_covariance, accelerometer_bias_covariance));
+        if (initial_gyroscope_bias.size() == 3)
+        {
+            const V3D configured_bias(initial_gyroscope_bias[0],
+                                      initial_gyroscope_bias[1],
+                                      initial_gyroscope_bias[2]);
+            p_imu->set_initial_gyroscope_bias(configured_bias);
+            RCLCPP_INFO(this->get_logger(),
+                        "Using fixed initial gyroscope bias [%.6f, %.6f, %.6f] rad/s.",
+                        configured_bias.x(), configured_bias.y(), configured_bias.z());
+        }
         p_imu->set_initial_cov(V3D(init_gyroscope_bias_covariance, init_gyroscope_bias_covariance, init_gyroscope_bias_covariance),
                                V3D(init_accelerometer_bias_covariance, init_accelerometer_bias_covariance, init_accelerometer_bias_covariance),
                                init_grav_cov);
@@ -1662,7 +1693,8 @@ private:
         status.name = "uwfl2/navigation";
         status.hardware_id = "uwfl2";
         double imu_stamp, sonar_stamp, scan_stamp, frontier, sonar_lag, sonar_late_age;
-        std::size_t sonar_received, sonar_late_dropped;
+        std::size_t sonar_received, sonar_late_dropped,
+                    sonar_nonmonotonic_dropped;
         uwfl2::MappingInputBuffers::Clock::time_point imu_receipt;
         {
             std::lock_guard<std::mutex> lock(input_buffers_.mtx_buffer);
@@ -1673,6 +1705,8 @@ private:
             imu_receipt = input_buffers_.last_imu_receipt;
             sonar_received = input_buffers_.sonar_received;
             sonar_late_dropped = input_buffers_.sonar_late_dropped;
+            sonar_nonmonotonic_dropped =
+                input_buffers_.sonar_nonmonotonic_dropped;
             sonar_lag = input_buffers_.max_sonar_acquisition_lag;
             sonar_late_age = input_buffers_.max_sonar_late_age;
         }
@@ -1728,6 +1762,8 @@ private:
         add("aux_late_dropped", std::to_string(late_aux_count_));
         add("sonar_received", std::to_string(sonar_received));
         add("sonar_late_dropped", std::to_string(sonar_late_dropped));
+        add("sonar_nonmonotonic_dropped",
+            std::to_string(sonar_nonmonotonic_dropped));
         add("maximum_sonar_acquisition_lag_seconds", std::to_string(sonar_lag));
         add("maximum_sonar_late_age_seconds", std::to_string(sonar_late_age));
         if (initialized)

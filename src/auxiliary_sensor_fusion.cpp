@@ -23,6 +23,8 @@ void AuxiliarySensorFusion::declare_parameters(rclcpp::Node &node)
     node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
     node.declare_parameter<std::vector<double>>("magnetometer.rotation", {0.0, 0.0, 0.0});
     node.declare_parameter<std::vector<double>>("magnetometer.hard_iron_offset", {0.0, 0.0, 0.0});
+    node.declare_parameter<std::vector<double>>(
+        "magnetometer.soft_iron", std::vector<double>{});
     node.declare_parameter<std::vector<double>>("magnetometer.soft_iron_matrix",
         {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
     node.declare_parameter<double>("magnetometer.covariance", 1849.0);
@@ -82,10 +84,14 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     node.get_parameter_or<double>("magnetometer.covariance", mag_cov_, 1849.0);
     node.get_parameter_or<double>("magnetometer.timeout", mag_timeout_, 0.5);
 
-    std::vector<double> mag_rotation, hard_iron, soft_iron;
+    std::vector<double> mag_rotation, hard_iron, soft_iron_diagonal,
+        soft_iron_matrix;
     node.get_parameter_or<std::vector<double>>("magnetometer.rotation", mag_rotation, {0.0, 0.0, 0.0});
     node.get_parameter_or<std::vector<double>>("magnetometer.hard_iron_offset", hard_iron, {0., 0., 0.});
-    node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron_matrix", soft_iron,
+    node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron",
+        soft_iron_diagonal, {});
+    node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron_matrix",
+        soft_iron_matrix,
         {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
 
     mag_R_BM_ = uwfl2::rotation_from_rpy_degrees(mag_rotation);
@@ -95,14 +101,34 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     else
         mag_hard_iron_.setZero();
 
-    if (soft_iron.size() == 9)
+    const auto finite_values = [](const std::vector<double> &values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](double value) { return std::isfinite(value); });
+    };
+    if (soft_iron_diagonal.size() == 3 && finite_values(soft_iron_diagonal))
     {
-        mag_soft_iron_ << soft_iron[0], soft_iron[1], soft_iron[2],
-                          soft_iron[3], soft_iron[4], soft_iron[5],
-                          soft_iron[6], soft_iron[7], soft_iron[8];
+        mag_soft_iron_.setZero();
+        mag_soft_iron_.diagonal() << soft_iron_diagonal[0],
+            soft_iron_diagonal[1], soft_iron_diagonal[2];
+        RCLCPP_INFO(node.get_logger(),
+                    "Using magnetometer.soft_iron as a diagonal 3x3 matrix.");
+    }
+    else if (soft_iron_matrix.size() == 9 && finite_values(soft_iron_matrix))
+    {
+        if (!soft_iron_diagonal.empty())
+        {
+            RCLCPP_WARN(node.get_logger(),
+                        "magnetometer.soft_iron must contain 3 finite values. "
+                        "Using magnetometer.soft_iron_matrix instead.");
+        }
+        mag_soft_iron_ << soft_iron_matrix[0], soft_iron_matrix[1], soft_iron_matrix[2],
+                          soft_iron_matrix[3], soft_iron_matrix[4], soft_iron_matrix[5],
+                          soft_iron_matrix[6], soft_iron_matrix[7], soft_iron_matrix[8];
     }
     else
     {
+        RCLCPP_WARN(node.get_logger(),
+                    "Magnetometer soft-iron calibration is invalid. Using identity.");
         mag_soft_iron_.setIdentity();
     }
 

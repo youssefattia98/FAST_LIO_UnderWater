@@ -22,7 +22,10 @@ struct MappingInputBuffers
     bool NavigationPacketPrecedesSonar(double packet_duration,
                                       double imu_period, double imu_timeout,
                                       double sonar_timeout) const;
-    void PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp);
+    // Returns false when the acquisition timestamp is invalid, duplicated, or
+    // older than the latest accepted sonar scan. Rejected scans never enter
+    // the estimator queues.
+    bool PushSonar(const PointCloudXYZI::Ptr &cloud, double timestamp);
     void PushImu(const sensor_msgs::msg::Imu::ConstSharedPtr &message);
     std::vector<sensor_msgs::msg::Imu::ConstSharedPtr> PredictionSamples(
         double prediction_time, double correction_time);
@@ -41,6 +44,7 @@ struct MappingInputBuffers
     int scan_num = 0;
     std::size_t sonar_received = 0;
     std::size_t sonar_late_dropped = 0;
+    std::size_t sonar_nonmonotonic_dropped = 0;
     double max_sonar_acquisition_lag = 0.0;
     double max_sonar_late_age = 0.0;
     bool lidar_pushed = false;

@@ -113,6 +113,14 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 
+void ImuProcess::set_initial_gyroscope_bias(const V3D &bias)
+{
+  if (!bias.allFinite())
+    throw std::invalid_argument("Initial gyroscope bias must contain finite values");
+  initial_gyroscope_bias_ = bias;
+  use_initial_gyroscope_bias_ = true;
+}
+
 void ImuProcess::set_initial_cov(const V3D &b_g, const V3D &b_a, double grav)
 {
   init_cov_bias_gyr = b_g;
@@ -222,7 +230,9 @@ void ImuProcess::IMU_init(
   init_state.grav = S2(- mean_acc / mean_acc.norm() * gravity_m_s2_);
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
-  init_state.bg  = mean_gyr;
+  init_state.bg = use_initial_gyroscope_bias_
+                      ? initial_gyroscope_bias_
+                      : mean_gyr;
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
   kf_state.change_x(init_state);

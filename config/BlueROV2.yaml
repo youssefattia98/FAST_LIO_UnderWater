@@ -7,16 +7,17 @@
       rotation: [0.0, 6.0, 0.0] # RPY degrees
       max_range: 15.0
       min_range: 0.2
-      xy_covariance: 0.1
+      xy_covariance: 0.2
       z_covariance: 0.2
     imu:
       topic: /auv/imu/data_raw
       frequency: 200.0
-      initial_gravity_estimate: 9.81
+      initial_gravity_estimate: 9.8
       gyroscope_covariance: 5.5e-06
       accelerometer_covariance: 0.1
-      gyroscope_bias_covariance: 1.0e-06
-      accelerometer_bias_covariance: 0.2
+      gyroscope_bias_covariance: 0.000011
+      accelerometer_bias_covariance: 0.0001
+      initial_gyroscope_bias: [0.0, 0.0, 0.0]
       init_gyroscope_bias_covariance: 0.0001
       init_accelerometer_bias_covariance: 0.001
       init_gravity_covariance: 1.0e-05
@@ -29,8 +30,8 @@
       frequency: 15.0
       translation: [-0.079, -0.09691, -0.25938]
       rotation: [0.0, 0.0, 0.0] # RPY degrees
-      covariance: 0.0001
-      init_covariance: 1.0e-08
+      covariance: 0.0025
+      init_covariance: 1.0e-10
     pressure:
       enable: true
       topic: /auv/pressure/scaled2
@@ -44,17 +45,19 @@
       topic: /auv/imu/magnetic_field
       timeout: 0.25
       rotation: [0.0, 0.0, 0.0] # RPY degrees
-      hard_iron_offset: [-0.3, -19.96, 86.7]
-      soft_iron_matrix: [-1.257623, 0.0, 0.0, 0.0, -1.257623, 0.0, 0.0, 0.0, -1.0]
-      covariance: 1.106168696543515
+      hard_iron_offset: [119.84, -49.82, 6.39]
+      soft_iron: [-1.022, -1.022, -1.0]
+      covariance: 800.0
+      alternative_covariance: 200.0
+      calibration_selection_duration: 30.0
     mapping:
       max_iteration: 4
       filter_size_surf: 0.3
       filter_size_map: 0.3
       cube_side_length: 100.0
       world_frame: World
-      world_initial_frame_translation: [-42.85783463854434, -61.44716108400654, -6.793090506770439]
-      world_initial_frame_rotation: [0.980798775357985, -6.54814000113391, 117.986490532663] # RPY degrees
+      world_initial_frame_translation: [-9.668248175874515, -0.37430017392994963, -1.75814490575442]
+      world_initial_frame_rotation: [0.172607108496508, -0.8628150476512, 90.9942339197354] # RPY degrees
       map_file_path: ./test.pcd
     publish:
       corrected_map_enable: true

@@ -56,6 +56,7 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  void set_initial_gyroscope_bias(const V3D &bias);
   void set_initial_cov(const V3D &b_g, const V3D &b_a, double grav);
   // Initial covariance of the DVL and pressure bias states.
   void set_initial_aux_cov(const V3D &b_dvl, double b_pressure);
@@ -119,6 +120,8 @@ class ImuProcess
   V3D Lidar_T_wrt_IMU;
   V3D mean_acc;
   V3D mean_gyr;
+  V3D initial_gyroscope_bias_ = V3D::Zero();
+  bool use_initial_gyroscope_bias_ = false;
   V3D angvel_last;
   V3D acc_s_last;
   double gravity_m_s2_;
