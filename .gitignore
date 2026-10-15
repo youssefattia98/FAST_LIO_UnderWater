@@ -15,5 +15,6 @@ test/*
 .agents/
 .codex/
 tools/*
+tuning/*
 __pycache__/
 *.pyc

@@ -50,6 +50,7 @@ loop_closure:
     maximum_keypoints: 80
     triangle_neighbor_count: 8
     maximum_triangles: 1000
+    maximum_references_per_bucket: 8
     triangle_minimum_side_m: 0.4
     triangle_maximum_side_m: 12.0
     triangle_side_resolution_m: 0.20
@@ -57,6 +58,8 @@ loop_closure:
     binary_similarity_minimum: 0.25
     minimum_triangle_matches: 5
     maximum_candidates: 8
+    maximum_matches_per_candidate: 256
+    maximum_ransac_hypotheses: 64
     minimum_ransac_inliers: 5
     ransac_vertex_threshold_m: 0.35
     geometric_overlap_distance_m: 0.35

@@ -7,31 +7,37 @@
       rotation: [0.0, 6.0, 0.0] # RPY degrees
       max_range: 15.0
       min_range: 0.2
-      xy_covariance: 0.2
-      z_covariance: 0.2
+      xy_covariance: 0.2231011450761961
+      z_covariance: 0.2231011450761961
     imu:
       topic: /auv/imu/data_raw
       frequency: 200.0
-      initial_gravity_estimate: 9.8
-      gyroscope_covariance: 5.5e-06
-      accelerometer_covariance: 0.1
-      gyroscope_bias_covariance: 0.000011
-      accelerometer_bias_covariance: 0.0001
-      initial_gyroscope_bias: [0.0, 0.0, 0.0]
-      init_gyroscope_bias_covariance: 0.0001
-      init_accelerometer_bias_covariance: 0.001
       init_gravity_covariance: 1.0e-05
-      orientation_covariance: 3.0461742e-06
+      init_position_covariance: 1.0e-06
+      init_attitude_covariance: 1.0e-06
+      initial_gravity_estimate: 9.8
+
+      initial_gyroscope_bias: [0.0, 0.0, 0.0]
+      gyroscope_covariance: 0.0027757901707411905
+      gyroscope_bias_covariance: 6.835184767375685e-07
+      init_gyroscope_bias_covariance: 0.0001
+
+      accelerometer_covariance: 0.9234966307904593
+      accelerometer_bias_covariance: 0.006826460354750434
+      init_accelerometer_bias_covariance: 0.001
       accel_attitude_covariance: 0.0012184697
       accel_attitude_norm_gate: 2.0
+
+      orientation_covariance: 3.0461742e-06
+
     dvl:
       enable: true
       topic: /auv/dvl
       frequency: 15.0
       translation: [-0.079, -0.09691, -0.25938]
       rotation: [0.0, 0.0, 0.0] # RPY degrees
-      covariance: 0.0025
-      init_covariance: 1.0e-10
+      covariance: 0.01
+      init_covariance: 1.0e-09
     pressure:
       enable: true
       topic: /auv/pressure/scaled2
@@ -47,9 +53,7 @@
       rotation: [0.0, 0.0, 0.0] # RPY degrees
       hard_iron_offset: [119.84, -49.82, 6.39]
       soft_iron: [-1.022, -1.022, -1.0]
-      covariance: 800.0
-      alternative_covariance: 200.0
-      calibration_selection_duration: 30.0
+      covariance: 3200.0
     mapping:
       max_iteration: 4
       filter_size_surf: 0.3
