@@ -93,6 +93,8 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
     const YAML::Node registration = config["registration"];
     result.registration.maximum_iterations =
         required<int>(registration, "maximum_iterations");
+    result.registration.maximum_refresh_attempts =
+        required_size(registration, "maximum_refresh_attempts");
     result.registration.minimum_effective_points =
         required_size(registration, "minimum_effective_points");
     result.registration.maximum_neighbor_distance_m =

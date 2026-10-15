@@ -2999,8 +2999,9 @@ private:
                        std::chrono::steady_clock::now() - commit_started)
                 .count();
         };
-        const auto reject = [&]() {
-            loop_closure_->notify_correction_result(false, elapsed_ms());
+        const auto reject = [&](const std::string &reason) {
+            loop_closure_->notify_correction_result(
+                false, elapsed_ms(), reason);
         };
         if (!candidate->shadow_map || !candidate->registration ||
             !candidate->scan || !candidate->shadow_map->valid ||
@@ -3008,7 +3009,7 @@ private:
             candidate->registration->scan_generation !=
                 candidate->scan->scan_generation)
         {
-            reject();
+            reject("invalid_pending_correction");
             return;
         }
 
@@ -3019,7 +3020,16 @@ private:
         {
             loop_closure_->request_registration_refresh(
                 candidate->shadow_map, candidate->refresh_attempt + 1);
-            reject();
+            reject(
+                "stale_scan_tree_or_graph_version(scan=" +
+                std::to_string(candidate->registration->scan_generation) +
+                "/" + std::to_string(latest_scan_generation_) +
+                ", tree=" +
+                std::to_string(candidate->scan->active_tree_generation) +
+                "/" + std::to_string(active_tree_generation_) +
+                ", graph=" +
+                std::to_string(candidate->registration->graph_version) +
+                "/" + std::to_string(graph.version) + ")");
             return;
         }
 
@@ -3029,7 +3039,7 @@ private:
             uwfl2::loop_closure::inverse(registration.T_local_vehicle_raw));
         if (!correction.finite())
         {
-            reject();
+            reject("nonfinite_registration_correction");
             return;
         }
 
@@ -3057,7 +3067,7 @@ private:
             corrected_state.b_pressure.isApprox(original_state.b_pressure, 0.0);
         if (!protected_states_unchanged)
         {
-            reject();
+            reject("protected_filter_state_changed");
             return;
         }
 
@@ -3077,7 +3087,7 @@ private:
             !corrected_state.rot.toRotationMatrix().allFinite() ||
             !uwfl2::loop_closure::covariance27_is_valid(corrected_covariance))
         {
-            reject();
+            reject("invalid_corrected_state_or_covariance");
             return;
         }
 
@@ -3104,7 +3114,7 @@ private:
         }
         if (registered_scan.empty())
         {
-            reject();
+            reject("registered_scan_empty");
             return;
         }
 
@@ -3129,7 +3139,7 @@ private:
                 if (!points || !covariances || points->size() != covariances->size() ||
                     latest_loop_sonar_points_.size() != registered_scan.size())
                 {
-                    reject();
+                    reject("adaptive_registration_input_size_mismatch");
                     return;
                 }
                 std::vector<uwfl2::SonarReferencePoint> sources;
@@ -3142,7 +3152,7 @@ private:
                     const auto &raw = candidate->scan->sonar_points->at(i);
                     if (!latest_loop_sonar_points_[i].position.isApprox(V3D(raw.x, raw.y, raw.z), 0))
                     {
-                        reject();
+                        reject("adaptive_registration_scan_point_mismatch");
                         return;
                     }
                     sources.push_back({V3D(registered_scan[i].x, registered_scan[i].y, registered_scan[i].z),
@@ -3150,7 +3160,7 @@ private:
                 }
                 if (!replacement_uncertainty.Record(sources))
                 {
-                    reject();
+                    reject("adaptive_uncertainty_record_failed");
                     return;
                 }
             }
@@ -3160,7 +3170,7 @@ private:
                 PointVector points;
                 if (!replacement_tree->Snapshot_Points(points, sonar_map_point_budget))
                 {
-                    reject();
+                    reject("replacement_tree_snapshot_failed");
                     return;
                 }
                 std::vector<V3D> positions;
@@ -3169,7 +3179,7 @@ private:
                 replacement_view = std::make_unique<uwfl2::SonarRegistrationView>(2.0, sonar_map_point_budget, 4096);
                 if (!references || !replacement_view->Replace(sonar_registration_generation + 1, *references))
                 {
-                    reject();
+                    reject("replacement_registration_view_failed");
                     return;
                 }
             }
@@ -3242,7 +3252,7 @@ private:
             std::lock_guard<std::mutex> prediction_lock(
                 odometry_prediction_state_mutex_);
             reset_high_rate_odometry_prediction_locked();
-            reject();
+            reject("commit_exception_rollback");
         }
     }
 
@@ -3523,7 +3533,35 @@ private:
                       std::to_string(stats.std_proposed) + " | accepted: " +
                       std::to_string(stats.std_accepted) + " | rejected: " +
                       std::to_string(stats.std_graph_rejected) + " | committed: " +
-                      std::to_string(stats.corrections_committed);
+                      std::to_string(stats.corrections_committed) +
+                      " | descriptor rejects: " +
+                      std::to_string(stats.std_descriptor_rejected) +
+                      " | geometry rejects: " +
+                      std::to_string(stats.std_geometry_rejected) +
+                      " | awaiting confirmation: " +
+                      std::to_string(stats.std_awaiting_confirmation) +
+                      " | registration rejects: " +
+                      std::to_string(stats.registrations_rejected) +
+                      " | commit rejects: " +
+                      std::to_string(stats.corrections_rejected);
+        const auto last_graph_rejection = std::find_if(
+            events.rbegin(), events.rend(),
+            [](const auto &event) { return event.rejected; });
+        if (last_graph_rejection != events.rend())
+        {
+            status.text += " | last graph rejection: " +
+                           last_graph_rejection->status;
+        }
+        if (!stats.last_registration_rejection_reason.empty())
+        {
+            status.text += " | last registration rejection: " +
+                           stats.last_registration_rejection_reason;
+        }
+        if (!stats.last_commit_rejection_reason.empty())
+        {
+            status.text += " | last commit rejection: " +
+                           stats.last_commit_rejection_reason;
+        }
         output.markers.push_back(std::move(status));
         loop_markers_pub_->publish(output);
     }
@@ -3549,24 +3587,30 @@ private:
             uwfl2::loop_closure::extract_graph_pose_covariance(
                 kf.get_P(), state.rot.toRotationMatrix());
         PointVector supported_points;
+        std::vector<uwfl2::SonarReferencePoint> supported_sonar_points;
         if (sonar_adaptive_registration)
         {
-            latest_loop_sonar_points_.clear();
             for (std::size_t i = 0; i < sonar_scan_points.size(); ++i)
                 if (point_selected_surf[i])
                 {
                     supported_points.push_back(feats_down_body->points[i]);
-                    latest_loop_sonar_points_.push_back(sonar_scan_points[i]);
+                    supported_sonar_points.push_back(sonar_scan_points[i]);
                 }
         }
-        ++latest_scan_generation_;
+        const std::uint64_t candidate_scan_generation =
+            latest_scan_generation_ + 1;
         const auto scan_points = loop_closure_->notify_latest_scan(
-            timestamp, latest_scan_generation_, active_tree_generation_,
+            timestamp, candidate_scan_generation, active_tree_generation_,
             T_local_vehicle, T_vehicle_sonar,
             sonar_adaptive_registration ? supported_points : feats_down_body->points);
-        if (sonar_adaptive_registration && !scan_points) latest_loop_sonar_points_.clear();
-        if (!scan_points ||
-            !loop_closure_->should_select_keyframe(
+        if (!scan_points)
+        {
+            return;
+        }
+        latest_scan_generation_ = candidate_scan_generation;
+        if (sonar_adaptive_registration)
+            latest_loop_sonar_points_ = std::move(supported_sonar_points);
+        if (!loop_closure_->should_select_keyframe(
                 timestamp, T_local_vehicle, scan_points->size()))
         {
             return;

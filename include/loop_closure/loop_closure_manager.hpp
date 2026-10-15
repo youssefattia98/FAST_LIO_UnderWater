@@ -50,10 +50,12 @@ struct LoopClosureStats
     double shadow_build_time_ms_max = 0.0;
     std::uint64_t registrations_ready = 0;
     std::uint64_t registrations_rejected = 0;
+    std::string last_registration_rejection_reason;
     double registration_time_ms_sum = 0.0;
     double registration_time_ms_max = 0.0;
     std::uint64_t corrections_committed = 0;
     std::uint64_t corrections_rejected = 0;
+    std::string last_commit_rejection_reason;
     double commit_time_ms_sum = 0.0;
     double commit_time_ms_max = 0.0;
     double graph_time_ms_sum = 0.0;
@@ -170,7 +172,9 @@ public:
         const std::shared_ptr<const ShadowMapResult> &shadow_map,
         std::size_t attempt);
     std::vector<LoopVisualizationEvent> visualization_events() const;
-    void notify_correction_result(bool committed, double elapsed_ms);
+    void notify_correction_result(bool committed,
+                                  double elapsed_ms,
+                                  const std::string &rejection_reason = {});
 
     template <typename PointRange>
     PointSnapshot notify_latest_scan(double timestamp,
@@ -195,7 +199,11 @@ public:
                 copied->push_back({point.x, point.y, point.z, point.intensity});
             }
         }
-        if (copied->empty())
+        // Registration can never recover observability from fewer source
+        // points than its configured correspondence minimum.  Keep the last
+        // registration-capable snapshot instead of replacing it with a sparse
+        // tail scan (common when accelerated bag playback reaches EOF).
+        if (copied->size() < config_.registration.minimum_effective_points)
         {
             return {};
         }
@@ -233,6 +241,7 @@ private:
     std::thread registration_worker_;
     mutable std::mutex shadow_result_mutex_;
     mutable std::mutex visualization_mutex_;
+    mutable std::mutex registration_diagnostic_mutex_;
     std::deque<LoopVisualizationEvent> visualization_events_;
     std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
     std::shared_ptr<const RegistrationResult> latest_registration_;
@@ -254,10 +263,12 @@ private:
     std::atomic<double> shadow_build_time_ms_max_{0.0};
     std::atomic<std::uint64_t> registrations_ready_{0};
     std::atomic<std::uint64_t> registrations_rejected_{0};
+    std::string last_registration_rejection_reason_;
     std::atomic<double> registration_time_ms_sum_{0.0};
     std::atomic<double> registration_time_ms_max_{0.0};
     std::atomic<std::uint64_t> corrections_committed_{0};
     std::atomic<std::uint64_t> corrections_rejected_{0};
+    std::string last_commit_rejection_reason_;
     std::atomic<double> commit_time_ms_sum_{0.0};
     std::atomic<double> commit_time_ms_max_{0.0};
     std::atomic<double> graph_time_ms_sum_{0.0};

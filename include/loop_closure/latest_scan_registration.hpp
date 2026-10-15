@@ -25,6 +25,7 @@ struct LatestScanSnapshot
 struct RegistrationConfig
 {
     int maximum_iterations = 12;
+    std::size_t maximum_refresh_attempts = 4;
     std::size_t minimum_effective_points = 30;
     double maximum_neighbor_distance_m = 2.25;
     double plane_fit_threshold_m = 0.12;

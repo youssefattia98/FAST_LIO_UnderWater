@@ -55,6 +55,22 @@ LoopEvaluation LoopClosureManager::process_loop(const LoopConstraint &constraint
 void LoopClosureManager::notify_active_tree_generation(std::uint64_t generation)
 {
     active_tree_generation_.store(generation);
+    const auto current_scan = std::atomic_load_explicit(
+        &latest_scan_, std::memory_order_acquire);
+    if (!current_scan || current_scan->active_tree_generation == generation)
+    {
+        return;
+    }
+
+    // An active-map insertion does not change the retained raw sonar
+    // measurement or its pose.  Retag the immutable snapshot so a sparse tail
+    // scan cannot leave an otherwise registration-capable scan permanently
+    // stale with respect to the live tree.
+    auto updated_scan = std::make_shared<LatestScanSnapshot>(*current_scan);
+    updated_scan->active_tree_generation = generation;
+    std::atomic_store_explicit(
+        &latest_scan_, std::shared_ptr<const LatestScanSnapshot>(updated_scan),
+        std::memory_order_release);
 }
 
 LoopClosureManager::~LoopClosureManager()
@@ -127,6 +143,11 @@ void LoopClosureManager::run_registration_refresher()
         if (!scan || !request->shadow_map ||
             !shadow_result_matches_graph(*request->shadow_map, request->graph))
         {
+            {
+                std::lock_guard<std::mutex> lock(registration_diagnostic_mutex_);
+                last_registration_rejection_reason_ =
+                    "missing_scan_or_stale_shadow_graph";
+            }
             ++registrations_rejected_;
             continue;
         }
@@ -145,6 +166,10 @@ void LoopClosureManager::run_registration_refresher()
         }
         if (!registration.valid)
         {
+            {
+                std::lock_guard<std::mutex> lock(registration_diagnostic_mutex_);
+                last_registration_rejection_reason_ = registration.reason;
+            }
             ++registrations_rejected_;
             continue;
         }
@@ -168,8 +193,8 @@ bool LoopClosureManager::request_registration_refresh(
     const std::shared_ptr<const ShadowMapResult> &shadow_map,
     std::size_t attempt)
 {
-    constexpr std::size_t maximum_attempts = 4;
-    if (!shadow_map || attempt > maximum_attempts)
+    if (!shadow_map ||
+        attempt > config_.registration.maximum_refresh_attempts)
     {
         return false;
     }
@@ -295,10 +320,19 @@ LoopClosureStats LoopClosureManager::stats() const
     result.shadow_build_time_ms_max = shadow_build_time_ms_max_.load();
     result.registrations_ready = registrations_ready_.load();
     result.registrations_rejected = registrations_rejected_.load();
+    {
+        std::lock_guard<std::mutex> lock(registration_diagnostic_mutex_);
+        result.last_registration_rejection_reason =
+            last_registration_rejection_reason_;
+    }
     result.registration_time_ms_sum = registration_time_ms_sum_.load();
     result.registration_time_ms_max = registration_time_ms_max_.load();
     result.corrections_committed = corrections_committed_.load();
     result.corrections_rejected = corrections_rejected_.load();
+    {
+        std::lock_guard<std::mutex> lock(registration_diagnostic_mutex_);
+        result.last_commit_rejection_reason = last_commit_rejection_reason_;
+    }
     result.commit_time_ms_sum = commit_time_ms_sum_.load();
     result.commit_time_ms_max = commit_time_ms_max_.load();
     result.graph_time_ms_sum = graph_time_ms_sum_.load();
@@ -330,7 +364,9 @@ LoopClosureManager::take_pending_correction()
 }
 
 void LoopClosureManager::notify_correction_result(
-    bool committed, double elapsed_ms)
+    bool committed,
+    double elapsed_ms,
+    const std::string &rejection_reason)
 {
     if (committed)
     {
@@ -338,6 +374,10 @@ void LoopClosureManager::notify_correction_result(
     }
     else
     {
+        {
+            std::lock_guard<std::mutex> lock(registration_diagnostic_mutex_);
+            last_commit_rejection_reason_ = rejection_reason;
+        }
         ++corrections_rejected_;
     }
     double sum = commit_time_ms_sum_.load();

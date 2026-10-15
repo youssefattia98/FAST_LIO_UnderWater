@@ -286,7 +286,10 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
     }
     if (result.initial_nis > config_.loop_maximum_initial_nis)
     {
-        return reject("initial_loop_nis_too_large");
+        return reject(
+            "initial_loop_nis_too_large(value=" +
+            std::to_string(result.initial_nis) + ", maximum=" +
+            std::to_string(config_.loop_maximum_initial_nis) + ")");
     }
 
     try

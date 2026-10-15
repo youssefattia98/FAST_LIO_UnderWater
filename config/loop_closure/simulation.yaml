@@ -31,6 +31,7 @@ loop_closure:
 
   registration:
     maximum_iterations: 12
+    maximum_refresh_attempts: 4
     minimum_effective_points: 30
     maximum_neighbor_distance_m: 2.25
     plane_fit_threshold_m: 0.12

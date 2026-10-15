@@ -47,7 +47,7 @@
       covariance: 40652.529
       init_covariance: 10000.0
     magnetometer:
-      enable: true
+      enable: false
       topic: /auv/imu/magnetic_field
       frequency: 150.0
       rotation: [0.0, 0.0, 0.0] # RPY degrees
@@ -65,5 +65,5 @@
       corrected_map_enable: true
       corrected_map_topic: /uwfl2/corrected_map
     loop_closure:
-      enable: false
+      enable: true
       profile: balanced

@@ -17,7 +17,7 @@ loop_closure:
     loop_maximum_initial_translation_error_m: 15.0
     loop_maximum_initial_rotation_error_deg: 60.0
     loop_minimum_initial_nis: 0.0
-    loop_maximum_initial_nis: 125.0
+    loop_maximum_initial_nis: 300.0
     loop_maximum_pose_correction_translation_m: 20.0
     loop_maximum_pose_correction_rotation_deg: 45.0
 
@@ -28,6 +28,7 @@ loop_closure:
 
   registration:
     maximum_iterations: 30
+    maximum_refresh_attempts: 64
     minimum_effective_points: 30
     maximum_neighbor_distance_m: 2.25
     plane_fit_threshold_m: 0.25
@@ -62,7 +63,7 @@ loop_closure:
     geometric_overlap_distance_m: 0.5
     geometric_overlap_minimum: 0.12
     refinement_iterations: 8
-    required_consistent_detections: 2
+    required_consistent_detections: 1
     single_detection_overlap_minimum: 0.0
     accepted_loop_cooldown_s: 10.0
     confirmation_translation_m: 1.5

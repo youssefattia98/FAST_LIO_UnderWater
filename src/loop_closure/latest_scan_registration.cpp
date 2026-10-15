@@ -231,7 +231,10 @@ RegistrationResult LatestScanRegistrar::register_scan(
         residual_statistics(initial);
     if (initial.residuals.size() < config_.minimum_effective_points)
     {
-        return reject("too_few_initial_correspondences");
+        return reject(
+            "too_few_initial_correspondences(value=" +
+            std::to_string(initial.residuals.size()) + ", minimum=" +
+            std::to_string(config_.minimum_effective_points) + ")");
     }
 
     Matrix6d final_information = Matrix6d::Zero();
@@ -242,7 +245,10 @@ RegistrationResult LatestScanRegistrar::register_scan(
             iteration == 0 ? initial : correspondences(scan, estimate, shadow_map, config_);
         if (matches.residuals.size() < config_.minimum_effective_points)
         {
-            return reject("too_few_correspondences_during_iteration");
+            return reject(
+                "too_few_correspondences_during_iteration(value=" +
+                std::to_string(matches.residuals.size()) + ", minimum=" +
+                std::to_string(config_.minimum_effective_points) + ")");
         }
         Matrix6d information = Matrix6d::Zero();
         Eigen::Matrix<double, 6, 1> gradient =
@@ -349,7 +355,10 @@ RegistrationResult LatestScanRegistrar::register_scan(
         residual_statistics(final_matches);
     if (result.final_effective_points < config_.minimum_effective_points)
     {
-        return reject("too_few_final_correspondences");
+        return reject(
+            "too_few_final_correspondences(value=" +
+            std::to_string(result.final_effective_points) + ", minimum=" +
+            std::to_string(config_.minimum_effective_points) + ")");
     }
     final_information.setZero();
     final_squared_error = 0.0;
@@ -389,12 +398,27 @@ RegistrationResult LatestScanRegistrar::register_scan(
     }
     const Pose3d registration_delta = between(
         result.T_local_vehicle_initial, estimate);
-    if (registration_delta.translation.norm() >
+    const double registration_translation_m =
+        registration_delta.translation.norm();
+    const double registration_rotation_rad =
+        registration_delta.rotation.angularDistance(Eigen::Quaterniond::Identity());
+    if (registration_translation_m >
             config_.maximum_registration_translation_m ||
-        registration_delta.rotation.angularDistance(Eigen::Quaterniond::Identity()) >
-            config_.maximum_registration_rotation_rad)
+        registration_rotation_rad > config_.maximum_registration_rotation_rad)
     {
-        return reject("registration_correction_too_large");
+        constexpr double kRadiansToDegrees =
+            180.0 / 3.14159265358979323846;
+        return reject(
+            "registration_correction_too_large(translation=" +
+            std::to_string(registration_translation_m) +
+            "m, maximum_translation=" +
+            std::to_string(config_.maximum_registration_translation_m) +
+            "m, rotation=" +
+            std::to_string(registration_rotation_rad * kRadiansToDegrees) +
+            "deg, maximum_rotation=" +
+            std::to_string(config_.maximum_registration_rotation_rad *
+                           kRadiansToDegrees) +
+            "deg)");
     }
 
     const double degrees_of_freedom = std::max(
