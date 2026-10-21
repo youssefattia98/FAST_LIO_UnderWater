@@ -28,6 +28,7 @@ struct StdConfig
     std::size_t maximum_keypoints = 80;
     std::size_t triangle_neighbor_count = 8;
     std::size_t maximum_triangles = 1000;
+    std::size_t maximum_references_per_bucket = 8;
     double triangle_minimum_side_m = 0.4;
     double triangle_maximum_side_m = 12.0;
     double triangle_side_resolution_m = 0.20;
@@ -35,14 +36,30 @@ struct StdConfig
     double binary_similarity_minimum = 0.25;
     std::size_t minimum_triangle_matches = 5;
     std::size_t maximum_candidates = 8;
+    std::size_t maximum_matches_per_candidate = 256;
+    std::size_t maximum_ransac_hypotheses = 64;
     std::size_t minimum_ransac_inliers = 5;
     double ransac_vertex_threshold_m = 0.35;
     double geometric_overlap_distance_m = 0.35;
     double geometric_overlap_minimum = 0.20;
+    // Independent factor noise prevents the geometric overlap distance from
+    // also (and unintentionally) controlling pose-graph translation trust.
+    // The sonar match is useful for heading and horizontal position, but its
+    // sparse vertical geometry must not overrule IMU gravity or pressure.
+    double loop_yaw_sigma_rad = 2.0 * 3.14159265358979323846 / 180.0;
+    double loop_roll_pitch_sigma_rad = 30.0 * 3.14159265358979323846 / 180.0;
+    double loop_xy_translation_sigma_m = 0.5;
+    double loop_z_translation_sigma_m = 5.0;
+    double maximum_gravity_disagreement_rad =
+        25.0 * 3.14159265358979323846 / 180.0;
     std::size_t refinement_iterations = 6;
     std::size_t required_consistent_detections = 2;
     double single_detection_overlap_minimum = 0.80;
     double accepted_loop_cooldown_s = 0.0;
+    // Bound correlated factors collected during one continuous visit to the
+    // same place. Zero disables the spatial revisit limit.
+    std::size_t maximum_loops_per_revisit = 0;
+    double revisit_exit_distance_m = 0.0;
     double confirmation_translation_m = 1.0;
     double confirmation_rotation_rad = 10.0 * 3.14159265358979323846 / 180.0;
     std::size_t confirmation_target_id_tolerance = 5;
@@ -63,6 +80,7 @@ struct StdDetectionResult
     std::size_t descriptor_matches = 0;
     std::size_t ransac_inliers = 0;
     double overlap = 0.0;
+    double gravity_disagreement_rad = 0.0;
     double descriptor_time_ms = 0.0;
     double search_time_ms = 0.0;
     double verification_time_ms = 0.0;
@@ -76,6 +94,9 @@ public:
     ~StableTriangleDetector();
 
     StdDetectionResult process(const Keyframe &keyframe);
+    void synchronize_optimized_poses(
+        const std::vector<std::uint64_t> &ids,
+        const std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> &poses);
     void notify_loop_accepted(std::uint64_t source_id, std::uint64_t target_id,
                               double source_timestamp);
     std::size_t database_size() const;

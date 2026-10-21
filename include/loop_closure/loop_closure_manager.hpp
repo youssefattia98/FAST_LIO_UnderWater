@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include "loop_closure/bounded_queue.hpp"
@@ -38,9 +39,19 @@ struct LoopClosureStats
     std::uint64_t processed = 0;
     std::uint64_t failed = 0;
     std::uint64_t dropped = 0;
+    std::uint64_t detector_dropped = 0;
+    std::size_t graph_queue_depth = 0;
+    std::size_t detector_queue_depth = 0;
+    std::uint64_t graph_queue_samples = 0;
+    double graph_queue_time_ms_sum = 0.0;
+    double graph_queue_time_ms_max = 0.0;
+    std::uint64_t detector_queue_samples = 0;
+    double detector_queue_time_ms_sum = 0.0;
+    double detector_queue_time_ms_max = 0.0;
     std::uint64_t graph_version = 0;
     std::uint64_t loops_accepted = 0;
     std::uint64_t loops_rejected = 0;
+    LoopEvaluation last_graph_evaluation;
     std::uint64_t shadow_builds_started = 0;
     std::uint64_t shadow_builds_ready = 0;
     std::uint64_t shadow_builds_failed = 0;
@@ -58,6 +69,8 @@ struct LoopClosureStats
     std::string last_commit_rejection_reason;
     double commit_time_ms_sum = 0.0;
     double commit_time_ms_max = 0.0;
+    double candidate_to_commit_time_ms_last = 0.0;
+    double candidate_to_commit_time_ms_max = 0.0;
     double graph_time_ms_sum = 0.0;
     double graph_time_ms_max = 0.0;
     std::uint64_t std_processed = 0;
@@ -67,6 +80,18 @@ struct LoopClosureStats
     std::uint64_t std_awaiting_confirmation = 0;
     std::uint64_t std_graph_rejected = 0;
     std::uint64_t std_accepted = 0;
+    StdDetectionResult last_std_detection;
+    double descriptor_time_ms_sum = 0.0;
+    double descriptor_time_ms_max = 0.0;
+    double search_time_ms_sum = 0.0;
+    double search_time_ms_max = 0.0;
+    double verification_time_ms_sum = 0.0;
+    double verification_time_ms_max = 0.0;
+    std::uint64_t active_transaction_id = 0;
+    std::uint64_t active_transaction_source_id = 0;
+    std::uint64_t active_transaction_target_id = 0;
+    double active_transaction_age_ms = 0.0;
+    std::string active_transaction_stage;
 };
 
 struct PendingCorrection
@@ -74,13 +99,26 @@ struct PendingCorrection
     std::shared_ptr<const ShadowMapResult> shadow_map;
     std::shared_ptr<const RegistrationResult> registration;
     std::shared_ptr<const LatestScanSnapshot> scan;
+    std::shared_ptr<const struct LoopTransaction> transaction;
     std::size_t refresh_attempt = 0;
+};
+
+struct LoopTransaction
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    std::uint64_t id = 0;
+    EvaluatedLoopCandidate evaluated;
+    double source_timestamp = 0.0;
+    std::chrono::steady_clock::time_point detected_at;
 };
 
 struct RegistrationRefreshRequest
 {
     std::shared_ptr<const ShadowMapResult> shadow_map;
     PoseGraphSnapshot graph;
+    std::shared_ptr<const LoopTransaction> transaction;
+    std::shared_ptr<const LatestScanSnapshot> scan;
     std::size_t attempt = 0;
 };
 
@@ -95,6 +133,12 @@ struct LoopVisualizationEvent
 
 class LoopClosureManager
 {
+    struct QueuedKeyframe
+    {
+        Keyframe keyframe;
+        std::chrono::steady_clock::time_point enqueued_at;
+    };
+
 public:
     using PointSnapshot = std::shared_ptr<const std::vector<PointXYZI>>;
 
@@ -147,7 +191,9 @@ public:
 
         selector_.accept(timestamp, T_local_vehicle);
         ++submitted_;
-        if (!queue_.push_latest(std::move(keyframe)))
+        if (!queue_.push_latest(
+                QueuedKeyframe{std::move(keyframe),
+                               std::chrono::steady_clock::now()}))
         {
             ++failed_;
             return false;
@@ -171,10 +217,14 @@ public:
     bool request_registration_refresh(
         const std::shared_ptr<const ShadowMapResult> &shadow_map,
         std::size_t attempt);
+    EvaluatedLoopCandidate commit_loop_candidate(
+        const std::shared_ptr<const LoopTransaction> &transaction);
     std::vector<LoopVisualizationEvent> visualization_events() const;
     void notify_correction_result(bool committed,
                                   double elapsed_ms,
-                                  const std::string &rejection_reason = {});
+                                  const std::string &rejection_reason = {},
+                                  const std::optional<Pose3d> &frontend_correction =
+                                      std::nullopt);
 
     template <typename PointRange>
     PointSnapshot notify_latest_scan(double timestamp,
@@ -214,6 +264,14 @@ public:
         scan->T_local_vehicle_raw = T_local_vehicle.normalized();
         scan->T_vehicle_sonar = T_vehicle_sonar.normalized();
         scan->sonar_points = std::move(copied);
+        {
+            std::lock_guard<std::mutex> lock(scan_history_mutex_);
+            scan_history_.push_back(scan);
+            while (scan_history_.size() > scan_history_capacity_)
+            {
+                scan_history_.pop_front();
+            }
+        }
         std::atomic_store_explicit(
             &latest_scan_, std::shared_ptr<const LatestScanSnapshot>(scan),
             std::memory_order_release);
@@ -222,14 +280,19 @@ public:
 
 private:
     void run();
+    void run_detector();
     LoopEvaluation process_loop(const LoopConstraint &constraint);
     void run_shadow_builder();
     void run_registration_refresher();
     void record_visualization_event(const LoopVisualizationEvent &event);
+    std::shared_ptr<const LatestScanSnapshot> registration_scan_for(
+        const std::shared_ptr<const LoopTransaction> &transaction) const;
 
     LoopClosureConfig config_;
     KeyframeSelector selector_;
-    BoundedQueue<Keyframe> queue_;
+    BoundedQueue<QueuedKeyframe> queue_;
+    BoundedQueue<QueuedKeyframe> detector_queue_;
+    const std::size_t scan_history_capacity_;
     BoundedQueue<ShadowMapRequest> shadow_queue_{1};
     BoundedQueue<RegistrationRefreshRequest> registration_queue_{1};
     FullSe3PoseGraph pose_graph_;
@@ -237,21 +300,37 @@ private:
     LatestScanRegistrar registrar_;
     std::unique_ptr<StableTriangleDetector> std_detector_;
     std::thread worker_;
+    std::thread detector_worker_;
     std::thread shadow_worker_;
     std::thread registration_worker_;
     mutable std::mutex shadow_result_mutex_;
     mutable std::mutex visualization_mutex_;
     mutable std::mutex registration_diagnostic_mutex_;
+    mutable std::mutex detector_diagnostic_mutex_;
+    mutable std::mutex transaction_mutex_;
+    mutable std::mutex detector_mutex_;
+    mutable std::mutex scan_history_mutex_;
     std::deque<LoopVisualizationEvent> visualization_events_;
     std::shared_ptr<const ShadowMapResult> latest_shadow_map_;
     std::shared_ptr<const RegistrationResult> latest_registration_;
     std::shared_ptr<const LatestScanSnapshot> latest_scan_;
+    std::deque<std::shared_ptr<const LatestScanSnapshot>> scan_history_;
     std::shared_ptr<const PendingCorrection> pending_correction_;
+    std::shared_ptr<const LoopTransaction> active_transaction_;
+    std::unordered_map<std::uint64_t, Pose3d> detector_optimized_poses_;
+    std::string active_transaction_stage_;
     std::uint64_t next_keyframe_id_ = 0;
+    std::atomic<std::uint64_t> next_transaction_id_{1};
     std::atomic<std::uint64_t> submitted_{0};
     std::atomic<std::uint64_t> processed_{0};
     std::atomic<std::uint64_t> failed_{0};
     std::atomic<std::uint64_t> graph_version_{0};
+    std::atomic<std::uint64_t> graph_queue_samples_{0};
+    std::atomic<double> graph_queue_time_ms_sum_{0.0};
+    std::atomic<double> graph_queue_time_ms_max_{0.0};
+    std::atomic<std::uint64_t> detector_queue_samples_{0};
+    std::atomic<double> detector_queue_time_ms_sum_{0.0};
+    std::atomic<double> detector_queue_time_ms_max_{0.0};
     std::atomic<std::uint64_t> active_tree_generation_{0};
     std::atomic<std::uint64_t> loops_accepted_{0};
     std::atomic<std::uint64_t> loops_rejected_{0};
@@ -269,8 +348,11 @@ private:
     std::atomic<std::uint64_t> corrections_committed_{0};
     std::atomic<std::uint64_t> corrections_rejected_{0};
     std::string last_commit_rejection_reason_;
+    LoopEvaluation last_graph_evaluation_;
     std::atomic<double> commit_time_ms_sum_{0.0};
     std::atomic<double> commit_time_ms_max_{0.0};
+    std::atomic<double> candidate_to_commit_time_ms_last_{0.0};
+    std::atomic<double> candidate_to_commit_time_ms_max_{0.0};
     std::atomic<double> graph_time_ms_sum_{0.0};
     std::atomic<double> graph_time_ms_max_{0.0};
     std::atomic<std::uint64_t> std_processed_{0};
@@ -280,6 +362,13 @@ private:
     std::atomic<std::uint64_t> std_awaiting_confirmation_{0};
     std::atomic<std::uint64_t> std_graph_rejected_{0};
     std::atomic<std::uint64_t> std_accepted_{0};
+    StdDetectionResult last_std_detection_;
+    std::atomic<double> descriptor_time_ms_sum_{0.0};
+    std::atomic<double> descriptor_time_ms_max_{0.0};
+    std::atomic<double> search_time_ms_sum_{0.0};
+    std::atomic<double> search_time_ms_max_{0.0};
+    std::atomic<double> verification_time_ms_sum_{0.0};
+    std::atomic<double> verification_time_ms_max_{0.0};
 };
 
 }  // namespace uwfl2::loop_closure

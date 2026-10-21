@@ -23,6 +23,12 @@ T required(const YAML::Node &node, const char *key)
     return node[key].as<T>();
 }
 
+template <typename T>
+T optional(const YAML::Node &node, const char *key, const T &fallback)
+{
+    return node && node[key] ? node[key].as<T>() : fallback;
+}
+
 std::size_t required_size(const YAML::Node &node, const char *key)
 {
     const int value = required<int>(node, key);
@@ -71,6 +77,9 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
         required_size(graph, "loop_minimum_keyframe_separation");
     result.pose_graph.loop_maximum_initial_translation_error_m =
         required<double>(graph, "loop_maximum_initial_translation_error_m");
+    result.pose_graph.loop_minimum_initial_rotation_error_rad =
+        required<double>(graph, "loop_minimum_initial_rotation_error_deg") *
+        kRadiansPerDegree;
     result.pose_graph.loop_maximum_initial_rotation_error_rad =
         required<double>(graph, "loop_maximum_initial_rotation_error_deg") *
         kRadiansPerDegree;
@@ -82,6 +91,14 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
         required<double>(graph, "loop_maximum_pose_correction_translation_m");
     result.pose_graph.loop_maximum_pose_correction_rotation_rad =
         required<double>(graph, "loop_maximum_pose_correction_rotation_deg") *
+        kRadiansPerDegree;
+    result.pose_graph.loop_maximum_pose_correction_tilt_rad =
+        optional<double>(graph, "loop_maximum_pose_correction_tilt_deg", 3.0) *
+        kRadiansPerDegree;
+    result.pose_graph.loop_maximum_rebase_translation_m =
+        required<double>(graph, "loop_maximum_rebase_translation_m");
+    result.pose_graph.loop_maximum_rebase_rotation_rad =
+        required<double>(graph, "loop_maximum_rebase_rotation_deg") *
         kRadiansPerDegree;
 
     const YAML::Node map = config["shadow_map"];
@@ -115,6 +132,14 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
         required<double>(registration, "maximum_translation_m");
     result.registration.maximum_registration_rotation_rad =
         required<double>(registration, "maximum_rotation_deg") * kRadiansPerDegree;
+    result.registration.protected_tilt_sigma_rad =
+        optional<double>(registration, "protected_tilt_sigma_deg", 1.0) *
+        kRadiansPerDegree;
+    result.registration.protected_vertical_sigma_m =
+        optional<double>(registration, "protected_vertical_sigma_m", 0.25);
+    result.registration.maximum_registration_tilt_rad =
+        optional<double>(registration, "maximum_tilt_deg", 3.0) *
+        kRadiansPerDegree;
 
     const YAML::Node detector = config["std_detector"];
     result.std_detection.minimum_keyframe_separation =
@@ -129,6 +154,8 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
     result.std_detection.triangle_neighbor_count =
         required_size(detector, "triangle_neighbor_count");
     result.std_detection.maximum_triangles = required_size(detector, "maximum_triangles");
+    result.std_detection.maximum_references_per_bucket =
+        required_size(detector, "maximum_references_per_bucket");
     result.std_detection.triangle_minimum_side_m =
         required<double>(detector, "triangle_minimum_side_m");
     result.std_detection.triangle_maximum_side_m =
@@ -142,6 +169,10 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
     result.std_detection.minimum_triangle_matches =
         required_size(detector, "minimum_triangle_matches");
     result.std_detection.maximum_candidates = required_size(detector, "maximum_candidates");
+    result.std_detection.maximum_matches_per_candidate =
+        required_size(detector, "maximum_matches_per_candidate");
+    result.std_detection.maximum_ransac_hypotheses =
+        required_size(detector, "maximum_ransac_hypotheses");
     result.std_detection.minimum_ransac_inliers =
         required_size(detector, "minimum_ransac_inliers");
     result.std_detection.ransac_vertex_threshold_m =
@@ -150,6 +181,27 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
         required<double>(detector, "geometric_overlap_distance_m");
     result.std_detection.geometric_overlap_minimum =
         required<double>(detector, "geometric_overlap_minimum");
+    // Keep the legacy scalar keys as fallbacks so older profiles and tuner
+    // outputs remain loadable. New profiles can independently express which
+    // directions the sonar loop actually observes.
+    const double legacy_rotation_sigma_deg =
+        required<double>(detector, "loop_rotation_sigma_deg");
+    const double legacy_translation_sigma_m =
+        required<double>(detector, "loop_translation_sigma_m");
+    result.std_detection.loop_yaw_sigma_rad =
+        optional<double>(detector, "loop_yaw_sigma_deg",
+                         legacy_rotation_sigma_deg) * kRadiansPerDegree;
+    result.std_detection.loop_roll_pitch_sigma_rad =
+        optional<double>(detector, "loop_roll_pitch_sigma_deg", 30.0) *
+        kRadiansPerDegree;
+    result.std_detection.loop_xy_translation_sigma_m =
+        optional<double>(detector, "loop_xy_translation_sigma_m",
+                         legacy_translation_sigma_m);
+    result.std_detection.loop_z_translation_sigma_m =
+        optional<double>(detector, "loop_z_translation_sigma_m", 5.0);
+    result.std_detection.maximum_gravity_disagreement_rad =
+        optional<double>(detector, "maximum_gravity_disagreement_deg", 25.0) *
+        kRadiansPerDegree;
     result.std_detection.refinement_iterations =
         required_size(detector, "refinement_iterations");
     result.std_detection.required_consistent_detections =
@@ -158,6 +210,10 @@ LoopClosureConfig load_config_profile(const std::filesystem::path &path)
         required<double>(detector, "single_detection_overlap_minimum");
     result.std_detection.accepted_loop_cooldown_s =
         required<double>(detector, "accepted_loop_cooldown_s");
+    result.std_detection.maximum_loops_per_revisit =
+        optional<std::size_t>(detector, "maximum_loops_per_revisit", 0U);
+    result.std_detection.revisit_exit_distance_m =
+        optional<double>(detector, "revisit_exit_distance_m", 0.0);
     result.std_detection.confirmation_translation_m =
         required<double>(detector, "confirmation_translation_m");
     result.std_detection.confirmation_rotation_rad =

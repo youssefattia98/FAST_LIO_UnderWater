@@ -266,6 +266,50 @@ AuxiliarySensorFusion::Availability AuxiliarySensorFusion::availability() const
             dvl_timeout_, pressure_timeout_, mag_timeout_};
 }
 
+AuxiliarySensorFusion::WatermarkStatus
+AuxiliarySensorFusion::correction_watermark(
+    double latest_imu_time, double first_imu_time,
+    bool draining) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    WatermarkStatus result;
+    result.safe_time = latest_imu_time;
+    if (draining || !std::isfinite(latest_imu_time) || latest_imu_time < 0.0)
+    {
+        return result;
+    }
+    const auto apply = [&](bool enabled, double stamp, double period,
+                           bool &holding, bool &missing) {
+        if (!enabled)
+        {
+            return;
+        }
+        const double reference = stamp >= 0.0 ? stamp : first_imu_time;
+        if (!std::isfinite(reference) || reference < 0.0)
+        {
+            return;
+        }
+        const double age = std::max(0.0, latest_imu_time - reference);
+        if (age <= uwfl2::kSensorMissingAfterPeriods *
+                       std::max(period, 1.0e-6))
+        {
+            result.safe_time = std::min(result.safe_time, reference);
+            holding = reference < latest_imu_time;
+        }
+        else
+        {
+            missing = true;
+        }
+    };
+    apply(dvl_enable_, last_timestamp_dvl_, dvl_timeout_,
+          result.dvl_holding, result.dvl_missing);
+    apply(pressure_enable_, last_timestamp_pressure_, pressure_timeout_,
+          result.pressure_holding, result.pressure_missing);
+    apply(mag_enable_, last_timestamp_mag_, mag_timeout_,
+          result.magnetometer_holding, result.magnetometer_missing);
+    return result;
+}
+
 void AuxiliarySensorFusion::warn_timeouts(rclcpp::Node &node, double end_time) const
 {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -38,6 +38,60 @@ Eigen::Quaterniond exp_so3(const Eigen::Vector3d &rotation)
         Eigen::AngleAxisd(angle, rotation / angle));
 }
 
+Eigen::Vector3d log_so3(const Eigen::Quaterniond &rotation)
+{
+    Eigen::AngleAxisd angle_axis(rotation.normalized());
+    double angle = angle_axis.angle();
+    if (angle > 3.14159265358979323846)
+    {
+        angle -= 2.0 * 3.14159265358979323846;
+    }
+    if (std::abs(angle) < 1e-12)
+    {
+        return Eigen::Vector3d::Zero();
+    }
+    return angle * angle_axis.axis();
+}
+
+double add_protected_prior(const Pose3d &initial,
+                           const Pose3d &estimate,
+                           const RegistrationConfig &config,
+                           Matrix6d *information,
+                           Eigen::Matrix<double, 6, 1> *gradient)
+{
+    const Eigen::Vector3d vertical = Eigen::Vector3d::UnitZ();
+    const Eigen::Vector3d gravity_body =
+        initial.rotation.conjugate() * vertical;
+    const Eigen::Matrix3d tilt_projector =
+        Eigen::Matrix3d::Identity() -
+        gravity_body * gravity_body.transpose();
+    const Eigen::Vector3d tilt_residual = tilt_projector * log_so3(
+        initial.rotation.conjugate() * estimate.rotation);
+    const double vertical_residual =
+        vertical.dot(estimate.translation - initial.translation);
+    const double tilt_information =
+        1.0 / std::pow(config.protected_tilt_sigma_rad, 2);
+    const double vertical_information =
+        1.0 / std::pow(config.protected_vertical_sigma_m, 2);
+
+    if (information)
+    {
+        information->block<3, 3>(3, 3).noalias() +=
+            tilt_information * tilt_projector;
+        information->block<3, 3>(0, 0).noalias() +=
+            vertical_information * vertical * vertical.transpose();
+    }
+    if (gradient)
+    {
+        gradient->tail<3>().noalias() +=
+            tilt_information * tilt_residual;
+        gradient->head<3>().noalias() +=
+            vertical_information * vertical * vertical_residual;
+    }
+    return tilt_information * tilt_residual.squaredNorm() +
+           vertical_information * vertical_residual * vertical_residual;
+}
+
 struct CorrespondenceSet
 {
     std::vector<Eigen::Matrix<double, 1, 6>> jacobians;
@@ -172,6 +226,32 @@ std::pair<double, double> residual_statistics(
 
 }  // namespace
 
+std::shared_ptr<const LatestScanSnapshot> first_registration_scan_after(
+    const std::deque<std::shared_ptr<const LatestScanSnapshot>> &history,
+    double source_timestamp)
+{
+    if (!std::isfinite(source_timestamp))
+    {
+        return {};
+    }
+    std::shared_ptr<const LatestScanSnapshot> selected;
+    for (const auto &scan : history)
+    {
+        if (!scan || !std::isfinite(scan->timestamp) ||
+            scan->timestamp <= source_timestamp + 1e-9)
+        {
+            continue;
+        }
+        if (!selected || scan->timestamp < selected->timestamp ||
+            (scan->timestamp == selected->timestamp &&
+             scan->scan_generation < selected->scan_generation))
+        {
+            selected = scan;
+        }
+    }
+    return selected;
+}
+
 LatestScanRegistrar::LatestScanRegistrar(RegistrationConfig config)
     : config_(config)
 {
@@ -179,7 +259,10 @@ LatestScanRegistrar::LatestScanRegistrar(RegistrationConfig config)
         config_.minimum_effective_points < 6 ||
         config_.maximum_neighbor_distance_m <= 0.0 ||
         config_.plane_fit_threshold_m <= 0.0 ||
-        config_.robust_huber_delta_m <= 0.0)
+        config_.robust_huber_delta_m <= 0.0 ||
+        config_.protected_tilt_sigma_rad <= 0.0 ||
+        config_.protected_vertical_sigma_m <= 0.0 ||
+        config_.maximum_registration_tilt_rad <= 0.0)
     {
         throw std::invalid_argument("Invalid latest-scan registration configuration");
     }
@@ -225,6 +308,11 @@ RegistrationResult LatestScanRegistrar::register_scan(
         graph.optimized_poses.back(), inverse(graph.raw_poses.back()));
     Pose3d estimate = compose(delayed_correction, scan.T_local_vehicle_raw);
     result.T_local_vehicle_initial = estimate;
+    const CorrespondenceSet raw = correspondences(
+        scan, scan.T_local_vehicle_raw, shadow_map, config_);
+    result.raw_effective_points = raw.residuals.size();
+    std::tie(result.raw_residual_mean_m, result.raw_residual_p95_m) =
+        residual_statistics(raw);
     CorrespondenceSet initial = correspondences(scan, estimate, shadow_map, config_);
     result.initial_effective_points = initial.residuals.size();
     std::tie(result.initial_residual_mean_m, result.initial_residual_p95_m) =
@@ -262,6 +350,9 @@ RegistrationResult LatestScanRegistrar::register_scan(
                                   matches.residuals[index];
             squared_error += matches.residuals[index] * matches.residuals[index];
         }
+        squared_error += add_protected_prior(
+            result.T_local_vehicle_initial, estimate, config_,
+            &information, &gradient);
         information = 0.5 * (information + information.transpose());
         Eigen::SelfAdjointEigenSolver<Matrix6d> eigen_solver(information);
         if (eigen_solver.info() != Eigen::Success)
@@ -317,6 +408,9 @@ RegistrationResult LatestScanRegistrar::register_scan(
             {
                 candidate_squared_error += residual * residual;
             }
+            candidate_squared_error += add_protected_prior(
+                result.T_local_vehicle_initial, candidate, config_,
+                nullptr, nullptr);
             const double candidate_mean_squared_error =
                 candidate_squared_error /
                 static_cast<double>(candidate_matches.residuals.size());
@@ -370,6 +464,9 @@ RegistrationResult LatestScanRegistrar::register_scan(
         final_squared_error += final_matches.residuals[index] *
                                final_matches.residuals[index];
     }
+    final_squared_error += add_protected_prior(
+        result.T_local_vehicle_initial, estimate, config_,
+        &final_information, nullptr);
     final_information =
         0.5 * (final_information + final_information.transpose());
     Eigen::SelfAdjointEigenSolver<Matrix6d> final_eigen_solver(final_information);
@@ -390,9 +487,14 @@ RegistrationResult LatestScanRegistrar::register_scan(
     {
         return reject("underconstrained_final_full_se3_geometry");
     }
+    // Validate the complete loop correction against the uncorrected live
+    // pose. The graph solution is the registration initialization and may
+    // already be at the local optimum; requiring the iterative refinement to
+    // improve that near-optimal initialization rejects valid no-op
+    // confirmations due to numerical noise.
     const double residual_tolerance = 1e-8;
     if (result.final_residual_mean_m >
-        result.initial_residual_mean_m + residual_tolerance)
+        result.raw_residual_mean_m + residual_tolerance)
     {
         return reject("registration_residual_did_not_improve");
     }
@@ -402,6 +504,13 @@ RegistrationResult LatestScanRegistrar::register_scan(
         registration_delta.translation.norm();
     const double registration_rotation_rad =
         registration_delta.rotation.angularDistance(Eigen::Quaterniond::Identity());
+    const Eigen::Vector3d vertical = Eigen::Vector3d::UnitZ();
+    const Eigen::Vector3d initial_gravity_body =
+        result.T_local_vehicle_initial.rotation.conjugate() * vertical;
+    const Eigen::Vector3d registered_gravity_body =
+        estimate.rotation.conjugate() * vertical;
+    const double registration_tilt_rad = std::acos(std::clamp(
+        initial_gravity_body.dot(registered_gravity_body), -1.0, 1.0));
     if (registration_translation_m >
             config_.maximum_registration_translation_m ||
         registration_rotation_rad > config_.maximum_registration_rotation_rad)
@@ -420,7 +529,13 @@ RegistrationResult LatestScanRegistrar::register_scan(
                            kRadiansToDegrees) +
             "deg)");
     }
-
+    if (registration_tilt_rad > config_.maximum_registration_tilt_rad)
+    {
+        return reject(
+            "registration_tilt_too_large(value=" +
+            std::to_string(registration_tilt_rad) + ", maximum=" +
+            std::to_string(config_.maximum_registration_tilt_rad) + ")");
+    }
     const double degrees_of_freedom = std::max(
         1.0, static_cast<double>(result.final_effective_points) - 6.0);
     double sigma_squared = final_squared_error / degrees_of_freedom;

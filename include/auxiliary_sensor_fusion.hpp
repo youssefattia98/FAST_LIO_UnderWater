@@ -87,6 +87,20 @@ public:
     };
     Availability availability() const;
 
+    struct WatermarkStatus
+    {
+        double safe_time = -1.0;
+        bool dvl_holding = false;
+        bool pressure_holding = false;
+        bool magnetometer_holding = false;
+        bool dvl_missing = false;
+        bool pressure_missing = false;
+        bool magnetometer_missing = false;
+    };
+    WatermarkStatus correction_watermark(
+        double latest_imu_time, double first_imu_time,
+        bool draining) const;
+
     bool dvl_enabled() const;
     bool pressure_enabled() const;
     bool mag_enabled() const;

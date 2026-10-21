@@ -32,14 +32,21 @@ struct ShadowMapRequest
 {
     PoseGraphSnapshot graph;
     std::uint64_t source_tree_generation = 0;
+    std::uint64_t transaction_id = 0;
 };
 
 struct ShadowMapResult
 {
     std::uint64_t graph_version = 0;
+    // Number of graph keyframes represented by this result.  The live graph
+    // may continue to append odometry keyframes while a loop transaction is
+    // being registered; callers use this boundary to retain that tail when
+    // replacing the active map.
+    std::size_t graph_node_count = 0;
     std::size_t graph_loop_factor_count = 0;
     std::uint64_t source_tree_generation = 0;
     std::uint64_t shadow_tree_generation = 0;
+    std::uint64_t transaction_id = 0;
     std::size_t selected_keyframes = 0;
     std::size_t input_points = 0;
     std::size_t filtered_points = 0;

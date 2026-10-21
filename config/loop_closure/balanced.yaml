@@ -1,47 +1,63 @@
 loop_closure:
   queue_capacity: 32
-
   keyframes:
     translation_m: 0.75
     rotation_deg: 7.5
     minimum_interval_s: 0.4
-    maximum_interval_s: 3.0
+    maximum_interval_s: 2.5
     minimum_points: 30
-
   pose_graph:
-    prior_rotation_sigma_rad: 1.0e-4
-    prior_translation_sigma_m: 1.0e-4
-    odometry_rotation_variance_floor: 1.9038589e-5
-    odometry_translation_variance_floor: 1.0e-2
-    loop_minimum_keyframe_separation: 30
-    loop_maximum_initial_translation_error_m: 15.0
-    loop_maximum_initial_rotation_error_deg: 60.0
+    prior_rotation_sigma_rad: 0.0001
+    prior_translation_sigma_m: 0.0001
+    odometry_rotation_variance_floor: 1.9038589e-05
+    odometry_translation_variance_floor: 0.01
+    # The short pillars mission returns after 58 keyframe intervals. Keep this
+    # close to that length so only its terminal start-area revisit becomes
+    # eligible; descriptor, geometry and graph gates still decide acceptance.
+    loop_minimum_keyframe_separation: 54
+    loop_maximum_initial_translation_error_m: 8.0
+    loop_minimum_initial_rotation_error_deg: 0.0
+    loop_maximum_initial_rotation_error_deg: 30.0
+    # A statistically small innovation is not unsafe: it is the expected case
+    # when a well-estimated trajectory returns to its start.  Accept it so the
+    # loop factor can acknowledge the revisit and reduce posterior covariance.
     loop_minimum_initial_nis: 0.0
-    loop_maximum_initial_nis: 300.0
-    loop_maximum_pose_correction_translation_m: 20.0
-    loop_maximum_pose_correction_rotation_deg: 45.0
-
+    # Retain the previously validated finite NIS ceiling. Directional loop
+    # covariance below now reduces the influence of unobservable tilt/depth;
+    # the new explicit tilt gates provide the corresponding safety bound.
+    loop_maximum_initial_nis: 26.0
+    # Complete back-and-forth corrections measured up to 7.105 m aided under
+    # replay plus RViz load and 2.03 m / 21.69 deg without magnetometer. Keep
+    # narrow headroom while retaining the independent rotation and tilt gates.
+    loop_maximum_pose_correction_translation_m: 7.5
+    loop_maximum_pose_correction_rotation_deg: 22.0
+    # Roll/pitch are gravity-observed and must not be rewritten by a sparse
+    # sonar closure. Heading may still use the larger total-rotation budget.
+    loop_maximum_pose_correction_tilt_deg: 3.0
+    loop_maximum_rebase_translation_m: 0.5
+    loop_maximum_rebase_rotation_deg: 5.0
   shadow_map:
     radius_m: 80.0
     maximum_keyframes: 1000
     maximum_input_points: 3000000
-
   registration:
     maximum_iterations: 30
-    maximum_refresh_attempts: 64
+    maximum_refresh_attempts: 2
     minimum_effective_points: 30
     maximum_neighbor_distance_m: 2.25
     plane_fit_threshold_m: 0.25
     robust_huber_delta_m: 0.35
     convergence_translation_m: 0.002
     convergence_rotation_deg: 0.05
-    minimum_information_eigenvalue: 1.0e-5
+    minimum_information_eigenvalue: 1.0e-05
     maximum_information_condition: 1.0e10
     maximum_translation_m: 3.0
     maximum_rotation_deg: 25.0
-
+    protected_tilt_sigma_deg: 1.0
+    protected_vertical_sigma_m: 0.25
+    maximum_tilt_deg: 3.0
   std_detector:
-    minimum_keyframe_separation: 30
+    minimum_keyframe_separation: 54
     voxel_size_m: 0.5
     minimum_voxel_points: 3
     plane_eigenvalue_ratio: 0.12
@@ -52,23 +68,31 @@ loop_closure:
     triangle_minimum_side_m: 0.5
     triangle_maximum_side_m: 9.5
     triangle_side_resolution_m: 0.25
-    triangle_relative_error: 0.08
-    binary_similarity_minimum: 0.18
-    minimum_triangle_matches: 4
+    triangle_relative_error: 0.15330408040418256
+    binary_similarity_minimum: 0.3359990373279083
+    minimum_triangle_matches: 3
     maximum_candidates: 16
     maximum_matches_per_candidate: 256
-    maximum_ransac_hypotheses: 64
-    minimum_ransac_inliers: 4
-    ransac_vertex_threshold_m: 0.5
-    geometric_overlap_distance_m: 0.5
-    geometric_overlap_minimum: 0.12
+    maximum_ransac_hypotheses: 256
+    minimum_ransac_inliers: 12
+    ransac_vertex_threshold_m: 0.8682083892192529
+    geometric_overlap_distance_m: 0.36884551276313404
+    geometric_overlap_minimum: 0.25
+    loop_rotation_sigma_deg: 5.0
+    loop_translation_sigma_m: 0.5
+    loop_yaw_sigma_deg: 5.0
+    loop_roll_pitch_sigma_deg: 30.0
+    loop_xy_translation_sigma_m: 0.5
+    loop_z_translation_sigma_m: 5.0
+    maximum_gravity_disagreement_deg: 35.0
     refinement_iterations: 8
-    required_consistent_detections: 1
-    single_detection_overlap_minimum: 0.0
+    required_consistent_detections: 2
+    single_detection_overlap_minimum: 0.65
     accepted_loop_cooldown_s: 10.0
+    revisit_exit_distance_m: 10.0
     confirmation_translation_m: 1.5
     confirmation_rotation_deg: 15.0
-    confirmation_target_id_tolerance: 10
-    maximum_pose_distance_m: 20.0
-    maximum_prior_translation_error_m: 15.0
-    maximum_prior_rotation_error_deg: 60.0
+    confirmation_target_id_tolerance: 2
+    maximum_pose_distance_m: 8.0
+    maximum_prior_translation_error_m: 8.0
+    maximum_prior_rotation_error_deg: 45.0

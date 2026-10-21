@@ -8,6 +8,8 @@
 namespace uwfl2
 {
 
+inline constexpr double kSensorMissingAfterPeriods = 2.0;
+
 // Sensor-to-body rotation: Rz(yaw) * Ry(pitch) * Rx(roll), FLU axes.
 inline Eigen::Matrix3d rotation_from_rpy_degrees(const std::vector<double> &rpy)
 {

@@ -506,6 +506,8 @@ struct StableTriangleDetector::Impl
         std::uint64_t source_id = 0;
         std::uint64_t target_id = 0;
         double source_timestamp = 0.0;
+        Eigen::Vector3d target_position = Eigen::Vector3d::Zero();
+        std::size_t revisit_count = 0;
     };
 
     explicit Impl(StdConfig input) : config(std::move(input)) {}
@@ -517,10 +519,15 @@ struct StableTriangleDetector::Impl
         const Entry &stored = entries.back();
         for (std::size_t index = 0; index < stored.triangles.size(); ++index)
         {
-            inverted_index[triangle_key(
-                               stored.triangles[index],
-                               config.triangle_side_resolution_m)]
-                .push_back({entry_index, index});
+            auto &references = inverted_index[triangle_key(
+                stored.triangles[index], config.triangle_side_resolution_m)];
+            // Retain the earliest observations for return-to-start closure and
+            // bound lookup cost in repetitive scenes.  Previously the matching
+            // YAML option was ignored and every bucket grew for the whole run.
+            if (references.size() < config.maximum_references_per_bucket)
+            {
+                references.push_back({entry_index, index});
+            }
         }
     }
 
@@ -538,10 +545,24 @@ StableTriangleDetector::StableTriangleDetector(StdConfig config)
     if (impl_->config.voxel_size_m <= 0.0 ||
         impl_->config.triangle_side_resolution_m <= 0.0 ||
         impl_->config.geometric_overlap_distance_m <= 0.0 ||
+        !std::isfinite(impl_->config.loop_yaw_sigma_rad) ||
+        impl_->config.loop_yaw_sigma_rad <= 0.0 ||
+        !std::isfinite(impl_->config.loop_roll_pitch_sigma_rad) ||
+        impl_->config.loop_roll_pitch_sigma_rad <= 0.0 ||
+        !std::isfinite(impl_->config.loop_xy_translation_sigma_m) ||
+        impl_->config.loop_xy_translation_sigma_m <= 0.0 ||
+        !std::isfinite(impl_->config.loop_z_translation_sigma_m) ||
+        impl_->config.loop_z_translation_sigma_m <= 0.0 ||
+        !std::isfinite(impl_->config.maximum_gravity_disagreement_rad) ||
+        impl_->config.maximum_gravity_disagreement_rad <= 0.0 ||
         !std::isfinite(impl_->config.minimum_loop_duration_s) ||
         impl_->config.minimum_loop_duration_s < 0.0 ||
         !std::isfinite(impl_->config.accepted_loop_cooldown_s) ||
-        impl_->config.accepted_loop_cooldown_s < 0.0)
+        impl_->config.accepted_loop_cooldown_s < 0.0 ||
+        !std::isfinite(impl_->config.revisit_exit_distance_m) ||
+        impl_->config.revisit_exit_distance_m < 0.0 ||
+        (impl_->config.maximum_loops_per_revisit > 0 &&
+         impl_->config.revisit_exit_distance_m <= 0.0))
     {
         throw std::invalid_argument("STD metric resolutions must be positive");
     }
@@ -554,17 +575,86 @@ std::size_t StableTriangleDetector::database_size() const
     return impl_->entries.size();
 }
 
+void StableTriangleDetector::synchronize_optimized_poses(
+    const std::vector<std::uint64_t> &ids,
+    const std::vector<Pose3d, Eigen::aligned_allocator<Pose3d>> &poses)
+{
+    if (ids.size() != poses.size())
+    {
+        throw std::invalid_argument(
+            "Detector pose synchronization vectors must have equal size");
+    }
+    std::unordered_map<std::uint64_t, Pose3d> optimized;
+    optimized.reserve(ids.size());
+    for (std::size_t index = 0; index < ids.size(); ++index)
+    {
+        if (!poses[index].finite())
+        {
+            throw std::invalid_argument(
+                "Detector optimized pose must be finite");
+        }
+        optimized.emplace(ids[index], poses[index].normalized());
+    }
+    for (Impl::Entry &entry : impl_->entries)
+    {
+        const auto pose = optimized.find(entry.frame.id);
+        if (pose != optimized.end())
+        {
+            entry.frame.T_local_vehicle = pose->second;
+        }
+    }
+    if (impl_->last_accepted)
+    {
+        const auto target = optimized.find(impl_->last_accepted->target_id);
+        if (target != optimized.end())
+        {
+            impl_->last_accepted->target_position =
+                target->second.translation;
+        }
+    }
+    // Pending confirmation corrections belong to the previous graph frame.
+    impl_->pending.reset();
+}
+
 void StableTriangleDetector::notify_loop_accepted(
     std::uint64_t source_id, std::uint64_t target_id, double source_timestamp)
 {
-    impl_->last_accepted =
-        Impl::AcceptedLoop{source_id, target_id, source_timestamp};
+    Eigen::Vector3d target_position = Eigen::Vector3d::Zero();
+    const auto target = std::find_if(
+        impl_->entries.begin(), impl_->entries.end(),
+        [target_id](const Impl::Entry &entry) {
+            return entry.frame.id == target_id;
+        });
+    if (target != impl_->entries.end())
+    {
+        target_position = target->frame.T_local_vehicle.translation;
+    }
+    const bool same_revisit = impl_->last_accepted &&
+        (target_position - impl_->last_accepted->target_position).norm() <=
+            impl_->config.revisit_exit_distance_m;
+    if (same_revisit)
+    {
+        impl_->last_accepted->source_id = source_id;
+        impl_->last_accepted->source_timestamp = source_timestamp;
+        ++impl_->last_accepted->revisit_count;
+        return;
+    }
+    impl_->last_accepted = Impl::AcceptedLoop{
+        source_id, target_id, source_timestamp, target_position, 1U};
 }
 
 StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
 {
     StdDetectionResult result;
     result.source_id = keyframe.id;
+    if (impl_->last_accepted &&
+        impl_->config.maximum_loops_per_revisit > 0 &&
+        (keyframe.T_local_vehicle.translation -
+         impl_->last_accepted->target_position).norm() >
+            impl_->config.revisit_exit_distance_m)
+    {
+        impl_->last_accepted.reset();
+    }
     const auto descriptor_started = Clock::now();
     Impl::Entry current;
     current.frame = keyframe;
@@ -604,16 +694,27 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
                         {
                             continue;
                         }
-                        if (impl_->last_accepted &&
-                            keyframe.timestamp -
-                                    impl_->last_accepted->source_timestamp <=
-                                impl_->config.accepted_loop_cooldown_s &&
-                            std::llabs(
+                        const bool same_accepted_neighborhood =
+                            impl_->last_accepted && std::llabs(
                                 static_cast<long long>(historical.frame.id) -
                                 static_cast<long long>(
                                     impl_->last_accepted->target_id)) <=
                                 static_cast<long long>(
-                                    impl_->config.confirmation_target_id_tolerance))
+                                    impl_->config.confirmation_target_id_tolerance);
+                        const bool temporal_cooldown =
+                            same_accepted_neighborhood &&
+                            keyframe.timestamp -
+                                    impl_->last_accepted->source_timestamp <=
+                                impl_->config.accepted_loop_cooldown_s;
+                        const bool revisit_limit =
+                            impl_->last_accepted &&
+                            impl_->config.maximum_loops_per_revisit > 0 &&
+                            (historical.frame.T_local_vehicle.translation -
+                             impl_->last_accepted->target_position).norm() <=
+                                impl_->config.revisit_exit_distance_m &&
+                            impl_->last_accepted->revisit_count >=
+                                impl_->config.maximum_loops_per_revisit;
+                        if (temporal_cooldown || revisit_limit)
                         {
                             continue;
                         }
@@ -641,8 +742,12 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
                         if (similarity / 3.0 >=
                             impl_->config.binary_similarity_minimum)
                         {
-                            matches_by_entry[reference.entry].push_back(
-                                {&triangle, &other});
+                            auto &matches = matches_by_entry[reference.entry];
+                            if (matches.size() <
+                                impl_->config.maximum_matches_per_candidate)
+                            {
+                                matches.push_back({&triangle, &other});
+                            }
                         }
                     }
                 }
@@ -666,7 +771,11 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
         {
             return lhs.pose_distance_m < rhs.pose_distance_m;
         }
-        return lhs.matches.size() > rhs.matches.size();
+        if (lhs.matches.size() != rhs.matches.size())
+        {
+            return lhs.matches.size() > rhs.matches.size();
+        }
+        return lhs.entry_index < rhs.entry_index;
     });
     if (candidates.size() > impl_->config.maximum_candidates)
     {
@@ -686,7 +795,8 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
         Pose3d ransac;
         std::size_t inliers = 0;
         for (std::size_t hypothesis = 0;
-             hypothesis < candidate.matches.size() && hypothesis < 128;
+             hypothesis < candidate.matches.size() &&
+                 hypothesis < impl_->config.maximum_ransac_hypotheses;
              ++hypothesis)
         {
             std::vector<Eigen::Vector3d> source(3), target(3);
@@ -794,9 +904,54 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
     const Impl::Entry &historical = impl_->entries[best_entry];
     result.proposed = true;
     result.target_id = historical.frame.id;
-    const Pose3d measurement = compose(
+    const Pose3d descriptor_measurement = compose(
         historical.frame.T_vehicle_sonar,
         compose(best_transform, inverse(keyframe.T_vehicle_sonar)));
+    const Eigen::Vector3d local_vertical = Eigen::Vector3d::UnitZ();
+    const Eigen::Vector3d measured_gravity_body =
+        (historical.frame.T_local_vehicle.rotation *
+         descriptor_measurement.rotation)
+            .conjugate() * local_vertical;
+    const Eigen::Vector3d frontend_gravity_body =
+        keyframe.T_local_vehicle.rotation.conjugate() * local_vertical;
+    result.gravity_disagreement_rad = std::acos(std::clamp(
+        measured_gravity_body.normalized().dot(
+            frontend_gravity_body.normalized()), -1.0, 1.0));
+    if (result.gravity_disagreement_rad >
+        impl_->config.maximum_gravity_disagreement_rad)
+    {
+        result.reason = "gravity_direction_disagreement";
+        impl_->add(std::move(current));
+        return result;
+    }
+    // Sparse underwater sonar can observe a strong horizontal heading
+    // correction while its estimated roll/pitch is weak. Preserve the
+    // descriptor translation and yaw, but construct the relative rotation
+    // from a pure local-vertical correction applied to the gravity-consistent
+    // frontend attitude. The gravity-disagreement check above still rejects
+    // gross hypotheses, and the pose graph retains its hard tilt guard.
+    const Pose3d descriptor_current = compose(
+        historical.frame.T_local_vehicle, descriptor_measurement);
+    const Pose3d descriptor_correction = compose(
+        descriptor_current, inverse(keyframe.T_local_vehicle));
+    const Eigen::Quaterniond raw_correction =
+        descriptor_correction.rotation.normalized();
+    Eigen::Quaterniond yaw_correction(
+        raw_correction.w(), 0.0, 0.0, raw_correction.z());
+    if (yaw_correction.norm() <= 1e-12)
+    {
+        yaw_correction = Eigen::Quaterniond::Identity();
+    }
+    else
+    {
+        yaw_correction.normalize();
+    }
+    Pose3d measurement = descriptor_measurement;
+    measurement.rotation = between(
+        historical.frame.T_local_vehicle,
+        Pose3d{yaw_correction * keyframe.T_local_vehicle.rotation,
+               descriptor_current.translation})
+                               .rotation;
     const Pose3d estimated_current = compose(
         historical.frame.T_local_vehicle, measurement);
     const Pose3d correction = compose(
@@ -829,7 +984,7 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
     const bool high_confidence_single_detection =
         impl_->config.single_detection_overlap_minimum > 0.0 &&
         best_overlap >= impl_->config.single_detection_overlap_minimum &&
-        best_inliers >= 2 * impl_->config.minimum_ransac_inliers &&
+        best_inliers >= impl_->config.minimum_ransac_inliers &&
         best_matches >= 10 * impl_->config.minimum_triangle_matches &&
         keyframe_separation >=
             5 * impl_->config.minimum_keyframe_separation;
@@ -844,14 +999,27 @@ StdDetectionResult StableTriangleDetector::process(const Keyframe &keyframe)
         loop.to_id = keyframe.id;
         loop.T_from_to = measurement;
         loop.covariance.setZero();
-        const double rotation_sigma = 2.0 * 3.14159265358979323846 / 180.0;
-        const double translation_sigma = std::max(
-            0.05, impl_->config.geometric_overlap_distance_m /
-                      std::sqrt(static_cast<double>(best_inliers)));
+        // GTSAM's Pose3 tangent stores right-rotation followed by
+        // right-translation. The local gravity direction expressed in the
+        // current vehicle frame is therefore the yaw/vertical axis for both
+        // blocks. Large orthogonal variance lets the IMU odometry retain
+        // roll/pitch; large axial translation variance lets pressure retain z.
+        const Eigen::Vector3d gravity_axis =
+            frontend_gravity_body.normalized();
+        const Eigen::Matrix3d gravity_projector =
+            gravity_axis * gravity_axis.transpose();
+        const Eigen::Matrix3d tilt_projector =
+            Eigen::Matrix3d::Identity() - gravity_projector;
         loop.covariance.block<3, 3>(0, 0) =
-            Eigen::Matrix3d::Identity() * rotation_sigma * rotation_sigma;
+            tilt_projector *
+                std::pow(impl_->config.loop_roll_pitch_sigma_rad, 2) +
+            gravity_projector *
+                std::pow(impl_->config.loop_yaw_sigma_rad, 2);
         loop.covariance.block<3, 3>(3, 3) =
-            Eigen::Matrix3d::Identity() * translation_sigma * translation_sigma;
+            tilt_projector *
+                std::pow(impl_->config.loop_xy_translation_sigma_m, 2) +
+            gravity_projector *
+                std::pow(impl_->config.loop_z_translation_sigma_m, 2);
         result.confirmed = true;
         result.loop = loop;
         result.reason = high_confidence_single_detection

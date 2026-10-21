@@ -47,7 +47,7 @@
       covariance: 40652.529
       init_covariance: 10000.0
     magnetometer:
-      enable: false
+      enable: true
       topic: /auv/imu/magnetic_field
       frequency: 150.0
       rotation: [0.0, 0.0, 0.0] # RPY degrees
@@ -64,6 +64,8 @@
     publish:
       corrected_map_enable: true
       corrected_map_topic: /uwfl2/corrected_map
+      corrected_map_point_size: 0.02 # Sphere diameter in metres
+      corrected_map_voxel_size: 0.05 # Display-only point spacing in metres
     loop_closure:
-      enable: true
+      enable: false
       profile: balanced

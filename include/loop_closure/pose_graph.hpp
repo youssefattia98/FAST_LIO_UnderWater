@@ -23,11 +23,15 @@ struct PoseGraphConfig
     double odometry_translation_variance_floor = 1e-6;
     std::size_t loop_minimum_keyframe_separation = 5;
     double loop_maximum_initial_translation_error_m = 10.0;
+    double loop_minimum_initial_rotation_error_rad = 0.0;
     double loop_maximum_initial_rotation_error_rad = 45.0 * 3.14159265358979323846 / 180.0;
     double loop_minimum_initial_nis = 0.0;
     double loop_maximum_initial_nis = 12.592;
     double loop_maximum_pose_correction_translation_m = 20.0;
     double loop_maximum_pose_correction_rotation_rad = 45.0 * 3.14159265358979323846 / 180.0;
+    double loop_maximum_pose_correction_tilt_rad = 3.0 * 3.14159265358979323846 / 180.0;
+    double loop_maximum_rebase_translation_m = 0.5;
+    double loop_maximum_rebase_rotation_rad = 5.0 * 3.14159265358979323846 / 180.0;
 };
 
 struct PoseGraphSnapshot
@@ -46,13 +50,23 @@ struct PoseGraphSnapshot
     Matrix6d latest_optimized_covariance_graph = Matrix6d::Zero();
 };
 
+struct EvaluatedLoopCandidate
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    LoopCandidate candidate;
+    PoseGraphSnapshot graph;
+};
+
 class FullSe3PoseGraph
 {
 public:
     explicit FullSe3PoseGraph(PoseGraphConfig config = {});
 
     std::uint64_t append_keyframe(const Keyframe &keyframe);
-    LoopEvaluation try_add_loop(const LoopConstraint &constraint);
+    EvaluatedLoopCandidate evaluate_loop(const LoopConstraint &constraint);
+    EvaluatedLoopCandidate commit_loop(
+        const LoopCandidate &evaluated_candidate);
     PoseGraphSnapshot snapshot() const;
 
     static gtsam::Pose3 to_gtsam(const Pose3d &pose);
@@ -63,6 +77,8 @@ private:
         const Matrix6d &previous,
         const Matrix6d &current,
         const PoseGraphConfig &config);
+    EvaluatedLoopCandidate evaluate_loop_locked(
+        const LoopConstraint &constraint, bool commit);
 
     PoseGraphConfig config_;
     mutable std::mutex mutex_;

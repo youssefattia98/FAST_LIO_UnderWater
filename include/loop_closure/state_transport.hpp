@@ -15,22 +15,32 @@ namespace uwfl2::loop_closure
 using Matrix27d = Eigen::Matrix<double, 27, 27>;
 
 inline Matrix27d correction_transport_jacobian(
-    const Eigen::Matrix3d &correction_rotation)
+    const Eigen::Matrix3d &correction_rotation,
+    const Eigen::Matrix2d &gravity_tangent_transport =
+        Eigen::Matrix2d::Identity())
 {
     Matrix27d jacobian = Matrix27d::Identity();
     jacobian.block<3, 3>(0, 0) = correction_rotation;
     // Right attitude errors are invariant to a deterministic left correction.
     jacobian.block<3, 3>(3, 3).setIdentity();
     jacobian.block<3, 3>(12, 12) = correction_rotation;
+    // Gravity is an S2 state with a two-dimensional local error.  A
+    // deterministic world-frame rotation changes both the nominal vector and
+    // its tangent basis, so its covariance must use the corresponding 2x2
+    // chart transport supplied by the caller.
+    jacobian.block<2, 2>(21, 21) = gravity_tangent_transport;
     return jacobian;
 }
 
 inline Matrix27d transport_uwfl2_covariance(
     const Matrix27d &covariance,
-    const Eigen::Matrix3d &correction_rotation)
+    const Eigen::Matrix3d &correction_rotation,
+    const Eigen::Matrix2d &gravity_tangent_transport =
+        Eigen::Matrix2d::Identity())
 {
     const Matrix27d jacobian =
-        correction_transport_jacobian(correction_rotation);
+        correction_transport_jacobian(correction_rotation,
+                                      gravity_tangent_transport);
     Matrix27d transported = jacobian * covariance * jacobian.transpose();
     return 0.5 * (transported + transported.transpose());
 }

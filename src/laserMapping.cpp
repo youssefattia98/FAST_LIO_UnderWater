@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <limits>
@@ -50,6 +51,7 @@
 #include <so3_math.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
@@ -151,9 +153,6 @@ std::uint64_t sonar_registration_generation = 0;
 std::size_t sonar_plane_rows = 0, sonar_point_rows = 0, sonar_unresolved_plane_normals = 0;
 double sonar_mean_squared_whitened_residual = 0.0;
 double sonar_view_build_seconds = 0;
-
-constexpr double AUX_SENSOR_REORDER_WINDOW_SEC = 0.02;
-constexpr auto AUX_SENSOR_REORDER_WALL_GRACE = std::chrono::milliseconds(20);
 
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
@@ -789,15 +788,29 @@ public:
     {
         DeclareParameters();
         LoadParameters();
+        input_buffers_.ConfigureSonarStream(
+            !lid_topic.empty(), sonar_frequency_hz);
         sonar_availability_.SetFrequency(sonar_frequency_hz);
         InitializeEstimator();
         InitializeLoopClosure();
 
         /*** ROS subscribe initialization ***/
-        sensor_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-        lidar_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        // Keep all timestamp-bearing sensor ingress off the mapping/backend
+        // executors.  This prevents CPU-heavy registration from delaying IMU
+        // or auxiliary callbacks until after the correction epoch has passed.
+        sensor_callback_group_ = this->create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive, false);
+        // Sonar ingress has a dedicated executor. The callback only reserves
+        // acquisition time and queues the raw message; conversion runs in a
+        // FIFO worker and cannot be delayed by mapping or loop closure.
+        lidar_callback_group_ = this->create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive, false);
         processing_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-        backend_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        // Corrected-map construction and MarkerArray serialization can be
+        // expensive for spherical, dense displays. Keep it off the estimator
+        // executor so RViz load cannot change loop-closure timing/results.
+        backend_callback_group_ = this->create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive, false);
         prediction_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         rclcpp::SubscriptionOptions sensor_options;
         sensor_options.callback_group = sensor_callback_group_;
@@ -821,15 +834,15 @@ public:
         else
         {
             auto lidar_qos = rclcpp::QoS(rclcpp::KeepLast(200000));
-            // Best-effort subscriptions match both best-effort and reliable
-            // sensor publishers and are supported by ROS 2 Humble and newer.
-            lidar_qos.best_effort();
+            // The deployed Sonar-3D driver and the recorded bags both offer
+            // RELIABLE delivery.  Downgrading this subscription to BEST_EFFORT
+            // let accelerated replay plus RViz silently lose terminal scans,
+            // changing the selected keyframes and whether a loop was proposed.
+            lidar_qos.reliable().durability_volatile();
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 lid_topic, lidar_qos,
                 [this](sensor_msgs::msg::PointCloud2::UniquePtr message) {
-                    input_buffers_.NoteSonarReceipt();
-                    ensure_sonar_frame_attached_to_body(message->header.frame_id);
-                    standard_pcl_cbk(std::move(message));
+                    enqueue_sonar(std::move(message));
                 },
                 lidar_options);
         }
@@ -851,9 +864,12 @@ public:
             "/uwfl2/navigation_health", 1);
         sonar_diagnostics_pub_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
             "/uwfl2/sonar_diagnostics", rclcpp::QoS(200));
-        if (sonar_adaptive_registration)
-            provisional_map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-                "/uwfl2/provisional_map", rclcpp::QoS(1).transient_local());
+        if (loop_closure_)
+        {
+            loop_diagnostics_pub_ =
+                this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+                    "/uwfl2/loop_closure_diagnostics", rclcpp::QoS(50));
+        }
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
@@ -902,6 +918,77 @@ public:
         }
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
+    }
+
+    ~LaserMappingNode() override
+    {
+        if (backend_executor_)
+        {
+            backend_executor_->cancel();
+        }
+        if (backend_executor_thread_.joinable())
+        {
+            backend_executor_thread_.join();
+        }
+        if (sensor_executor_)
+        {
+            sensor_executor_->cancel();
+        }
+        if (sensor_executor_thread_.joinable())
+        {
+            sensor_executor_thread_.join();
+        }
+        if (lidar_executor_)
+        {
+            lidar_executor_->cancel();
+        }
+        if (lidar_executor_thread_.joinable())
+        {
+            lidar_executor_thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(sonar_ingress_mutex_);
+            sonar_ingress_stopping_ = true;
+        }
+        sonar_ingress_condition_.notify_all();
+        if (sonar_preprocess_thread_.joinable())
+        {
+            sonar_preprocess_thread_.join();
+        }
+    }
+
+    void StartSensorIngress()
+    {
+        if (pubCorrectedMap_)
+        {
+            backend_executor_ =
+                std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+            backend_executor_->add_callback_group(
+                backend_callback_group_, this->get_node_base_interface());
+            backend_executor_thread_ = std::thread([this]() {
+                backend_executor_->spin();
+            });
+        }
+        sensor_executor_ =
+            std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+        sensor_executor_->add_callback_group(
+            sensor_callback_group_, this->get_node_base_interface());
+        sensor_executor_thread_ = std::thread([this]() {
+            sensor_executor_->spin();
+        });
+
+        if (!lid_topic.empty())
+        {
+            sonar_preprocess_thread_ =
+                std::thread(&LaserMappingNode::run_sonar_preprocessor, this);
+            lidar_executor_ =
+                std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+            lidar_executor_->add_callback_group(
+                lidar_callback_group_, this->get_node_base_interface());
+            lidar_executor_thread_ = std::thread([this]() {
+                lidar_executor_->spin();
+            });
+        }
     }
 
 private:
@@ -1147,10 +1234,71 @@ private:
         return true;
     }
 
-    void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
+    void enqueue_sonar(sensor_msgs::msg::PointCloud2::UniquePtr message)
+    {
+        const double timestamp = get_time_sec(message->header.stamp);
+        note_initial_pose_input(timestamp);
+        input_buffers_.NoteSonarReceipt(timestamp);
+        {
+            std::lock_guard<std::mutex> lock(sonar_ingress_mutex_);
+            sonar_ingress_queue_.push_back(std::move(message));
+        }
+        sonar_ingress_condition_.notify_one();
+    }
+
+    void run_sonar_preprocessor()
+    {
+        while (true)
+        {
+            sensor_msgs::msg::PointCloud2::UniquePtr message;
+            {
+                std::unique_lock<std::mutex> lock(sonar_ingress_mutex_);
+                sonar_ingress_condition_.wait(lock, [this]() {
+                    return sonar_ingress_stopping_ ||
+                           !sonar_ingress_queue_.empty();
+                });
+                if (sonar_ingress_stopping_ && sonar_ingress_queue_.empty())
+                {
+                    return;
+                }
+                message = std::move(sonar_ingress_queue_.front());
+                sonar_ingress_queue_.pop_front();
+            }
+            const double timestamp = get_time_sec(message->header.stamp);
+            try
+            {
+                ensure_sonar_frame_attached_to_body(message->header.frame_id);
+                standard_pcl_cbk(std::move(message));
+            }
+            catch (const std::exception& error)
+            {
+                // A malformed scan must not leave a permanent pending-event
+                // barrier.  Record an empty epoch so transport can advance;
+                // the mapper will naturally skip its measurement update.
+                RCLCPP_ERROR(
+                    this->get_logger(),
+                    "Sonar preprocessing failed at %.9f: %s. "
+                    "Advancing the event watermark with an empty scan.",
+                    timestamp, error.what());
+                input_buffers_.PushSonar(
+                    std::make_shared<PointCloudXYZI>(), timestamp);
+            }
+            catch (...)
+            {
+                RCLCPP_ERROR(
+                    this->get_logger(),
+                    "Sonar preprocessing failed at %.9f with an unknown "
+                    "exception. Advancing the event watermark with an empty "
+                    "scan.", timestamp);
+                input_buffers_.PushSonar(
+                    std::make_shared<PointCloudXYZI>(), timestamp);
+            }
+        }
+    }
+
+    void standard_pcl_cbk(sensor_msgs::msg::PointCloud2::UniquePtr msg)
     {
         const double cur_time = get_time_sec(msg->header.stamp);
-        note_initial_pose_input(cur_time);
         PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
         // Conversion remains outside the shared input lock.
         p_pre->process(msg, ptr);
@@ -1175,32 +1323,14 @@ private:
     {
         if (!auxiliary_fusion_enabled)
         {
-            aux_reorder_waiting = false;
-            aux_reorder_target_time = -1.0;
             return true;
         }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (!aux_reorder_waiting ||
-            std::abs(aux_reorder_target_time - target_time) > 1e-6)
-        {
-            aux_reorder_waiting = true;
-            aux_reorder_target_time = target_time;
-            aux_reorder_wait_start = now;
-        }
-
-        const bool sensor_time_ready =
-            latest_imu_time >= target_time + AUX_SENSOR_REORDER_WINDOW_SEC;
-        const bool wall_time_ready =
-            now - aux_reorder_wait_start >= AUX_SENSOR_REORDER_WALL_GRACE;
-        if (!sensor_time_ready && !wall_time_ready)
-        {
-            return false;
-        }
-
-        aux_reorder_waiting = false;
-        aux_reorder_target_time = -1.0;
-        return true;
+        const bool draining = input_buffers_.ImuTransportDraining();
+        const auto watermark = aux_fusion_.correction_watermark(
+            latest_imu_time, input_buffers_.first_timestamp_imu,
+            draining);
+        return target_time <= watermark.safe_time +
+                              uwfl2::kAcquisitionTimeTolerance;
     }
 
     enum class ImuPacketResult { Unavailable, Waiting, Ready };
@@ -1296,6 +1426,7 @@ private:
                 imu_only_packet_duration(), expected_imu_period(), expected_imu_timeout(), lidar_timeout)) ||
             input_buffers_.lidar_pushed || input_buffers_.sonar_processing ||
             input_buffers_.imu_buffer.empty()) {
+            scheduling_wait_reason_.store(2, std::memory_order_relaxed);
             return ImuPacketResult::Unavailable;
         }
 
@@ -1311,6 +1442,7 @@ private:
             input_buffers_.PropagationWatermark(latest_imu_time);
         if (propagation_horizon < target_packet_end_time - 1e-6)
         {
+            scheduling_wait_reason_.store(3, std::memory_order_relaxed);
             return ImuPacketResult::Unavailable;
         }
         // Select a complete packet before popping anything. A partial packet
@@ -1323,15 +1455,18 @@ private:
             });
         if (packet_tail == input_buffers_.imu_buffer.end())
         {
+            scheduling_wait_reason_.store(4, std::memory_order_relaxed);
             return ImuPacketResult::Unavailable;
         }
         const double packet_tail_time = get_time_sec((*packet_tail)->header.stamp);
         if (packet_tail_time > propagation_horizon + 1e-6)
         {
+            scheduling_wait_reason_.store(5, std::memory_order_relaxed);
             return ImuPacketResult::Unavailable;
         }
         if (!auxiliary_callbacks_ready(target_packet_end_time, latest_imu_time))
         {
+            scheduling_wait_reason_.store(6, std::memory_order_relaxed);
             return ImuPacketResult::Waiting;
         }
 
@@ -1363,10 +1498,12 @@ private:
 
         if (meas.imu.empty())
         {
+            scheduling_wait_reason_.store(7, std::memory_order_relaxed);
             return ImuPacketResult::Unavailable;
         }
         meas.lidar_end_time = last_included_imu_time;
         lidar_end_time = meas.lidar_end_time;
+        scheduling_wait_reason_.store(0, std::memory_order_relaxed);
         return ImuPacketResult::Ready;
     }
 
@@ -1375,7 +1512,8 @@ private:
         this->declare_parameter<bool>("publish.corrected_map_enable", false);
         this->declare_parameter<string>("publish.corrected_map_topic",
                                         "/uwfl2/corrected_map");
-
+        this->declare_parameter<double>("publish.corrected_map_point_size", 0.03);
+        this->declare_parameter<double>("publish.corrected_map_voxel_size", 0.15);
         this->declare_parameter<string>("sonar.topic", "/points_raw");
         this->declare_parameter<double>("sonar.frequency", 4.0);
         this->declare_parameter<vector<double>>("sonar.translation", {0.0, 0.0, 0.0});
@@ -1387,7 +1525,6 @@ private:
         this->declare_parameter<bool>("sonar.adaptive_registration", false);
         this->declare_parameter<double>("sonar.range_noise_std_m", 0.0);
         this->declare_parameter<double>("sonar.angular_noise_std_deg", 0.0);
-
         this->declare_parameter<string>("imu.topic", "/imu/data");
         this->declare_parameter<double>("imu.frequency", 100.0);
         this->declare_parameter<double>("imu.initial_gravity_estimate", G_m_s2);
@@ -1422,6 +1559,10 @@ private:
                                      corrected_map_publish_enabled_, false);
         this->get_parameter_or<string>("publish.corrected_map_topic",
                                        corrected_map_topic_, "/uwfl2/corrected_map");
+        this->get_parameter_or<double>("publish.corrected_map_point_size",
+                                       corrected_map_point_size_, 0.03);
+        this->get_parameter_or<double>("publish.corrected_map_voxel_size",
+                                       corrected_map_voxel_size_, 0.15);
         this->get_parameter_or<string>("sonar.topic", lid_topic, "/points_raw");
         this->get_parameter_or<double>("sonar.frequency", sonar_frequency_hz, 4.0);
         this->get_parameter_or<vector<double>>("sonar.translation", extrinT,
@@ -1494,6 +1635,24 @@ private:
                         "sonar.frequency must be positive. Falling back to 4 Hz.");
             sonar_frequency_hz = 4.0;
         }
+        if (!std::isfinite(corrected_map_point_size_) ||
+            corrected_map_point_size_ <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "publish.corrected_map_point_size must be positive. "
+                        "Using 0.03 m.");
+            corrected_map_point_size_ = 0.03;
+        }
+        if (!std::isfinite(corrected_map_voxel_size_) ||
+            corrected_map_voxel_size_ <= 0.0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "publish.corrected_map_voxel_size must be positive. "
+                        "Using 0.15 m.");
+            corrected_map_voxel_size_ = 0.15;
+        }
+        corrected_map_display_voxels_ =
+            uwfl2::CorrectedMapDisplayVoxels(corrected_map_voxel_size_);
         lidar_timeout = uwfl2::timeout_from_frequency(sonar_frequency_hz, 4.0);
         if (imu_rate_hz <= 0.0)
         {
@@ -1583,11 +1742,11 @@ private:
                 "Unknown loop_closure.profile '" + loop_profile +
                 "' (expected balanced or simulation)");
         }
-        const auto loop_profile_path = std::filesystem::path(
+        const auto loop_profile_file = std::filesystem::path(
             ament_index_cpp::get_package_share_directory("fast_lio")) /
             "config" / "loop_closure" / (loop_profile + ".yaml");
         auto loop_config =
-            uwfl2::loop_closure::load_config_profile(loop_profile_path);
+            uwfl2::loop_closure::load_config_profile(loop_profile_file);
         loop_config.enabled = loop_enabled;
         loop_visualization_enabled_ = loop_enabled;
         loop_config.shadow_map.voxel_size_m = filter_size_map_min;
@@ -1596,9 +1755,14 @@ private:
             loop_closure_ =
                 std::make_unique<uwfl2::loop_closure::LoopClosureManager>(loop_config);
             RCLCPP_INFO(this->get_logger(),
-                        "Loop closure enabled with '%s' profile: automatic place-based "
+                        "Loop closure enabled with '%s' profile (%s): automatic place-based "
                         "detection and RViz markers active (no elapsed-time gate).",
-                        loop_profile.c_str());
+                        loop_profile.c_str(), loop_profile_file.c_str());
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "Loop closure disabled by loop_closure.enable=false.");
         }
 
     }
@@ -1658,7 +1822,8 @@ private:
             p_imu->AccelerationScale();
         odometry_prediction_time_ = lidar_end_time;
         odometry_prediction_correction_time_ = lidar_end_time;
-        odometry_prediction_observation_time_ = imu_observation_calendar_.NextEpoch();
+        odometry_prediction_observation_time_ =
+            imu_observation_calendar_.NextEpoch();
         next_odometry_prediction_publish_time_ =
             lidar_end_time + 1.0 / odometry_publish_rate_hz;
         odometry_prediction_ready_ = true;
@@ -1691,16 +1856,19 @@ private:
             {
                 pending_sonar_time = lidar_end_time;
             }
-            else if (!input_buffers_.time_buffer.empty() && !input_buffers_.lidar_buffer.empty())
+            else if (!input_buffers_.time_buffer.empty() &&
+                     !input_buffers_.lidar_buffer.empty())
             {
-                const double scan_begin_time = input_buffers_.time_buffer.front();
+                const double scan_begin_time =
+                    input_buffers_.time_buffer.front();
                 const auto &scan = input_buffers_.lidar_buffer.front();
                 double scan_duration = input_buffers_.lidar_mean_scantime;
                 if (scan && scan->points.size() > 1U)
                 {
                     const double measured_duration =
                         scan->points.back().curvature / 1000.0;
-                    if (measured_duration >= 0.5 * input_buffers_.lidar_mean_scantime)
+                    if (measured_duration >=
+                        0.5 * input_buffers_.lidar_mean_scantime)
                     {
                         scan_duration = measured_duration;
                     }
@@ -1904,13 +2072,20 @@ private:
         diagnostic_msgs::msg::DiagnosticStatus status;
         status.name = "uwfl2/navigation";
         status.hardware_id = "uwfl2";
-        double imu_stamp, sonar_stamp, scan_stamp, frontier, sonar_lag, sonar_late_age;
+        double imu_stamp, first_imu_stamp, sonar_stamp, scan_stamp, frontier,
+               sonar_lag, sonar_late_age, pending_scan_begin,
+               pending_scan_end, queued_imu_front;
         std::size_t sonar_received, sonar_late_dropped,
-                    sonar_nonmonotonic_dropped;
+                    sonar_nonmonotonic_dropped, pending_sonar_epochs,
+                    queued_sonar_scans, queued_imu_samples;
+        bool scan_is_pushed;
+        bool sonar_preprocessing, navigation_precedes_scan;
+        uwfl2::MappingInputBuffers::SonarWatermarkStatus sonar_watermark;
         uwfl2::MappingInputBuffers::Clock::time_point imu_receipt;
         {
             std::lock_guard<std::mutex> lock(input_buffers_.mtx_buffer);
             imu_stamp = input_buffers_.last_timestamp_imu;
+            first_imu_stamp = input_buffers_.first_timestamp_imu;
             sonar_stamp = input_buffers_.last_timestamp_lidar;
             scan_stamp = input_buffers_.last_scan_end_time;
             frontier = input_buffers_.last_processed_time;
@@ -1921,8 +2096,29 @@ private:
                 input_buffers_.sonar_nonmonotonic_dropped;
             sonar_lag = input_buffers_.max_sonar_acquisition_lag;
             sonar_late_age = input_buffers_.max_sonar_late_age;
+            pending_sonar_epochs =
+                input_buffers_.pending_sonar_timestamps.size();
+            queued_sonar_scans = input_buffers_.lidar_buffer.size();
+            queued_imu_samples = input_buffers_.imu_buffer.size();
+            queued_imu_front = input_buffers_.imu_buffer.empty()
+                ? -1.0
+                : get_time_sec(input_buffers_.imu_buffer.front()->header.stamp);
+            scan_is_pushed = input_buffers_.lidar_pushed;
+            sonar_preprocessing = input_buffers_.sonar_processing;
+            pending_scan_begin = input_buffers_.time_buffer.empty()
+                ? -1.0 : input_buffers_.time_buffer.front();
+            pending_scan_end = input_buffers_.lidar_pushed
+                ? lidar_end_time : -1.0;
+            navigation_precedes_scan =
+                input_buffers_.NavigationPacketPrecedesSonar(
+                    imu_only_packet_duration(), expected_imu_period(),
+                    expected_imu_timeout(), lidar_timeout);
+            sonar_watermark = input_buffers_.SonarWatermark(imu_stamp);
         }
         const auto aux = aux_fusion_.availability();
+        const auto aux_watermark = aux_fusion_.correction_watermark(
+            imu_stamp, first_imu_stamp,
+            sonar_watermark.draining);
         // Acquisition ages must not mix synthetic/bag epochs with host wall time.
         // With simulation time enabled, /clock also reveals a stalled IMU stream.
         const double now = this->get_parameter("use_sim_time").as_bool()
@@ -1965,6 +2161,34 @@ private:
         add("pressure_received", aux_fusion_.pressure_enabled() && available(aux.pressure_stamp, 2.0 * aux.pressure_timeout) ? "true" : "false");
         add("magnetometer_received", aux_fusion_.mag_enabled() && available(aux.magnetometer_stamp, 2.0 * aux.magnetometer_timeout) ? "true" : "false");
         add("state_timestamp", std::to_string(frontier));
+        add("latest_imu_timestamp", std::to_string(imu_stamp));
+        add("latest_sonar_timestamp", std::to_string(sonar_stamp));
+        add("last_completed_scan_timestamp", std::to_string(scan_stamp));
+        add("latest_dvl_timestamp", std::to_string(aux.dvl_stamp));
+        add("latest_pressure_timestamp", std::to_string(aux.pressure_stamp));
+        add("latest_magnetometer_timestamp",
+            std::to_string(aux.magnetometer_stamp));
+        add("auxiliary_watermark_time",
+            std::to_string(aux_watermark.safe_time));
+        add("sonar_watermark_time",
+            std::to_string(sonar_watermark.safe_time));
+        add("scan_is_pushed", scan_is_pushed ? "true" : "false");
+        add("pending_scan_begin_timestamp",
+            std::to_string(pending_scan_begin));
+        add("pending_scan_end_timestamp",
+            std::to_string(pending_scan_end));
+        add("queued_sonar_scans", std::to_string(queued_sonar_scans));
+        add("queued_imu_samples", std::to_string(queued_imu_samples));
+        add("queued_imu_front_timestamp", std::to_string(queued_imu_front));
+        add("sonar_preprocessing",
+            sonar_preprocessing ? "true" : "false");
+        add("navigation_packet_precedes_scan",
+            navigation_precedes_scan ? "true" : "false");
+        add("processing_stage",
+            std::to_string(processing_stage_.load(std::memory_order_relaxed)));
+        add("scheduling_wait_reason",
+            std::to_string(scheduling_wait_reason_.load(
+                std::memory_order_relaxed)));
         add("availability_time_reference", this->get_parameter("use_sim_time").as_bool()
             ? "sensor_time_and_ros_clock" : "latest_imu_acquisition_time");
         add("processing_lag_seconds", std::to_string(imu_stamp - frontier));
@@ -1978,6 +2202,30 @@ private:
             std::to_string(sonar_nonmonotonic_dropped));
         add("maximum_sonar_acquisition_lag_seconds", std::to_string(sonar_lag));
         add("maximum_sonar_late_age_seconds", std::to_string(sonar_late_age));
+        add("correction_watermark_time", std::to_string(std::min(
+            sonar_watermark.safe_time, aux_watermark.safe_time)));
+        add("correction_watermark_lag_seconds", std::to_string(std::max(
+            0.0, imu_stamp - std::min(
+                sonar_watermark.safe_time, aux_watermark.safe_time))));
+        add("transport_draining",
+            sonar_watermark.draining ? "true" : "false");
+        add("pending_sonar_epochs", std::to_string(pending_sonar_epochs));
+        add("sonar_watermark_holding",
+            sonar_watermark.holding ? "true" : "false");
+        add("sonar_transport_missing",
+            sonar_watermark.missing ? "true" : "false");
+        add("dvl_watermark_holding",
+            aux_watermark.dvl_holding ? "true" : "false");
+        add("pressure_watermark_holding",
+            aux_watermark.pressure_holding ? "true" : "false");
+        add("magnetometer_watermark_holding",
+            aux_watermark.magnetometer_holding ? "true" : "false");
+        add("dvl_transport_missing",
+            aux_watermark.dvl_missing ? "true" : "false");
+        add("pressure_transport_missing",
+            aux_watermark.pressure_missing ? "true" : "false");
+        add("magnetometer_transport_missing",
+            aux_watermark.magnetometer_missing ? "true" : "false");
         if (initialized)
         {
             const MainEkf::cov covariance = kf.get_P();
@@ -2113,6 +2361,7 @@ private:
 
     void timer_callback()
     {
+        processing_stage_.store(1, std::memory_order_relaxed);
         if (!ensure_initial_world_pose()) return;
         try_commit_loop_correction();
         if (provisional_map_reset_requested_)
@@ -2135,6 +2384,7 @@ private:
 
         if(has_measurement)
         {
+            processing_stage_.store(2, std::memory_order_relaxed);
             uwfl2::LidarUpdateResult lidar_update_result;
             const auto interval_availability = sonar_availability_;
             effct_feat_num = 0;
@@ -2265,10 +2515,12 @@ private:
                         last_dvl_applied_time_ = measurement.timestamp;
                     return applied;
                 });
+            processing_stage_.store(3, std::memory_order_relaxed);
             if (auxiliary_fusion_enabled)
                 aux_fusion_.warn_timeouts(*this, Measures.lidar_end_time);
             input_buffers_.last_processed_time = Measures.lidar_end_time;
             update_state_outputs();
+            processing_stage_.store(4, std::memory_order_relaxed);
 
             if (imu_only_measure)
             {
@@ -2295,7 +2547,9 @@ private:
                                              lidar_gap, lidar_timeout);
                     }
                 }
+                processing_stage_.store(5, std::memory_order_relaxed);
                 publish_estimator_outputs();
+                processing_stage_.store(0, std::memory_order_relaxed);
                 return;
             }
 
@@ -2479,7 +2733,7 @@ private:
                         ? "inconsistent_recovery" : "unusable_correspondences";
                 update_state_outputs();
                 if (sonar_adaptive_registration && effct_feat_num == 0)
-                    publish_provisional_scan(Measures.lidar_end_time);
+                    retain_provisional_scan();
 
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(), *this->get_clock(), 2000,
@@ -2541,32 +2795,19 @@ private:
     {
         if (provisional_scans_.empty()) return;
         provisional_scans_.clear();
-        publish_provisional_map(lidar_end_time);
     }
 
-    void publish_provisional_scan(double timestamp)
+    void retain_provisional_scan()
     {
-        // Display only: retain uncertain navigation anchors, never feed these
-        // points to correspondence search, the trusted tree, or loop closure.
+        // Diagnostic bookkeeping only: retain uncertain navigation anchors,
+        // but never publish them or feed them to correspondence search, the
+        // trusted tree, or loop closure.
         PointCloudXYZI::Ptr points(new PointCloudXYZI());
         points->resize(feats_undistort->size());
         for (std::size_t i = 0; i < points->size(); ++i)
             pointBodyToWorld(&feats_undistort->points[i], &points->points[i]);
         provisional_scans_.push_back({points, kf.get_x(), kf.get_P()});
         if (provisional_scans_.size() > 20) provisional_scans_.pop_front();
-        publish_provisional_map(timestamp);
-    }
-
-    void publish_provisional_map(double timestamp)
-    {
-        if (!provisional_map_pub_ || provisional_map_pub_->get_subscription_count() == 0) return;
-        PointCloudXYZI cloud;
-        for (const auto &scan : provisional_scans_) cloud += *scan.points;
-        sensor_msgs::msg::PointCloud2 message;
-        pcl::toROSMsg(cloud, message);
-        message.header.frame_id = "camera_init";
-        message.header.stamp = get_ros_time(timestamp);
-        provisional_map_pub_->publish(message);
     }
 
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
@@ -2655,11 +2896,15 @@ private:
         marker.header.stamp = stamp;
         marker.ns = "uwfl2_corrected_map";
         marker.id = id;
-        marker.type = visualization_msgs::msg::Marker::POINTS;
+        marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.03;
-        marker.scale.y = 0.03;
+        // A zero lifetime keeps every accumulated map chunk until an explicit
+        // loop-correction resynchronization replaces the complete map.
+        marker.lifetime = rclcpp::Duration::from_seconds(0.0);
+        marker.scale.x = corrected_map_point_size_;
+        marker.scale.y = corrected_map_point_size_;
+        marker.scale.z = corrected_map_point_size_;
         marker.points.reserve(cloud.size());
         marker.colors.reserve(cloud.size());
         for (const PointType &point : cloud.points)
@@ -2670,8 +2915,6 @@ private:
             output.z = point.z;
             marker.points.push_back(output);
 
-            // Fixed absolute-z coloring keeps equal heights visually
-            // consistent across independently published scan markers.
             const float z_normalized = std::clamp(
                 static_cast<float>((point.z + 5.0) / 10.0), 0.0F, 1.0F);
             std_msgs::msg::ColorRGBA color;
@@ -2722,7 +2965,7 @@ private:
         }
 
         std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
-        if (corrected_map_queue_.size() >= 32U)
+        if (corrected_map_queue_.size() >= 256U)
         {
             corrected_map_queue_.clear();
             corrected_map_publish_requested_.store(true);
@@ -2855,8 +3098,6 @@ private:
             // a growing vector repeatedly copied the full mission map.
             pending_mapping_scans_.push_back(scan);
         }
-        // The backend owns visualization filtering and DDS publication. The
-        // front end only enqueues shared scan storage after committing it.
         enqueue_mapping_scan_for_visualization(scan);
     }
 
@@ -2899,6 +3140,7 @@ private:
 
     CorrectedMappingOutput prepare_corrected_mapping_output(
         const uwfl2::loop_closure::ShadowMapResult &shadow_map,
+        const uwfl2::loop_closure::PoseGraphSnapshot &live_graph,
         const uwfl2::loop_closure::Pose3d &latest_correction) const
     {
         CorrectedMappingOutput output;
@@ -2920,6 +3162,47 @@ private:
             converted.normal_x = converted.normal_y = converted.normal_z = 0.0F;
             converted.curvature = 0.0F;
             output.cloud->points.push_back(converted);
+        }
+
+        // The shadow map intentionally belongs to the graph snapshot that was
+        // evaluated when the transaction started.  Preserve every keyframe
+        // appended since then.  These tail scans have not seen a loop factor,
+        // so the registration's latest rigid correction is the best bounded
+        // transform available until the asynchronous history rebuild runs.
+        const auto append_corrected_points = [&](const auto &source) {
+            if (!source)
+            {
+                return;
+            }
+            for (const auto &point : *source)
+            {
+                const Eigen::Vector3d corrected =
+                    latest_correction.rotation *
+                        Eigen::Vector3d(point.x, point.y, point.z) +
+                    latest_correction.translation;
+                if (!corrected.allFinite())
+                {
+                    continue;
+                }
+                PointType converted;
+                converted.x = static_cast<float>(corrected.x());
+                converted.y = static_cast<float>(corrected.y());
+                converted.z = static_cast<float>(corrected.z());
+                converted.intensity = point.intensity;
+                converted.normal_x = converted.normal_y = converted.normal_z =
+                    0.0F;
+                converted.curvature = 0.0F;
+                output.cloud->points.push_back(converted);
+            }
+        };
+        for (std::size_t index = shadow_map.graph_node_count;
+             index < live_graph.keyframes.size(); ++index)
+        {
+            for (const MappingScan &scan :
+                 live_graph.keyframes[index].map_scans_world)
+            {
+                append_corrected_points(scan.points_world);
+            }
         }
 
         const auto pending = pending_mapping_scans();
@@ -3013,23 +3296,11 @@ private:
             return;
         }
 
-        const auto graph = loop_closure_->graph_snapshot();
-        if (candidate->registration->scan_generation != latest_scan_generation_ ||
-            candidate->scan->active_tree_generation != active_tree_generation_ ||
-            candidate->registration->graph_version != graph.version)
+        if (!candidate->transaction ||
+            candidate->shadow_map->transaction_id !=
+                candidate->transaction->id)
         {
-            loop_closure_->request_registration_refresh(
-                candidate->shadow_map, candidate->refresh_attempt + 1);
-            reject(
-                "stale_scan_tree_or_graph_version(scan=" +
-                std::to_string(candidate->registration->scan_generation) +
-                "/" + std::to_string(latest_scan_generation_) +
-                ", tree=" +
-                std::to_string(candidate->scan->active_tree_generation) +
-                "/" + std::to_string(active_tree_generation_) +
-                ", graph=" +
-                std::to_string(candidate->registration->graph_version) +
-                "/" + std::to_string(graph.version) + ")");
+            reject("missing_or_mismatched_loop_transaction");
             return;
         }
 
@@ -3043,7 +3314,8 @@ private:
             return;
         }
 
-        state_ikfom corrected_state = kf.get_x();
+        auto original_state = kf.get_x();
+        state_ikfom corrected_state = original_state;
         const Eigen::Matrix3d correction_rotation =
             correction.rotation.toRotationMatrix();
         corrected_state.pos =
@@ -3051,7 +3323,16 @@ private:
         corrected_state.rot = SO3(
             correction_rotation * corrected_state.rot.toRotationMatrix());
         corrected_state.vel = correction_rotation * corrected_state.vel;
-        const auto &original_state = kf.get_x();
+        // The live pose/map correction is a local world-frame transform.  Its
+        // rotation must also act on the nominal gravity direction; otherwise
+        // even a small loop-induced roll/pitch change appears to the process
+        // model as a sustained horizontal acceleration.
+        corrected_state.grav =
+            SO3(correction_rotation) * original_state.grav;
+        const V3D expected_gravity =
+            correction_rotation *
+            V3D(original_state.grav[0], original_state.grav[1],
+                original_state.grav[2]);
         const bool protected_states_unchanged =
             corrected_state.offset_R_L_I.toRotationMatrix().isApprox(
                 original_state.offset_R_L_I.toRotationMatrix(), 0.0) &&
@@ -3060,9 +3341,7 @@ private:
             corrected_state.ba.isApprox(original_state.ba, 0.0) &&
             V3D(corrected_state.grav[0], corrected_state.grav[1],
                 corrected_state.grav[2])
-                .isApprox(V3D(original_state.grav[0], original_state.grav[1],
-                              original_state.grav[2]),
-                          0.0) &&
+                .isApprox(expected_gravity, 1e-12) &&
             corrected_state.b_dvl.isApprox(original_state.b_dvl, 0.0) &&
             corrected_state.b_pressure.isApprox(original_state.b_pressure, 0.0);
         if (!protected_states_unchanged)
@@ -3076,9 +3355,19 @@ private:
             registration.graph_anchor_covariance_position_rotation;
         correction_covariance =
             0.5 * (correction_covariance + correction_covariance.transpose());
+        Eigen::Matrix<double, 2, 3> corrected_gravity_chart;
+        Eigen::Matrix<double, 3, 2> original_gravity_tangent;
+        Eigen::Matrix<double, 2, 1> zero_gravity_delta =
+            Eigen::Matrix<double, 2, 1>::Zero();
+        corrected_state.S2_Nx_yy(corrected_gravity_chart, 21);
+        original_state.S2_Mx(original_gravity_tangent, zero_gravity_delta, 21);
+        const Eigen::Matrix2d gravity_tangent_transport =
+            corrected_gravity_chart * correction_rotation *
+            original_gravity_tangent;
         const auto transported_covariance =
             uwfl2::loop_closure::transport_uwfl2_covariance(
-                kf.get_P(), correction_rotation);
+                kf.get_P(), correction_rotation,
+                gravity_tangent_transport);
         const auto corrected_covariance =
             uwfl2::loop_closure::apply_pose_covariance_update(
                 transported_covariance, correction_covariance);
@@ -3119,7 +3408,9 @@ private:
         }
 
         const CorrectedMappingOutput corrected_mapping_output =
-            prepare_corrected_mapping_output(*candidate->shadow_map, correction);
+            prepare_corrected_mapping_output(
+                *candidate->shadow_map, loop_closure_->graph_snapshot(),
+                correction);
 
         const auto old_state = kf.get_x();
         const auto old_covariance = kf.get_P();
@@ -3132,6 +3423,77 @@ private:
         try
         {
             auto replacement_tree = candidate->shadow_map->tree;
+            const auto live_graph = loop_closure_->graph_snapshot();
+            if (candidate->shadow_map->graph_node_count >
+                live_graph.keyframes.size())
+            {
+                reject("shadow_graph_node_count_ahead_of_live_graph");
+                return;
+            }
+
+            PointVector tail_points;
+            std::vector<uwfl2::SonarReferencePoint> tail_sources;
+            const M3D tail_rotation = correction.rotation.toRotationMatrix();
+            const auto append_tail_scan = [&](const MappingScan &scan) {
+                if (!scan.compact_points_world)
+                {
+                    return true;
+                }
+                const auto &points = *scan.compact_points_world;
+                const auto &covariances =
+                    scan.compact_measurement_covariances_world;
+                if (sonar_adaptive_registration &&
+                    (!covariances || covariances->size() != points.size()))
+                {
+                    return false;
+                }
+                for (std::size_t index = 0; index < points.size(); ++index)
+                {
+                    const auto &point = points[index];
+                    const V3D corrected =
+                        tail_rotation * V3D(point.x, point.y, point.z) +
+                        correction.translation;
+                    if (!corrected.allFinite())
+                    {
+                        continue;
+                    }
+                    PointType transformed;
+                    transformed.x = static_cast<float>(corrected.x());
+                    transformed.y = static_cast<float>(corrected.y());
+                    transformed.z = static_cast<float>(corrected.z());
+                    transformed.intensity = point.intensity;
+                    tail_points.push_back(transformed);
+                    if (sonar_adaptive_registration)
+                    {
+                        tail_sources.push_back(
+                            {corrected,
+                             tail_rotation * covariances->at(index) *
+                                 tail_rotation.transpose()});
+                    }
+                }
+                return true;
+            };
+            for (std::size_t index = candidate->shadow_map->graph_node_count;
+                 index < live_graph.keyframes.size(); ++index)
+            {
+                for (const MappingScan &scan :
+                     live_graph.keyframes[index].map_scans_world)
+                {
+                    if (!append_tail_scan(scan))
+                    {
+                        reject("adaptive_tail_covariance_size_mismatch");
+                        return;
+                    }
+                }
+            }
+            for (const MappingScan &scan : pending_mapping_scans())
+            {
+                if (!append_tail_scan(scan))
+                {
+                    reject("adaptive_pending_covariance_size_mismatch");
+                    return;
+                }
+            }
             if (sonar_adaptive_registration)
             {
                 const auto &points = candidate->shadow_map->covariance_points;
@@ -3146,6 +3508,8 @@ private:
                 sources.reserve(points->size() + registered_scan.size());
                 for (std::size_t i = 0; i < points->size(); ++i)
                     sources.push_back({V3D((*points)[i].x, (*points)[i].y, (*points)[i].z), (*covariances)[i]});
+                sources.insert(sources.end(), tail_sources.begin(),
+                               tail_sources.end());
                 const M3D rotation = T_local_sonar.rotation.toRotationMatrix();
                 for (std::size_t i = 0; i < registered_scan.size(); ++i)
                 {
@@ -3163,6 +3527,10 @@ private:
                     reject("adaptive_uncertainty_record_failed");
                     return;
                 }
+            }
+            if (!tail_points.empty())
+            {
+                replacement_tree->Add_Points(tail_points, true);
             }
             replacement_tree->Add_Points(registered_scan, true);
             if (sonar_adaptive_registration)
@@ -3183,7 +3551,30 @@ private:
                     return;
                 }
             }
-            const BoxPointType replacement_bounds = replacement_tree->tree_range();
+            const auto committed =
+                loop_closure_->commit_loop_candidate(candidate->transaction);
+            if (!committed.candidate.evaluation.accepted)
+            {
+                reject("graph_commit_rejected:" +
+                       committed.candidate.evaluation.reason);
+                return;
+            }
+            // lasermap_fov_segment() assumes LocalMap_Points is the configured
+            // cube, not the tight bounds of the points currently in the IKD
+            // tree.  Supplying tree_range() makes every face look close and
+            // causes its next deletion pass to erase nearly the entire
+            // replacement map.
+            BoxPointType replacement_bounds;
+            const V3D corrected_sonar_position =
+                corrected_state.pos +
+                corrected_state.rot * corrected_state.offset_T_L_I;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                replacement_bounds.vertex_min[axis] =
+                    corrected_sonar_position(axis) - cube_len / 2.0;
+                replacement_bounds.vertex_max[axis] =
+                    corrected_sonar_position(axis) + cube_len / 2.0;
+            }
             auto mutable_covariance = corrected_covariance;
             kf.change_x(corrected_state);
             kf.change_P(mutable_covariance);
@@ -3198,18 +3589,17 @@ private:
             pos_lid = state_point.pos +
                       state_point.rot * state_point.offset_T_L_I;
             position_last = state_point.pos;
-            loop_closure_->notify_correction_result(true, elapsed_ms());
+            loop_closure_->notify_correction_result(
+                true, elapsed_ms(), {}, correction);
             // Unregistered display geometry is not graph-corrected history.
             // Clear it after the atomic transaction, never reinterpret its anchors.
             provisional_map_reset_requested_ = true;
+            const auto &loop_evaluation = committed.candidate.evaluation;
             RCLCPP_INFO(
                 this->get_logger(),
-                "Loop covariance posterior committed: position trace %.6g -> %.6g m^2, "
-                "attitude trace %.6g -> %.6g rad^2.",
-                transported_covariance.block<3, 3>(0, 0).trace(),
-                corrected_covariance.block<3, 3>(0, 0).trace(),
-                transported_covariance.block<3, 3>(3, 3).trace(),
-                corrected_covariance.block<3, 3>(3, 3).trace());
+                "LC committed: %lu -> %lu.",
+                static_cast<unsigned long>(loop_evaluation.source_id),
+                static_cast<unsigned long>(loop_evaluation.target_id));
             if (corrected_mapping_output.cloud)
             {
                 {
@@ -3299,23 +3689,16 @@ private:
             return;
         }
 
-        // Drain and combine pending scans into one DDS message. At x1 this is
-        // normally one sonar frame; accelerated replay avoids publishing a
-        // separate MarkerArray for every sensor-time frame.
+        MappingScanQueue scans;
+        {
+            std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
+            scans.swap(corrected_map_queue_);
+        }
+
         PointCloudXYZI display_cloud;
         double latest_timestamp = -1.0;
-        for (int drained = 0; drained < 32; ++drained)
+        for (const MappingScan &scan : scans)
         {
-            MappingScan scan;
-            {
-                std::lock_guard<std::mutex> lock(corrected_map_queue_mutex_);
-                if (corrected_map_queue_.empty())
-                {
-                    break;
-                }
-                scan = std::move(corrected_map_queue_.front());
-                corrected_map_queue_.pop_front();
-            }
             append_mapping_scan_display_points(scan, display_cloud);
             latest_timestamp = std::max(latest_timestamp, scan.timestamp);
         }
@@ -3386,8 +3769,7 @@ private:
 
     void maybe_publish_loop_visualization()
     {
-        if (!loop_closure_ || !loop_visualization_enabled_ ||
-            !loop_markers_pub_)
+        if (!loop_closure_)
         {
             return;
         }
@@ -3397,11 +3779,16 @@ private:
             return;
         }
         next_loop_visualization_publish_ = now + std::chrono::milliseconds(500);
+        const auto stats = loop_closure_->stats();
+        publish_loop_diagnostics(stats);
         publish_graph_paths();
+        if (!loop_visualization_enabled_ || !loop_markers_pub_)
+        {
+            return;
+        }
 
         const auto graph = loop_closure_->graph_snapshot();
         const auto events = loop_closure_->visualization_events();
-        const auto stats = loop_closure_->stats();
         const auto stamp = this->get_clock()->now();
         visualization_msgs::msg::MarkerArray output;
 
@@ -3528,42 +3915,161 @@ private:
             status.pose.position.y = graph.optimized_poses.back().translation.y();
             status.pose.position.z = graph.optimized_poses.back().translation.z() + 2.0;
         }
-        status.text = "UWFL2-LC | keyframes: " +
-                      std::to_string(graph.node_count) + " | proposed: " +
+        status.text = "proposed: " +
                       std::to_string(stats.std_proposed) + " | accepted: " +
                       std::to_string(stats.std_accepted) + " | rejected: " +
                       std::to_string(stats.std_graph_rejected) + " | committed: " +
-                      std::to_string(stats.corrections_committed) +
-                      " | descriptor rejects: " +
-                      std::to_string(stats.std_descriptor_rejected) +
-                      " | geometry rejects: " +
-                      std::to_string(stats.std_geometry_rejected) +
-                      " | awaiting confirmation: " +
-                      std::to_string(stats.std_awaiting_confirmation) +
-                      " | registration rejects: " +
-                      std::to_string(stats.registrations_rejected) +
-                      " | commit rejects: " +
-                      std::to_string(stats.corrections_rejected);
-        const auto last_graph_rejection = std::find_if(
-            events.rbegin(), events.rend(),
-            [](const auto &event) { return event.rejected; });
-        if (last_graph_rejection != events.rend())
-        {
-            status.text += " | last graph rejection: " +
-                           last_graph_rejection->status;
-        }
-        if (!stats.last_registration_rejection_reason.empty())
-        {
-            status.text += " | last registration rejection: " +
-                           stats.last_registration_rejection_reason;
-        }
-        if (!stats.last_commit_rejection_reason.empty())
-        {
-            status.text += " | last commit rejection: " +
-                           stats.last_commit_rejection_reason;
-        }
+                      std::to_string(stats.corrections_committed);
         output.markers.push_back(std::move(status));
         loop_markers_pub_->publish(output);
+    }
+
+    void publish_loop_diagnostics(
+        const uwfl2::loop_closure::LoopClosureStats &stats)
+    {
+        if (!loop_diagnostics_pub_)
+        {
+            return;
+        }
+        diagnostic_msgs::msg::DiagnosticArray message;
+        message.header.stamp = this->get_clock()->now();
+        diagnostic_msgs::msg::DiagnosticStatus status;
+        status.name = "uwfl2/loop_closure";
+        status.hardware_id = "uwfl2";
+        status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+        status.message = stats.active_transaction_id == 0
+                             ? "idle"
+                             : stats.active_transaction_stage;
+        const auto add = [&](const std::string &key, const auto &value) {
+            diagnostic_msgs::msg::KeyValue item;
+            item.key = key;
+            item.value = std::to_string(value);
+            status.values.push_back(std::move(item));
+        };
+        const auto add_text = [&](const std::string &key,
+                                  const std::string &value) {
+            diagnostic_msgs::msg::KeyValue item;
+            item.key = key;
+            item.value = value;
+            status.values.push_back(std::move(item));
+        };
+        add("transaction_id", stats.active_transaction_id);
+        add("source_id", stats.active_transaction_source_id);
+        add("target_id", stats.active_transaction_target_id);
+        add("transaction_age_ms", stats.active_transaction_age_ms);
+        add("graph_queue_depth", stats.graph_queue_depth);
+        add("detector_queue_depth", stats.detector_queue_depth);
+        add("graph_queue_dropped", stats.dropped);
+        add("detector_queue_dropped", stats.detector_dropped);
+        add("graph_queue_time_ms_max", stats.graph_queue_time_ms_max);
+        add("detector_queue_time_ms_max", stats.detector_queue_time_ms_max);
+        add("descriptor_time_ms_max", stats.descriptor_time_ms_max);
+        add("search_time_ms_max", stats.search_time_ms_max);
+        add("verification_time_ms_max", stats.verification_time_ms_max);
+        add("shadow_build_time_ms_max", stats.shadow_build_time_ms_max);
+        add("registration_time_ms_max", stats.registration_time_ms_max);
+        add("commit_time_ms_max", stats.commit_time_ms_max);
+        add("candidate_to_commit_time_ms_last",
+            stats.candidate_to_commit_time_ms_last);
+        add("candidate_to_commit_time_ms_max",
+            stats.candidate_to_commit_time_ms_max);
+        add("candidate_accepted", stats.loops_accepted);
+        add("candidate_rejected", stats.loops_rejected);
+        add("committed", stats.corrections_committed);
+        add("commit_rejected", stats.corrections_rejected);
+        add("submitted_keyframes", stats.submitted);
+        add("processed_keyframes", stats.processed);
+        add("std_processed", stats.std_processed);
+        add("std_proposed", stats.std_proposed);
+        add("std_descriptor_rejected", stats.std_descriptor_rejected);
+        add("std_geometry_rejected", stats.std_geometry_rejected);
+        add("std_awaiting_confirmation", stats.std_awaiting_confirmation);
+        add("std_graph_rejected", stats.std_graph_rejected);
+        add_text("last_std_reason", stats.last_std_detection.reason);
+        add("last_std_source_id", stats.last_std_detection.source_id);
+        add("last_std_target_id", stats.last_std_detection.target_id);
+        add("last_std_keypoints", stats.last_std_detection.keypoints);
+        add("last_std_triangles", stats.last_std_detection.triangles);
+        add("last_std_descriptor_matches",
+            stats.last_std_detection.descriptor_matches);
+        add("last_std_ransac_inliers",
+            stats.last_std_detection.ransac_inliers);
+        add("last_std_overlap", stats.last_std_detection.overlap);
+        add("last_std_gravity_disagreement_rad",
+            stats.last_std_detection.gravity_disagreement_rad);
+        add("shadow_builds_started", stats.shadow_builds_started);
+        add("shadow_builds_ready", stats.shadow_builds_ready);
+        add("shadow_builds_failed", stats.shadow_builds_failed);
+        add("registrations_ready", stats.registrations_ready);
+        add("registrations_rejected", stats.registrations_rejected);
+        add_text("last_registration_rejection_reason",
+                 stats.last_registration_rejection_reason);
+        add_text("last_commit_rejection_reason",
+                 stats.last_commit_rejection_reason);
+        add_text("last_graph_evaluation_reason",
+                 stats.last_graph_evaluation.reason);
+        add("last_graph_source_id", stats.last_graph_evaluation.source_id);
+        add("last_graph_target_id", stats.last_graph_evaluation.target_id);
+        add("last_graph_initial_nis",
+            stats.last_graph_evaluation.initial_nis);
+        add("last_graph_error_before",
+            stats.last_graph_evaluation.graph_error_before);
+        add("last_graph_error_after",
+            stats.last_graph_evaluation.graph_error_after);
+        add("last_existing_graph_error_before",
+            stats.last_graph_evaluation.existing_graph_error_before);
+        add("last_existing_graph_error_after",
+            stats.last_graph_evaluation.existing_graph_error_after);
+        add("last_loop_translation_error_before_m",
+            stats.last_graph_evaluation.loop_translation_error_before);
+        add("last_loop_translation_error_after_m",
+            stats.last_graph_evaluation.loop_translation_error_after);
+        add("last_loop_rotation_error_before_rad",
+            stats.last_graph_evaluation.loop_rotation_error_before_rad);
+        add("last_loop_rotation_error_after_rad",
+            stats.last_graph_evaluation.loop_rotation_error_after_rad);
+        add("last_maximum_pose_correction_translation_m",
+            stats.last_graph_evaluation.maximum_pose_correction_translation_m);
+        add("last_maximum_pose_correction_rotation_rad",
+            stats.last_graph_evaluation.maximum_pose_correction_rotation_rad);
+        add("last_maximum_pose_correction_tilt_rad",
+            stats.last_graph_evaluation.maximum_pose_correction_tilt_rad);
+        const auto registration = loop_closure_->registration_snapshot();
+        if (registration)
+        {
+            add_text("latest_registration_reason", registration->reason);
+            add("latest_registration_scan_timestamp",
+                registration->scan_timestamp);
+            add("latest_registration_scan_generation",
+                registration->scan_generation);
+            add("latest_registration_raw_effective_points",
+                registration->raw_effective_points);
+            add("latest_registration_initial_effective_points",
+                registration->initial_effective_points);
+            add("latest_registration_final_effective_points",
+                registration->final_effective_points);
+            add("latest_registration_raw_residual_mean_m",
+                registration->raw_residual_mean_m);
+            add("latest_registration_initial_residual_mean_m",
+                registration->initial_residual_mean_m);
+            add("latest_registration_final_residual_mean_m",
+                registration->final_residual_mean_m);
+            add("latest_registration_final_residual_p95_m",
+                registration->final_residual_p95_m);
+            add("latest_registration_information_min_eigenvalue",
+                registration->information_min_eigenvalue);
+            add("latest_registration_information_condition",
+                registration->information_condition);
+        }
+        const auto events = loop_closure_->visualization_events();
+        if (!events.empty())
+        {
+            add_text("last_candidate_status", events.back().status);
+            add("last_candidate_source_id", events.back().source_id);
+            add("last_candidate_target_id", events.back().target_id);
+        }
+        message.status.push_back(std::move(status));
+        loop_diagnostics_pub_->publish(message);
     }
 
     void submit_loop_keyframe(double timestamp)
@@ -3627,10 +4133,19 @@ private:
     }
 
     uwfl2::MappingInputBuffers input_buffers_;
-    bool aux_reorder_waiting = false;
-    double aux_reorder_target_time = -1.0;
-    std::chrono::steady_clock::time_point aux_reorder_wait_start;
     AuxiliarySensorFusion aux_fusion_;
+    std::mutex sonar_ingress_mutex_;
+    std::condition_variable sonar_ingress_condition_;
+    std::deque<sensor_msgs::msg::PointCloud2::UniquePtr>
+        sonar_ingress_queue_;
+    bool sonar_ingress_stopping_ = false;
+    std::thread sonar_preprocess_thread_;
+    std::unique_ptr<rclcpp::executors::SingleThreadedExecutor>
+        lidar_executor_;
+    std::thread lidar_executor_thread_;
+    std::unique_ptr<rclcpp::executors::SingleThreadedExecutor>
+        sensor_executor_;
+    std::thread sensor_executor_thread_;
     std::string sonar_condition_ = "initializing";
     uwfl2::SonarAvailability sonar_availability_;
     uwfl2::SonarInputMetrics sonar_input_metrics_;
@@ -3642,12 +4157,12 @@ private:
     std::chrono::steady_clock::time_point sonar_processing_start_ = std::chrono::steady_clock::now();
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr sonar_diagnostics_pub_;
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr navigation_health_pub_;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr loop_diagnostics_pub_;
     rclcpp::TimerBase::SharedPtr navigation_health_timer_;
     uwfl2::ImuObservationCalendar imu_observation_calendar_;
     uwfl2::SonarRecovery sonar_recovery_;
     std::deque<ProvisionalScan> provisional_scans_;
     bool provisional_map_reset_requested_ = false;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr provisional_map_pub_;
     std::size_t imu_observation_count_ = 0;
     std::size_t aux_considered_count_ = 0;
     std::size_t aux_applied_count_ = 0;
@@ -3694,10 +4209,15 @@ private:
     rclcpp::TimerBase::SharedPtr corrected_map_timer_;
     rclcpp::TimerBase::SharedPtr prediction_timer_;
     rclcpp::CallbackGroup::SharedPtr backend_callback_group_;
+    std::unique_ptr<rclcpp::executors::SingleThreadedExecutor>
+        backend_executor_;
+    std::thread backend_executor_thread_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool corrected_map_publish_enabled_ = false;
     std::string corrected_map_topic_ = "/uwfl2/corrected_map";
+    double corrected_map_point_size_ = 0.03;
+    double corrected_map_voxel_size_ = 0.15;
     std::string sonar_frame_id_;
     bool empty_sonar_frame_warned_ = false;
     std::atomic<bool> corrected_map_publish_requested_{false};
@@ -3705,12 +4225,18 @@ private:
     std::int32_t next_corrected_map_marker_id_ = 1;
     std::mutex corrected_map_queue_mutex_;
     MappingScanQueue corrected_map_queue_;
-    uwfl2::CorrectedMapDisplayVoxels corrected_map_display_voxels_{0.03};
+    uwfl2::CorrectedMapDisplayVoxels corrected_map_display_voxels_{0.15};
     MainEkf odometry_prediction_kf_;
     Eigen::Matrix<double, process_noise_ikfom::DOF,
                   process_noise_ikfom::DOF> odometry_prediction_Q_ =
         process_noise_cov();
     std::mutex odometry_prediction_state_mutex_;
+    // Diagnostic only: 1=scheduling, 2=measurement preparation,
+    // 3=propagation complete, 4=state outputs updated, 5=publishing/resetting.
+    std::atomic<int> processing_stage_{0};
+    // Diagnostic only: 2=scan ownership/preprocessing, 3=sonar watermark,
+    // 4=no packet tail, 5=tail crosses sonar, 6=aux watermark, 7=empty packet.
+    std::atomic<int> scheduling_wait_reason_{0};
     double odometry_prediction_acceleration_scale_ = 1.0;
     double odometry_prediction_time_ = -1.0;
     double odometry_prediction_correction_time_ = -1.0;
@@ -3738,5 +4264,7 @@ private:
 
 std::shared_ptr<rclcpp::Node> MakeLaserMappingNode(const rclcpp::NodeOptions &options)
 {
-    return std::make_shared<LaserMappingNode>(options);
+    auto node = std::make_shared<LaserMappingNode>(options);
+    node->StartSensorIngress();
+    return node;
 }

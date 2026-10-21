@@ -156,17 +156,35 @@ struct LoopConstraint
 
 struct LoopEvaluation
 {
+    std::uint64_t source_id = 0;
+    std::uint64_t target_id = 0;
     bool accepted = false;
     std::string reason;
     std::uint64_t graph_version = 0;
     double graph_error_before = 0.0;
     double graph_error_after = 0.0;
+    double existing_graph_error_before = 0.0;
+    double existing_graph_error_after = 0.0;
     double loop_translation_error_before = 0.0;
     double loop_translation_error_after = 0.0;
     double loop_rotation_error_before_rad = 0.0;
     double loop_rotation_error_after_rad = 0.0;
+    double maximum_pose_correction_translation_m = 0.0;
+    double maximum_pose_correction_rotation_rad = 0.0;
+    double maximum_pose_correction_tilt_rad = 0.0;
     double initial_nis = 0.0;
     double optimization_time_ms = 0.0;
+};
+
+struct LoopCandidate
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    LoopConstraint constraint;
+    LoopEvaluation evaluation;
+    Pose3d latest_graph_correction;
+    std::uint64_t base_graph_version = 0;
+    std::size_t base_loop_factor_count = 0;
 };
 
 struct KeyframeSelectionConfig
@@ -210,6 +228,14 @@ public:
         has_last_ = true;
         last_timestamp_ = timestamp;
         last_pose_ = pose.normalized();
+    }
+
+    void apply_frame_correction(const Pose3d &correction)
+    {
+        if (has_last_ && correction.finite())
+        {
+            last_pose_ = compose(correction, last_pose_);
+        }
     }
 
 private:

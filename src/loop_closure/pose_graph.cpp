@@ -82,6 +82,15 @@ bool finite_pose(const gtsam::Pose3 &pose)
 
 FullSe3PoseGraph::FullSe3PoseGraph(PoseGraphConfig config) : config_(config)
 {
+    if (config_.loop_minimum_initial_rotation_error_rad < 0.0 ||
+        config_.loop_minimum_initial_rotation_error_rad >
+            config_.loop_maximum_initial_rotation_error_rad ||
+        config_.loop_maximum_pose_correction_tilt_rad <= 0.0 ||
+        config_.loop_maximum_rebase_translation_m <= 0.0 ||
+        config_.loop_maximum_rebase_rotation_rad <= 0.0)
+    {
+        throw std::invalid_argument("Invalid pose-graph loop quality configuration");
+    }
     isam_ = gtsam::ISAM2(isam_parameters());
 }
 
@@ -144,7 +153,13 @@ std::uint64_t FullSe3PoseGraph::append_keyframe(const Keyframe &keyframe)
     else
     {
         const Keyframe &previous = keyframes_.back();
-        const Pose3d relative = between(previous.T_local_vehicle,
+        // A committed loop moves the live front end into the optimized graph
+        // frame. The previous raw keyframe deliberately remains in its
+        // acquisition frame for map reconstruction, so using that raw pose
+        // here would encode the loop correction itself as vehicle motion.
+        const Pose3d previous_live_pose = from_gtsam(
+            estimate_.at<gtsam::Pose3>(pose_key(previous.id)));
+        const Pose3d relative = between(previous_live_pose,
                                         keyframe.T_local_vehicle);
         const Matrix6d covariance = sanitized_odometry_covariance(
             previous.pose_covariance, keyframe.pose_covariance, config_);
@@ -162,11 +177,60 @@ std::uint64_t FullSe3PoseGraph::append_keyframe(const Keyframe &keyframe)
     return version_;
 }
 
-LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
+EvaluatedLoopCandidate FullSe3PoseGraph::evaluate_loop(
+    const LoopConstraint &constraint)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    return evaluate_loop_locked(constraint, false);
+}
+
+EvaluatedLoopCandidate FullSe3PoseGraph::commit_loop(
+    const LoopCandidate &evaluated_candidate)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (evaluated_candidate.base_loop_factor_count != loop_factor_count_)
+    {
+        EvaluatedLoopCandidate stale;
+        stale.candidate = evaluated_candidate;
+        stale.candidate.evaluation.accepted = false;
+        stale.candidate.evaluation.reason = "loop_epoch_changed";
+        stale.candidate.evaluation.graph_version = version_;
+        return stale;
+    }
+    EvaluatedLoopCandidate rebased =
+        evaluate_loop_locked(evaluated_candidate.constraint, false);
+    if (!rebased.candidate.evaluation.accepted)
+    {
+        return rebased;
+    }
+    const Pose3d disagreement = between(
+        evaluated_candidate.latest_graph_correction,
+        rebased.candidate.latest_graph_correction);
+    if (disagreement.translation.norm() >
+            config_.loop_maximum_rebase_translation_m ||
+        disagreement.rotation.angularDistance(
+            Eigen::Quaterniond::Identity()) >
+            config_.loop_maximum_rebase_rotation_rad)
+    {
+        rebased.candidate.evaluation.accepted = false;
+        rebased.candidate.evaluation.reason =
+            "rebased_graph_correction_disagrees";
+        return rebased;
+    }
+    return evaluate_loop_locked(evaluated_candidate.constraint, true);
+}
+
+EvaluatedLoopCandidate FullSe3PoseGraph::evaluate_loop_locked(
+    const LoopConstraint &constraint, bool commit)
+{
     const auto started = std::chrono::steady_clock::now();
-    LoopEvaluation result;
+    EvaluatedLoopCandidate evaluated;
+    evaluated.candidate.constraint = constraint;
+    evaluated.candidate.base_graph_version = version_;
+    evaluated.candidate.base_loop_factor_count = loop_factor_count_;
+    LoopEvaluation &result = evaluated.candidate.evaluation;
+    result.source_id = constraint.to_id;
+    result.target_id = constraint.from_id;
     result.graph_version = version_;
 
     const auto reject = [&](const std::string &reason) {
@@ -176,7 +240,7 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started)
                 .count();
-        return result;
+        return evaluated;
     };
 
     if (constraint.from_id == constraint.to_id)
@@ -222,6 +286,11 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
         estimate_.at<gtsam::Pose3>(to_key), measurement);
     result.loop_translation_error_before = initial_residual.translation;
     result.loop_rotation_error_before_rad = initial_residual.rotation;
+    if (initial_residual.rotation <
+        config_.loop_minimum_initial_rotation_error_rad)
+    {
+        return reject("initial_loop_rotation_too_small");
+    }
     if (initial_residual.translation >
             config_.loop_maximum_initial_translation_error_m ||
         initial_residual.rotation > config_.loop_maximum_initial_rotation_error_rad)
@@ -301,6 +370,7 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
             from_key, to_key, measurement,
             gtsam::noiseModel::Gaussian::Covariance(covariance));
         const double loop_error_before = loop_factor.error(estimate_);
+        result.existing_graph_error_before = graph_.error(estimate_);
         candidate_graph.add(loop_factor);
         result.graph_error_before = candidate_graph.error(estimate_);
 
@@ -312,6 +382,7 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
                 candidate_graph, estimate_, parameters)
                 .optimize();
         result.graph_error_after = candidate_graph.error(candidate_estimate);
+        result.existing_graph_error_after = graph_.error(candidate_estimate);
 
         if (!std::isfinite(result.graph_error_before) ||
             !std::isfinite(result.graph_error_after) ||
@@ -346,12 +417,32 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
             }
             const ResidualMagnitude correction = relative_pose_residual(
                 before, after, gtsam::Pose3());
+            result.maximum_pose_correction_translation_m = std::max(
+                result.maximum_pose_correction_translation_m,
+                correction.translation);
+            result.maximum_pose_correction_rotation_rad = std::max(
+                result.maximum_pose_correction_rotation_rad,
+                correction.rotation);
+            const Eigen::Vector3d vertical = Eigen::Vector3d::UnitZ();
+            const Eigen::Vector3d gravity_before =
+                before.rotation().matrix().transpose() * vertical;
+            const Eigen::Vector3d gravity_after =
+                after.rotation().matrix().transpose() * vertical;
+            const double tilt_correction = std::acos(std::clamp(
+                gravity_before.dot(gravity_after), -1.0, 1.0));
+            result.maximum_pose_correction_tilt_rad = std::max(
+                result.maximum_pose_correction_tilt_rad, tilt_correction);
             if (correction.translation >
                     config_.loop_maximum_pose_correction_translation_m ||
                 correction.rotation >
                     config_.loop_maximum_pose_correction_rotation_rad)
             {
                 return reject("optimized_pose_correction_too_large");
+            }
+            if (tilt_correction >
+                config_.loop_maximum_pose_correction_tilt_rad)
+            {
+                return reject("optimized_pose_tilt_correction_too_large");
             }
         }
 
@@ -368,19 +459,49 @@ LoopEvaluation FullSe3PoseGraph::try_add_loop(const LoopConstraint &constraint)
             }
         }
 
-        graph_ = std::move(candidate_graph);
-        estimate_ = std::move(replacement_estimate);
-        isam_ = std::move(replacement);
-        ++loop_factor_count_;
-        ++version_;
+        evaluated.graph.version = version_ + 1;
+        evaluated.graph.node_count = keyframes_.size();
+        evaluated.graph.factor_count = candidate_graph.size();
+        evaluated.graph.loop_factor_count = loop_factor_count_ + 1;
+        evaluated.graph.ids.reserve(keyframes_.size());
+        evaluated.graph.timestamps.reserve(keyframes_.size());
+        evaluated.graph.raw_poses.reserve(keyframes_.size());
+        evaluated.graph.optimized_poses.reserve(keyframes_.size());
+        evaluated.graph.keyframes.reserve(keyframes_.size());
+        for (const Keyframe &keyframe : keyframes_)
+        {
+            evaluated.graph.ids.push_back(keyframe.id);
+            evaluated.graph.timestamps.push_back(keyframe.timestamp);
+            evaluated.graph.keyframes.push_back(keyframe);
+            evaluated.graph.raw_poses.push_back(keyframe.T_local_vehicle);
+            evaluated.graph.optimized_poses.push_back(from_gtsam(
+                replacement_estimate.at<gtsam::Pose3>(pose_key(keyframe.id))));
+        }
+        if (!keyframes_.empty())
+        {
+            evaluated.graph.latest_optimized_covariance_graph =
+                replacement.marginalCovariance(
+                    pose_key(keyframes_.back().id));
+            evaluated.candidate.latest_graph_correction = compose(
+                evaluated.graph.optimized_poses.back(),
+                inverse(evaluated.graph.raw_poses.back()));
+        }
+        if (commit)
+        {
+            graph_ = std::move(candidate_graph);
+            estimate_ = std::move(replacement_estimate);
+            isam_ = std::move(replacement);
+            ++loop_factor_count_;
+            ++version_;
+        }
         result.accepted = true;
-        result.reason = "accepted";
-        result.graph_version = version_;
+        result.reason = commit ? "committed" : "candidate_accepted";
+        result.graph_version = commit ? version_ : evaluated.graph.version;
         result.optimization_time_ms =
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started)
                 .count();
-        return result;
+        return evaluated;
     }
     catch (const std::exception &exception)
     {

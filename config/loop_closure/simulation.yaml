@@ -18,11 +18,15 @@ loop_closure:
     odometry_translation_variance_floor: 1.0e-4
     loop_minimum_keyframe_separation: 5
     loop_maximum_initial_translation_error_m: 10.0
+    loop_minimum_initial_rotation_error_deg: 0.0
     loop_maximum_initial_rotation_error_deg: 45.0
     loop_minimum_initial_nis: 1.0
     loop_maximum_initial_nis: 30.0
     loop_maximum_pose_correction_translation_m: 20.0
     loop_maximum_pose_correction_rotation_deg: 45.0
+    loop_maximum_pose_correction_tilt_deg: 3.0
+    loop_maximum_rebase_translation_m: 0.5
+    loop_maximum_rebase_rotation_deg: 5.0
 
   shadow_map:
     radius_m: 80.0
@@ -31,7 +35,7 @@ loop_closure:
 
   registration:
     maximum_iterations: 12
-    maximum_refresh_attempts: 4
+    maximum_refresh_attempts: 2
     minimum_effective_points: 30
     maximum_neighbor_distance_m: 2.25
     plane_fit_threshold_m: 0.12
@@ -42,6 +46,9 @@ loop_closure:
     maximum_information_condition: 1.0e10
     maximum_translation_m: 2.0
     maximum_rotation_deg: 15.0
+    protected_tilt_sigma_deg: 1.0
+    protected_vertical_sigma_m: 0.25
+    maximum_tilt_deg: 3.0
 
   std_detector:
     minimum_keyframe_separation: 20
@@ -65,10 +72,19 @@ loop_closure:
     ransac_vertex_threshold_m: 0.35
     geometric_overlap_distance_m: 0.35
     geometric_overlap_minimum: 0.20
+    loop_rotation_sigma_deg: 2.0
+    loop_translation_sigma_m: 0.5
+    loop_yaw_sigma_deg: 2.0
+    loop_roll_pitch_sigma_deg: 30.0
+    loop_xy_translation_sigma_m: 0.5
+    loop_z_translation_sigma_m: 5.0
+    maximum_gravity_disagreement_deg: 25.0
     refinement_iterations: 6
     required_consistent_detections: 2
     single_detection_overlap_minimum: 0.80
     accepted_loop_cooldown_s: 30.0
+    maximum_loops_per_revisit: 0
+    revisit_exit_distance_m: 0.0
     confirmation_translation_m: 1.0
     confirmation_rotation_deg: 10.0
     confirmation_target_id_tolerance: 5

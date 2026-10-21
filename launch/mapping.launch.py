@@ -3,7 +3,7 @@ import os.path
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition
 
@@ -23,6 +23,7 @@ def generate_launch_description():
     config_file = LaunchConfiguration('config_file')
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
+    loop_closure_enable = LaunchConfiguration('loop_closure_enable')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='true',
@@ -40,28 +41,46 @@ def generate_launch_description():
         'rviz_cfg', default_value=default_rviz_config_path,
         description='RViz config file path'
     )
+    declare_loop_closure_enable_cmd = DeclareLaunchArgument(
+        'loop_closure_enable', default_value='auto',
+        description=(
+            "Loop-closure override: 'true', 'false', or 'auto' to use the YAML")
+    )
 
-    fast_lio_node = Node(
-        package='fast_lio',
-        executable='fastlio_mapping',
-        parameters=[config_file,
-                    {'use_sim_time': use_sim_time}],
-        output='screen'
-    )
-    rviz_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        arguments=['-d', rviz_cfg],
-        condition=IfCondition(rviz_use)
-    )
+    def launch_nodes(context):
+        parameter_overrides = {
+            'use_sim_time': use_sim_time.perform(context).lower() in
+                            ('true', '1', 'yes', 'on')
+        }
+        loop_override = loop_closure_enable.perform(context).lower()
+        if loop_override not in ('auto', 'true', 'false'):
+            raise RuntimeError(
+                "loop_closure_enable must be 'auto', 'true', or 'false'")
+        if loop_override != 'auto':
+            parameter_overrides['loop_closure.enable'] = loop_override == 'true'
+
+        return [
+            Node(
+                package='fast_lio',
+                executable='fastlio_mapping',
+                parameters=[config_file.perform(context), parameter_overrides],
+                output='screen'
+            ),
+            Node(
+                package='rviz2',
+                executable='rviz2',
+                arguments=['-d', rviz_cfg],
+                condition=IfCondition(rviz_use)
+            )
+        ]
 
     ld = LaunchDescription()
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(decalre_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
+    ld.add_action(declare_loop_closure_enable_cmd)
 
-    ld.add_action(fast_lio_node)
-    ld.add_action(rviz_node)
+    ld.add_action(OpaqueFunction(function=launch_nodes))
 
     return ld

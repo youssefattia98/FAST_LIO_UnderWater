@@ -427,9 +427,11 @@ ShadowMapResult ShadowMapBuilder::build(const ShadowMapRequest &request) const
     const auto build_started = Clock::now();
     ShadowMapResult result;
     result.graph_version = request.graph.version;
+    result.graph_node_count = request.graph.node_count;
     result.graph_loop_factor_count = request.graph.loop_factor_count;
     result.source_tree_generation = request.source_tree_generation;
     result.shadow_tree_generation = request.graph.version;
+    result.transaction_id = request.transaction_id;
     try
     {
         const auto reconstruction_started = Clock::now();

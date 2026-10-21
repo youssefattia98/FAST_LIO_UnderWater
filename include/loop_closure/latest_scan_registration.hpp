@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 
@@ -37,6 +38,13 @@ struct RegistrationConfig
     double maximum_registration_translation_m = 2.0;
     double maximum_registration_rotation_rad =
         15.0 * 3.14159265358979323846 / 180.0;
+    // Softly anchor the graph-propagated gravity direction and depth while
+    // leaving horizontal translation and heading to scan registration.
+    double protected_tilt_sigma_rad =
+        1.0 * 3.14159265358979323846 / 180.0;
+    double protected_vertical_sigma_m = 0.25;
+    double maximum_registration_tilt_rad =
+        3.0 * 3.14159265358979323846 / 180.0;
 };
 
 struct RegistrationResult
@@ -57,6 +65,9 @@ struct RegistrationResult
     Matrix6d covariance = Matrix6d::Identity();
     Matrix6d graph_anchor_covariance_position_rotation = Matrix6d::Zero();
     std::size_t initial_effective_points = 0;
+    std::size_t raw_effective_points = 0;
+    double raw_residual_mean_m = 0.0;
+    double raw_residual_p95_m = 0.0;
     std::size_t final_effective_points = 0;
     double initial_residual_mean_m = 0.0;
     double initial_residual_p95_m = 0.0;
@@ -67,6 +78,13 @@ struct RegistrationResult
     int iterations = 0;
     double registration_time_ms = 0.0;
 };
+
+// Select by sensor time, not by the wall-clock instant at which the backend
+// worker happens to wake up.  This makes a loop transaction use the same scan
+// under different CPU/RViz loads.
+std::shared_ptr<const LatestScanSnapshot> first_registration_scan_after(
+    const std::deque<std::shared_ptr<const LatestScanSnapshot>> &history,
+    double source_timestamp);
 
 class LatestScanRegistrar
 {
