@@ -214,7 +214,9 @@ private:
 
     void mag_callback(const MagMsg::ConstSharedPtr msg);
 
-    // R_BM rotates the calibrated magnetometer-frame field into the IMU/body frame.
+    // The complete magnetometer pose is configured as p_M_B and R_BM. A
+    // magnetic-field message is a free vector, so only R_BM acts on its value;
+    // p_M_B remains available to position-dependent magnetic models.
     V3D mag_corrected(const MagMsg &msg) const;
 
     M3D mag_calibrated_covariance() const;
@@ -275,7 +277,14 @@ private:
     double mag_reference_heading_variance_ = 0.0;
     V3D dvl_T_ = V3D::Zero();
     M3D dvl_R_ = M3D::Identity();
+    // Pressure origin in body coordinates and pressure-frame-to-body rotation.
+    // Fluid pressure is a scalar, so the sensor orientation does not change
+    // the measurement; pressure_R_ completes the configured sensor pose.
     V3D pressure_T_ = V3D::Zero();
+    M3D pressure_R_ = M3D::Identity();
+    // Magnetometer origin in body coordinates. Translation does not act on a
+    // free magnetic-field vector in the spatially uniform heading model.
+    V3D mag_T_ = V3D::Zero();
     M3D mag_R_BM_ = M3D::Identity();
     V3D mag_hard_iron_ = V3D::Zero();
     M3D mag_soft_iron_ = M3D::Identity();

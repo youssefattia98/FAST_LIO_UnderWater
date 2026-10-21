@@ -11,6 +11,7 @@ void AuxiliarySensorFusion::declare_parameters(rclcpp::Node &node)
     node.declare_parameter<bool>("pressure.enable", false);
     node.declare_parameter<std::string>("pressure.topic", "/auv/pressure/scaled2");
     node.declare_parameter<std::vector<double>>("pressure.translation", {-0.24219, -0.03954, 0.01898});
+    node.declare_parameter<std::vector<double>>("pressure.rotation", {0.0, 0.0, 0.0});
     node.declare_parameter<double>("pressure.frequency", 4.0);
 
     node.declare_parameter<double>("dvl.covariance", 4e-4);
@@ -21,6 +22,7 @@ void AuxiliarySensorFusion::declare_parameters(rclcpp::Node &node)
 
     node.declare_parameter<bool>("magnetometer.enable", false);
     node.declare_parameter<std::string>("magnetometer.topic", "/auv/imu/magnetic_field");
+    node.declare_parameter<std::vector<double>>("magnetometer.translation", {0.0, 0.0, 0.0});
     node.declare_parameter<std::vector<double>>("magnetometer.rotation", {0.0, 0.0, 0.0});
     node.declare_parameter<std::vector<double>>("magnetometer.hard_iron_offset", {0.0, 0.0, 0.0});
     node.declare_parameter<std::vector<double>>(
@@ -53,9 +55,11 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
     std::vector<double> dvl_T;
     std::vector<double> dvl_R;
     std::vector<double> pressure_T;
+    std::vector<double> pressure_R;
     node.get_parameter_or<std::vector<double>>("dvl.translation", dvl_T, {-0.079, -0.09691, -0.25938});
     node.get_parameter_or<std::vector<double>>("dvl.rotation", dvl_R, {0.0, 0.0, 0.0});
     node.get_parameter_or<std::vector<double>>("pressure.translation", pressure_T, {-0.24219, -0.03954, 0.01898});
+    node.get_parameter_or<std::vector<double>>("pressure.rotation", pressure_R, {0.0, 0.0, 0.0});
 
     if (dvl_T.size() == 3)
     {
@@ -78,6 +82,7 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
         RCLCPP_WARN(node.get_logger(), "pressure.translation must have 3 values. Using zero translation.");
         pressure_T_.setZero();
     }
+    pressure_R_ = uwfl2::rotation_from_rpy_degrees(pressure_R);
 
     node.get_parameter_or<bool>("magnetometer.enable", mag_enable_, false);
     node.get_parameter_or<std::string>("magnetometer.topic", mag_topic_, "/auv/imu/magnetic_field");
@@ -89,8 +94,9 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
                     "magnetometer.frequency must be positive. Using 4 Hz.");
     mag_timeout_ = uwfl2::timeout_from_frequency(mag_frequency, 4.0);
 
-    std::vector<double> mag_rotation, hard_iron, soft_iron_diagonal,
+    std::vector<double> mag_translation, mag_rotation, hard_iron, soft_iron_diagonal,
         soft_iron_matrix;
+    node.get_parameter_or<std::vector<double>>("magnetometer.translation", mag_translation, {0.0, 0.0, 0.0});
     node.get_parameter_or<std::vector<double>>("magnetometer.rotation", mag_rotation, {0.0, 0.0, 0.0});
     node.get_parameter_or<std::vector<double>>("magnetometer.hard_iron_offset", hard_iron, {0., 0., 0.});
     node.get_parameter_or<std::vector<double>>("magnetometer.soft_iron",
@@ -99,6 +105,16 @@ void AuxiliarySensorFusion::load_parameters(rclcpp::Node &node)
         soft_iron_matrix,
         {1., 0., 0.,  0., 1., 0.,  0., 0., 1.});
 
+    if (mag_translation.size() == 3)
+    {
+        mag_T_ << mag_translation[0], mag_translation[1], mag_translation[2];
+    }
+    else
+    {
+        RCLCPP_WARN(node.get_logger(),
+                    "magnetometer.translation must have 3 values. Using zero translation.");
+        mag_T_.setZero();
+    }
     mag_R_BM_ = uwfl2::rotation_from_rpy_degrees(mag_rotation);
 
     if (hard_iron.size() == 3)
@@ -536,9 +552,11 @@ Eigen::RowVector3d AuxiliarySensorFusion::world_z_axis_in_camera_init() const
 
 double AuxiliarySensorFusion::pressure_sensor_z_world(const state_ikfom &state) const
 {
-    V3D pressure_offset_ci = V3D::Zero();
-    pressure_offset_ci.z() = pressure_T_.z();
-    const V3D sensor_ci = state.pos + pressure_offset_ci;
+    // pressure_T_ is the pressure-sensor origin expressed in the IMU/body
+    // frame. Rotate the complete lever arm into camera_init; using only its
+    // z component made the configured x/y offsets and vehicle attitude inert.
+    const V3D sensor_ci =
+        state.pos + state.rot.toRotationMatrix() * pressure_T_;
     return camera_init_T_in_world_.z() + world_z_axis_in_camera_init().dot(sensor_ci);
 }
 
@@ -631,7 +649,13 @@ bool AuxiliarySensorFusion::apply_pressure_update(const PressureMsg &msg, Ekf &k
     Eigen::MatrixXd H = Eigen::MatrixXd::Zero(1, state_ikfom::DOF);
     // Pressure measures World-z depth, but it must not correct horizontal
     // x/y. Use the World-z prediction and let the EKF correct only local depth.
-    H(0, 2) = -pressure_scale(state) * world_z_axis_in_camera_init().z();
+    const double scale = pressure_scale(state);
+    const Eigen::RowVector3d world_z_ci = world_z_axis_in_camera_init();
+    const M3D R_CI_B = state.rot.toRotationMatrix();
+    H.block<1, 3>(0, 0) = -scale * world_z_ci;
+    // IKFoM uses the right perturbation R_true = R Exp(dtheta^).
+    H.block<1, 3>(0, 3) =
+        scale * world_z_ci * R_CI_B * underwater_fastlio::dvl::skew(pressure_T_);
     H(0, 26) = 1.0;
 
     Eigen::MatrixXd R = Eigen::MatrixXd::Zero(1, 1);
