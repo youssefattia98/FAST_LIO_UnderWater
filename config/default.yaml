@@ -3,14 +3,14 @@
     sonar:
       topic: /sonar_point_cloud
       frequency: 4.0
-      translation: [0.022000, -0.046000, -0.003000] # m
-      rotation: [0.0, 0.0, 0.0] # RPY degrees
+      translation: [0.09382, -0.02148, 0.11593] # m
+      rotation: [0.0, 6.0, 0.0] # RPY degrees
       max_range: 15.0
       min_range: 0.2
       xy_covariance: 0.2231011450761961
       z_covariance: 0.2231011450761961
     imu:
-      topic: /sonar/imu/data_raw 
+      topic: /auv/imu/data_raw
       frequency: 200.0
       init_gravity_covariance: 1.0e-05
       init_position_covariance: 1.0e-06
@@ -33,41 +33,44 @@
     dvl:
       enable: true
       topic: /auv/dvl
-      frequency: 15.0
-      translation: [-0.125198, 0.115480, -0.251055] # m
-      rotation: [0.0, -6.0, 0.0] # RPY degrees
+      frequency: 2.0
+      translation: [-0.0785, 0.14, -0.11538] # m
+      rotation: [0.0, 0.0, 0.0] # RPY degrees
       covariance: 0.01
       init_covariance: 1.0e-09
     pressure:
       enable: true
       topic: /auv/pressure/scaled2
       frequency: 4.0
-      translation: [-0.302035, -0.064060, -0.134542] # m
-      rotation: [0.0, -6.0, 0.0] # RPY degrees
+      translation: [-0.24219, -0.03954, 0.01898] # m
+      rotation: [0.0, 0.0, 0.0] # RPY degrees
       fluid_density: 1025.0
       covariance: 40652.529
       init_covariance: 10000.0
     magnetometer:
-      enable: false
+      enable: true
       topic: /auv/imu/magnetic_field
-      frequency: 150.0
+      frequency: 200.0
       translation: [-0.059188, -0.024520, -0.128102] # m
       rotation: [0.0, -6.0, 0.0] # RPY degrees
-      hard_iron_offset: [119.84, -49.82, 6.39]
-      soft_iron: [-1.022, -1.022, -1.0]
+      hard_iron_offset:  [-1.26113560251e-05, 1.61640788381e-05, -1.37514954452e-05]
+      soft_iron: [-1.00976283015,  0.978797287047, 1.02846822662]
+
+      # hard_iron_offset: [119.84, -49.82, 6.39]
+      # soft_iron: [-1.022, -1.022, -1.0]
       covariance: 3200.0
     mapping:
       max_iteration: 4
-      filter_size_surf: 0.3
-      filter_size_map: 0.3
+      filter_size_surf: 0.15
+      filter_size_map: 0.15
       cube_side_length: 100.0
       world_frame: World
       map_file_path: ./test.pcd
     publish:
       corrected_map_enable: true
       corrected_map_topic: /uwfl2/corrected_map
-      corrected_map_point_size: 0.03 # Sphere diameter in metres
-      corrected_map_voxel_size: 0.15 # Display-only point spacing in metres
+      corrected_map_point_size: 0.005 # Sphere diameter in metres
+      corrected_map_voxel_size: 0.001 # Display-only point spacing in metres
     loop_closure:
       enable: true
       profile: balanced

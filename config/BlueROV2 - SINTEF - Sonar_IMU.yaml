@@ -11,7 +11,7 @@
       z_covariance: 0.2231011450761961
     imu:
       topic: /sonar/imu/data_raw 
-      frequency: 200.0
+      frequency: 100.0
       init_gravity_covariance: 1.0e-05
       init_position_covariance: 1.0e-06
       init_attitude_covariance: 1.0e-06
@@ -48,7 +48,7 @@
       covariance: 40652.529
       init_covariance: 10000.0
     magnetometer:
-      enable: false
+      enable: true
       topic: /auv/imu/magnetic_field
       frequency: 150.0
       translation: [-0.059188, -0.024520, -0.128102] # m
@@ -58,16 +58,16 @@
       covariance: 3200.0
     mapping:
       max_iteration: 4
-      filter_size_surf: 0.3
-      filter_size_map: 0.3
+      filter_size_surf: 0.15
+      filter_size_map: 0.15
       cube_side_length: 100.0
       world_frame: World
       map_file_path: ./test.pcd
     publish:
       corrected_map_enable: true
       corrected_map_topic: /uwfl2/corrected_map
-      corrected_map_point_size: 0.03 # Sphere diameter in metres
-      corrected_map_voxel_size: 0.15 # Display-only point spacing in metres
+      corrected_map_point_size: 0.005 # Sphere diameter in metres
+      corrected_map_voxel_size: 0.001 # Display-only point spacing in metres
     loop_closure:
-      enable: true
+      enable: false
       profile: balanced

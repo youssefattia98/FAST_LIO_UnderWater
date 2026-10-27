@@ -26,7 +26,7 @@ def generate_launch_description():
     loop_closure_enable = LaunchConfiguration('loop_closure_enable')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
-        'use_sim_time', default_value='true',
+        'use_sim_time', default_value='false',
         description='Use simulation (Gazebo) clock if true'
     )
     decalre_config_file_cmd = DeclareLaunchArgument(
